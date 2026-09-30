@@ -69,6 +69,18 @@
             :when (seq problems)]
         {:channel id, :node node, :peer peer, :problems problems}))))
 
+(defn channel-summary
+  "Counts channel ends in the final read: ready with nothing pending, ready but still
+  holding TLCs after the quiet period (wedged), and no longer ready (closed or shutting
+  down, e.g. force-closed by a node)."
+  [channels-by-node]
+  (frequencies
+    (for [[_node channels] channels-by-node
+          ch               channels]
+      (cond (not= "channelready" (state-name ch)) :not-ready
+            (seq (:pending_tlcs ch))              :ready-with-pending-tlcs
+            :else                                 :ready-clean))))
+
 (defn checker
   []
   (reify checker/Checker
@@ -97,6 +109,7 @@
                 probe-bad  (vec (remove #(or (= "Success" (:status %)) (no-funds? %)) probe))]
             {:valid?              (and (empty? channels) (empty? unfinished) (empty? flipped)
                                        (empty? probe-bad))
+             :channel-summary     (channel-summary (:channels read))
              :payments            (count (:payments read))
              :payments-ok         (count client-ok)
              :channel-problems    channels

@@ -49,6 +49,11 @@ FNN_BIN=/path/to/fiber/target/release/fnn FIBER_SNAP=/path/to/a/clean/fiber/chec
 # each run starts from a fresh devnet
 scripts/run.sh --time-limit 60 --faults kill
 scripts/run.sh --time-limit 300 --faults kill,pause,partition --rate 10
+
+# several runs, one summary line each: verdict, post-heal probe, channel states, store directory
+scripts/repeat.sh 4 --time-limit 60 --faults kill --kill-targets all --rate 20 --nemesis-interval 8 --quiesce 60
 ```
 
-Results, including node logs and a timeline, are written to `store/`.
+Results, including node logs and a timeline, are written to `store/`. To test another fnn build, copy it over `docker/build/bin/fnn`; `run.sh` rebuilds the node image.
+
+`scripts/stall_report.py store/<test>/<run> ...` lists, for each channel with a problem, whether it is stalled on an unbalanced revocation nonce ledger ([#1561](https://github.com/nervosnetwork/fiber/issues/1561)), closed, or fine but still holding TLCs. It needs channel debug logs: add `--log-level 'info,fnn::fiber::channel=debug'` to the run.

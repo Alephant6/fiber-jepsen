@@ -8,10 +8,14 @@ for i in $(seq 1 "$runs"); do
   log="$(mktemp)"
   bash "$here/run.sh" "$@" >"$log" 2>&1
   verdict="$(grep -oE 'Everything looks good|Analysis invalid|Errors occurred during analysis|Jepsen broke' "$log" | tail -1)"
-  stuck="$(grep -c ':status "Inflight"\|:status "Created"' "$log")"
-  tlcs="$(grep -c ':pending-tlcs' "$log")"
+  stuck="$(grep -oE ':status "(Inflight|Created)"' "$log" | wc -l)"
+  tlcs="$(grep -o ':pending-tlcs' "$log" | wc -l)"
   if grep -q ':probe-failures \[\]' "$log"; then probe="ok"; else probe="FAILED"; fi
+  # pprint may put the map on the line after its key.
+  summary="$(tr '\n' ' ' <"$log" | grep -oE ':channel-summary +\{[^}]*\}' | tail -1 | tr -s ' ')"
+  store="$(readlink "$here/../store/latest" 2>/dev/null)"
   echo "run $i/$runs: ${verdict:-no verdict}; unfinished payments: $stuck;" \
-       "channel ends with pending TLCs: $tlcs; post-heal probe: $probe"
+       "channel ends with pending TLCs: $tlcs; post-heal probe: $probe; ${summary:-no summary};" \
+       "store: ${store:-unknown}"
   rm -f "$log"
 done
