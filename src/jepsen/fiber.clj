@@ -76,6 +76,7 @@
                                     (gen/nemesis (:final-generator pkg))
                                     (gen/log "Waiting for the network to converge")
                                     (gen/sleep (:quiesce opts))
+                                    (gen/clients (gen/once {:f :probe}))
                                     (gen/clients (gen/once {:f :read})))})))
 
 (def cli-opts

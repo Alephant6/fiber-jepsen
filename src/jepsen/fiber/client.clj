@@ -4,7 +4,8 @@
   (:require [clojure.tools.logging :refer [warn]]
             [jepsen [client :as client]
                     [util :refer [await-fn]]]
-            [jepsen.fiber.rpc :as rpc])
+            [jepsen.fiber [rpc :as rpc]
+                          [topology :as topology]])
   (:import (java.net ConnectException)))
 
 (def terminal-statuses #{"Success" "Failed"})
@@ -63,6 +64,26 @@
             "Failed"  (assoc op :type :fail, :value value, :error (:failed_error final))
             (assoc op :type :info, :value value, :error [:not-finished (:status final)])))))))
 
+(defn probe!
+  "After the network has healed, sends one small keysend each way over every
+  channel. A healthy network completes them; a wedged channel leaves them stuck."
+  [test]
+  (vec (for [[a b]     (topology/edges (:nodes test))
+             [from to] [[a b] [b a]]]
+         (let [res (try (rpc/call from "send_payment"
+                                  {:target_pubkey (get @(:pubkeys test) to)
+                                   :amount        (rpc/int->hex 1000000)
+                                   :keysend       true})
+                        (catch Exception e {::rejected (ex-message e)}))]
+           (if-let [err (::rejected res)]
+             {:from from, :to to, :status "Rejected", :error err}
+             (let [final (await-payment from (:payment_hash res))]
+               {:from   from
+                :to     to
+                :hash   (:payment_hash res)
+                :status (:status final)
+                :error  (:failed_error final)}))))))
+
 (defn read-node
   "Every channel of one node. Retries while the node recovers from faults."
   [node]
@@ -92,8 +113,9 @@
 
   (invoke! [_ test op]
     (case (:f op)
-      :pay  (pay! test node op)
-      :read (assoc op :type :ok, :value (read-all test))))
+      :pay   (pay! test node op)
+      :probe (assoc op :type :ok, :value (probe! test))
+      :read  (assoc op :type :ok, :value (read-all test))))
 
   (teardown! [_ _test])
 

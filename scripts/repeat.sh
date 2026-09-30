@@ -10,6 +10,8 @@ for i in $(seq 1 "$runs"); do
   verdict="$(grep -oE 'Everything looks good|Analysis invalid|Errors occurred during analysis|Jepsen broke' "$log" | tail -1)"
   stuck="$(grep -c ':status "Inflight"\|:status "Created"' "$log")"
   tlcs="$(grep -c ':pending-tlcs' "$log")"
-  echo "run $i/$runs: ${verdict:-no verdict}; unfinished payments: $stuck; channel ends with pending TLCs: $tlcs"
+  if grep -q ':probe-failures \[\]' "$log"; then probe="ok"; else probe="FAILED"; fi
+  echo "run $i/$runs: ${verdict:-no verdict}; unfinished payments: $stuck;" \
+       "channel ends with pending TLCs: $tlcs; post-heal probe: $probe"
   rm -f "$log"
 done

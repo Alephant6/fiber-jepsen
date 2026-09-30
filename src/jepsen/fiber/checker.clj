@@ -8,7 +8,9 @@
   - each channel's total (local + remote) equals its total at the start of the
     test: payments move money within a channel, they never create or destroy it;
   - every payment reached Success or Failed;
-  - no payment the client saw succeed later reports a different status."
+  - no payment the client saw succeed later reports a different status;
+  - a fresh payment each way over every channel (the probe) succeeds: the
+    network can still move money once faults are gone."
   (:require [clojure.string :as str]
             [jepsen.checker :as checker]
             [jepsen.fiber.rpc :as rpc]))
@@ -85,10 +87,19 @@
                                 (map #(get-in % [:value :hash])))
                 flipped    (vec (for [h client-ok
                                       :when (not= "Success" (statuses h))]
-                                  {:hash h, :final-status (statuses h)}))]
-            {:valid?              (and (empty? channels) (empty? unfinished) (empty? flipped))
+                                  {:hash h, :final-status (statuses h)}))
+                probe      (->> history
+                                (filter #(and (= :ok (:type %)) (= :probe (:f %))))
+                                last
+                                :value)
+                ; A direction whose sender has spent its balance can't pay, which isn't a fault.
+                no-funds?  #(some-> (:error %) (str/includes? "Insufficient balance"))
+                probe-bad  (vec (remove #(or (= "Success" (:status %)) (no-funds? %)) probe))]
+            {:valid?              (and (empty? channels) (empty? unfinished) (empty? flipped)
+                                       (empty? probe-bad))
              :payments            (count (:payments read))
              :payments-ok         (count client-ok)
              :channel-problems    channels
              :unfinished-payments unfinished
-             :success-flipped     flipped}))))))
+             :success-flipped     flipped
+             :probe-failures      probe-bad}))))))
