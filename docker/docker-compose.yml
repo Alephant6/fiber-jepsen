@@ -1,0 +1,60 @@
+# A CKB devnet, three fnn nodes and a Jepsen control node on one private network.
+# Build the artefacts first with scripts/make-snapshot.sh, then use scripts/run.sh.
+name: fiber-jepsen
+
+x-fnn-node: &fnn-node
+  build:
+    context: .
+    dockerfile: node/Dockerfile
+  image: fiber-jepsen-node
+  # iptables for partitions
+  cap_add: [NET_ADMIN]
+
+services:
+  chain:
+    build:
+      context: .
+      dockerfile: chain/Dockerfile
+    image: fiber-jepsen-chain
+    hostname: chain
+    networks:
+      fibernet: {ipv4_address: 10.77.0.10}
+
+  n1:
+    <<: *fnn-node
+    hostname: n1
+    networks:
+      fibernet: {ipv4_address: 10.77.0.11}
+
+  n2:
+    <<: *fnn-node
+    hostname: n2
+    networks:
+      fibernet: {ipv4_address: 10.77.0.12}
+
+  n3:
+    <<: *fnn-node
+    hostname: n3
+    networks:
+      fibernet: {ipv4_address: 10.77.0.13}
+
+  control:
+    build:
+      context: .
+      dockerfile: control/Dockerfile
+    image: fiber-jepsen-control
+    hostname: control
+    volumes:
+      - ..:/jepsen
+      - m2:/root/.m2
+    networks:
+      fibernet: {ipv4_address: 10.77.0.5}
+
+volumes:
+  m2: {}
+
+networks:
+  fibernet:
+    ipam:
+      config:
+        - subnet: 10.77.0.0/24

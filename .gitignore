@@ -1,0 +1,7 @@
+# Built by scripts/make-snapshot.sh: binaries, devnet data, test keys
+/docker/build/
+# Jepsen test results
+/store/
+/target/
+/.lein-*
+/.nrepl-port

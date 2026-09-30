@@ -1,2 +1,54 @@
 # fiber-jepsen
-Jepsen tests for Nervos Fiber: fault injection (kill, pause, partition, clock skew) and invariant checking for payment channels
+
+[Jepsen](https://github.com/jepsen-io/jepsen) tests for [Fiber](https://github.com/nervosnetwork/fiber), the payment channel network on Nervos CKB.
+
+Fiber's unit tests drive nodes in-process, and its integration tests replay scripted scenarios. This suite does something different. It runs real `fnn` binaries on separate hosts and sends concurrent payments through them while injecting faults: crashes, pauses and network partitions. It then checks invariants over the final state of every node.
+
+**Status: early work in progress.** The first milestone is one end-to-end run (payments, `kill -9`, invariant check) against a CKB devnet.
+
+## What it checks
+
+After all faults are healed and the network has had time to converge:
+
+- every channel opened during setup is still `ChannelReady`, with no pending TLCs;
+- both ends of a channel agree on its balances (A's local balance equals B's remote balance);
+- no channel's total (local + remote + in-flight TLCs) changed: payments move money within a channel, they never create or destroy it;
+- every payment reached `Success` or `Failed`;
+- no payment the client saw succeed reports a different status later.
+
+## Faults
+
+| Fault | How |
+|---|---|
+| `kill` | `SIGKILL` on one node or all nodes, then restart. A crash can land in the middle of a write. |
+| `pause` | `SIGSTOP` / `SIGCONT` on one node. The peer stays connected but gets no replies. |
+| `partition` | iptables drops traffic between one node and the others. |
+
+Planned: **clock skew**. Fiber expires TLCs by wall-clock timestamp (off-chain checks use each node's local clock; on-chain claims use timestamp `since`), rather than by block height as in Lightning. Jepsen's built-in clock nemesis changes the host clock, which Docker containers share, so skew will be injected per process with libfaketime.
+
+## Layout
+
+- `docker/`: a CKB devnet (`chain`), three fnn nodes (`n1`–`n3`) and the Jepsen control node, on a private network `10.77.0.0/24`.
+- `scripts/make-snapshot.sh`: creates the devnet with Fiber's own `tests/deploy/init-dev-chain.sh` (funded wallets, contracts, UDT), then stages it with the binaries into `docker/build/`. Every test starts from this snapshot.
+- `src/jepsen/fiber/`:
+  - `db.clj` (process lifecycle)
+  - `topology.clj` (opens channels n1 - n2 - n3)
+  - `client.clj` (keysend payments, final read)
+  - `checker.clj` (invariants)
+
+## Running
+
+On Linux or WSL2, with Docker, a Fiber checkout, ckb 0.202.0 and ckb-cli in `PATH`:
+
+```bash
+# once: build fnn and the devnet snapshot
+cargo build --release -p fiber-bin          # in your Fiber checkout
+FNN_BIN=/path/to/fiber/target/release/fnn FIBER_SNAP=/path/to/a/clean/fiber/checkout \
+  scripts/make-snapshot.sh
+
+# each run starts from a fresh devnet
+scripts/run.sh --time-limit 60 --faults kill
+scripts/run.sh --time-limit 300 --faults kill,pause,partition --rate 10
+```
+
+Results, including node logs and a timeline, are written to `store/`.
