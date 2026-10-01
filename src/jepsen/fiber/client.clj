@@ -69,17 +69,19 @@
   channel. A healthy network completes them; a wedged channel leaves them stuck."
   [test]
   (vec (for [[a b]     (topology/edges (:nodes test))
-             [from to] [[a b] [b a]]]
+             [from to] [[a b] [b a]]
+             :let      [amount 1000000]]
          (let [res (try (rpc/call from "send_payment"
                                   {:target_pubkey (get @(:pubkeys test) to)
-                                   :amount        (rpc/int->hex 1000000)
+                                   :amount        (rpc/int->hex amount)
                                    :keysend       true})
                         (catch Exception e {::rejected (ex-message e)}))]
            (if-let [err (::rejected res)]
-             {:from from, :to to, :status "Rejected", :error err}
+             {:from from, :to to, :amount amount, :status "Rejected", :error err}
              (let [final (await-payment from (:payment_hash res))]
                {:from   from
                 :to     to
+                :amount amount
                 :hash   (:payment_hash res)
                 :status (:status final)
                 :error  (:failed_error final)}))))))

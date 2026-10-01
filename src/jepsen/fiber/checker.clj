@@ -10,7 +10,9 @@
   - every payment reached Success or Failed;
   - no payment the client saw succeed later reports a different status;
   - a fresh payment each way over every channel (the probe) succeeds: the
-    network can still move money once faults are gone."
+    network can still move money once faults are gone. A direction is excused
+    only if the final read shows its sender's balance on that channel below the
+    probe amount."
   (:require [clojure.string :as str]
             [jepsen.checker :as checker]
             [jepsen.fiber.rpc :as rpc]))
@@ -22,6 +24,13 @@
 (defn amount
   [channel k]
   (or (rpc/hex->int (get channel k)) 0))
+
+(defn sender-balance
+  "The sender's local balance on its channel with `to` in the final read, or nil."
+  [channels-by-node from to]
+  (let [peer-channel? (set (map :channel_id (get channels-by-node to)))]
+    (some-> (first (filter #(peer-channel? (:channel_id %)) (get channels-by-node from)))
+            (amount :local_balance))))
 
 (defn total
   "Fiber only moves an in-flight TLC's amount out of local_balance when the TLC
@@ -103,9 +112,16 @@
                 probe      (->> history
                                 (filter #(and (= :ok (:type %)) (= :probe (:f %))))
                                 last
-                                :value)
+                                :value
+                                (mapv #(assoc % :sender-balance
+                                              (sender-balance (:channels read) (:from %) (:to %)))))
                 ; A direction whose sender has spent its balance can't pay, which isn't a fault.
-                no-funds?  #(some-> (:error %) (str/includes? "Insufficient balance"))
+                ; But Fiber's router reports the same "Insufficient balance" error, with liquidity
+                ; 0, for a channel it can't use at all (offline, closed or stalled), so the error
+                ; alone proves nothing: the sender's balance must also be below the probe amount.
+                ; Histories recorded before probes carried :amount used 1000000.
+                no-funds?  #(and (some-> (:error %) (str/includes? "Insufficient balance"))
+                                 (some-> (:sender-balance %) (< (or (:amount %) 1000000))))
                 probe-bad  (vec (remove #(or (= "Success" (:status %)) (no-funds? %)) probe))]
             {:valid?              (and (empty? channels) (empty? unfinished) (empty? flipped)
                                        (empty? probe-bad))
