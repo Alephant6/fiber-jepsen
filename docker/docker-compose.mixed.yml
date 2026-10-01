@@ -1,0 +1,7 @@
+# Runs n1 with a different fnn binary than n2 and n3, for mixed-version tests.
+# Put the binary at docker/build/bin/fnn-n1 (the others use docker/build/bin/fnn) and run
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.mixed.yml scripts/run.sh ...
+services:
+  n1:
+    volumes:
+      - ./build/bin/fnn-n1:/usr/local/bin/fnn:ro
