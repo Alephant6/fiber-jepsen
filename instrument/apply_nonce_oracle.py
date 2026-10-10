@@ -27,6 +27,7 @@ Build:
     cargo build --release --locked -p fiber-bin --features fnn/nonce-oracle
 """
 import pathlib
+import re
 import shutil
 import sys
 
@@ -135,7 +136,8 @@ edits = {
             local_secnonce,
 """,
         ),
-        # V1 reestablishment (coverage).
+        # V1 ReestablishChannel handled outside reconnection (coverage; the reconnect arm is
+        # hooked below).
         (
             """            FiberChannelMessage::ReestablishChannel(ref reestablish_channel) => {
                 let pending_commit_diff = self.store.get_pending_commit_diff(&state.get_id());
@@ -258,6 +260,18 @@ for rel, pairs in edits.items():
             sys.exit(f"{rel}: expected 1 match, found {count}:\n{old}")
         text = text.replace(old, new)
     new_texts[path] = text
+
+# V1 reestablishment on reconnect: the ReestablishChannel arm taken while the channel is
+# reestablishing. Its indentation differs between versions, so match the comment line.
+path = root / "crates/fiber-lib/src/fiber/channel.rs"
+anchor = re.compile(r"^([ \t]*)// before processing theirs so neither side is left waiting\.\n", re.M)
+matches = anchor.findall(new_texts[path])
+if len(matches) != 1:
+    sys.exit(f"channel.rs: expected 1 reestablish-on-reconnect arm, found {len(matches)}")
+new_texts[path] = anchor.sub(
+    lambda m: f"{m.group(0)}{m.group(1)}{CFG}\n{m.group(1)}{ORACLE}::reestablish(state.get_id().as_ref(), 1);\n",
+    new_texts[path],
+)
 
 target = root / "crates/fiber-lib/src/fiber/nonce_oracle.rs"
 if target.exists():
