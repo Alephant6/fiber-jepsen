@@ -25,6 +25,7 @@ With `--nonce-check` and an instrumented fnn, it also checks that no MuSig2 nonc
 | `kill` | `SIGKILL` on one node or all nodes, then restart. A crash can land in the middle of a write. |
 | `pause` | `SIGSTOP` / `SIGCONT` on one node. The peer stays connected but gets no replies. |
 | `partition` | iptables drops traffic between one node and the others. |
+| `disconnect` | `disconnect_peer` over RPC closes the connection between two neighbours; a later `connect_peer` reconnects them. Channels reestablish while both processes keep running, which a partition rarely causes (TCP keeps the connection and retransmits). |
 
 Planned: **clock skew**. Fiber expires TLCs by wall-clock timestamp (off-chain checks use each node's local clock; on-chain claims use timestamp `since`), rather than by block height as in Lightning. Jepsen's built-in clock nemesis changes the host clock, which Docker containers share, so skew will be injected per process with libfaketime.
 
@@ -38,6 +39,7 @@ Planned: **clock skew**. Fiber expires TLCs by wall-clock timestamp (off-chain c
   - `client.clj` (keysend payments, final read)
   - `checker.clj` (invariants)
   - `nonce.clj` (MuSig2 nonce reuse, with `--nonce-check`)
+  - `nemesis.clj` (the `disconnect` fault)
 - `instrument/`: the logging-only fnn instrumentation the nonce check needs.
 
 ## Running

@@ -13,14 +13,16 @@
             [jepsen.fiber [checker :as fiber-checker]
                           [client :as client]
                           [db :as db]
+                          [nemesis :as fiber-nemesis]
                           [nonce :as nonce]])
   (:gen-class))
 
 (def supported-faults
   "Faults this suite can inject. Jepsen's :clock fault changes the host clock,
   which Docker containers share, so clock skew needs a per-process approach
-  (libfaketime) instead."
-  #{:kill :pause :partition})
+  (libfaketime) instead. :disconnect closes a p2p connection over RPC and
+  reconnects it later, so channels reestablish without a restart."
+  #{:kill :pause :partition :disconnect})
 
 (defn pay-op
   "A payment of 0.01-0.2 CKB. The client picks the destination."
@@ -43,7 +45,8 @@
     (nc/compose-packages
       (cond-> []
         (faults :partition)             (conj (nc/partition-package popts))
-        (some faults [:kill :pause])    (conj (nc/db-package popts))))))
+        (some faults [:kill :pause])    (conj (nc/db-package popts))
+        (faults :disconnect)            (conj (fiber-nemesis/disconnect-package popts))))))
 
 (defn fiber-test
   [opts]
@@ -82,7 +85,7 @@
                                     (gen/clients (gen/once {:f :read})))})))
 
 (def cli-opts
-  [[nil "--faults FAULTS" "Comma-separated faults to inject: kill, pause, partition."
+  [[nil "--faults FAULTS" "Comma-separated faults to inject: kill, pause, partition, disconnect."
     :default  [:kill]
     :parse-fn (fn [s] (mapv keyword (str/split s #",")))
     :validate [#(every? supported-faults %) (str "Must be a subset of " supported-faults)]]
