@@ -13,9 +13,11 @@ for i in $(seq 1 "$runs"); do
   if grep -q ':probe-failures \[\]' "$log"; then probe="ok"; else probe="FAILED"; fi
   # pprint may put the map on the line after its key.
   summary="$(tr '\n' ' ' <"$log" | grep -oE ':channel-summary +\{[^}]*\}' | tail -1 | tr -s ' ')"
+  # Only with --nonce-check: nonces whose partial signatures left a node in two contexts.
+  nonce="$(tr '\n' ' ' <"$log" | grep -oE ':nonce-violations +[0-9]+' | tail -1 | grep -oE '[0-9]+$')"
   store="$(readlink "$here/../store/latest" 2>/dev/null)"
   echo "run $i/$runs: ${verdict:-no verdict}; unfinished payments: $stuck;" \
        "channel ends with pending TLCs: $tlcs; post-heal probe: $probe; ${summary:-no summary};" \
-       "store: ${store:-unknown}"
+       "nonce violations: ${nonce:--}; store: ${store:-unknown}"
   rm -f "$log"
 done

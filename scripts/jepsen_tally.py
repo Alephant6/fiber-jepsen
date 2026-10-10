@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Tallies Jepsen runs listed in a repeat.sh log: verdict, channel classes, completions, bad signatures.
+"""Tallies Jepsen runs listed in a repeat.sh log: verdict, channel classes, completions, bad signatures,
+and nonce violations (runs with nonce-oracle.log files; "-" when a batch has none).
    jepsen_tally.py <repeat-log> <store-root>
 """
 import re, sys, subprocess, pathlib, collections
@@ -17,10 +18,13 @@ for line in open(log, errors="replace"):
     if m and label:
         batches[label].append((m.group(1), m.group(6), m.group(3)))
 here = pathlib.Path(__file__).parent
-print("%-34s %4s %6s %8s %8s %6s %7s %8s %8s" % ("batch", "runs", "passed", "stalled", "closed", "leftTLC", "reply+", "reest+", "badsig"))
+sys.path.insert(0, str(here))
+import nonce_report
+print("%-34s %4s %6s %8s %8s %6s %7s %8s %8s %9s" % ("batch", "runs", "passed", "stalled", "closed", "leftTLC", "reply+", "reest+", "badsig", "nonceviol"))
 for label, runs in batches.items():
     n = len(runs)
     passed = stalled = closed = left = reply = reest = bad = 0
+    nonce_viol, nonce_files = 0, 0
     for _, d, verdict in runs:
         rd = store / d
         if "Everything looks good" in verdict:
@@ -37,4 +41,9 @@ for label, runs in batches.items():
             reply += text.count("[ack] rebalance: CommitmentSigned")
             reest += text.count("[ack] rebalance on reestablish")
             bad += text.count("Musig2VerifyError(BadSignature)") + text.count("is reused for different messages")
-    print("%-34s %4d %6d %8d %8d %6d %7d %8d %8d" % (label, n, passed, stalled, closed, left, reply, reest, bad))
+            q = rd / node / "nonce-oracle.log"
+            if q.exists():
+                nonce_files += 1
+                nonce_viol += nonce_report.analyze(nonce_report.parse(q))[0]["viol"]
+    print("%-34s %4d %6d %8d %8d %6d %7d %8d %8d %9s" % (label, n, passed, stalled, closed, left, reply, reest, bad,
+                                                       nonce_viol if nonce_files else "-"))
