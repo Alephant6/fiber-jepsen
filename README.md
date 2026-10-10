@@ -18,6 +18,8 @@ After all faults are healed and the network has had time to converge:
 
 With `--nonce-check` and an instrumented fnn, it also checks that no MuSig2 nonce signed two different contexts, across restarts (see [below](#musig2-nonce-reuse---nonce-check)).
 
+With `--close`, every channel is asked to close cooperatively halfway through the faults (payments carry on), and the test instead checks that every channel ends `Closed`. This exercises the closing signatures, which the other workloads never reach.
+
 ## Faults
 
 | Fault | How |

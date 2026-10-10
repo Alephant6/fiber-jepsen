@@ -132,3 +132,31 @@
              :unfinished-payments unfinished
              :success-flipped     flipped
              :probe-failures      probe-bad}))))))
+
+(defn close-checker
+  "With --close, every channel is asked to close cooperatively halfway through the
+  faults. Valid when every end of every channel opened during setup is Closed in the
+  final read; reports the final states with their flags (cooperative or not)."
+  []
+  (reify checker/Checker
+    (check [_ test history _opts]
+      (let [read    (->> history
+                         (filter #(and (= :ok (:type %)) (= :read (:f %))))
+                         last
+                         :value)
+            request (->> history
+                         (filter #(and (= :close (:f %)) (= :info (:type %)) (:value %)))
+                         last
+                         :value)]
+        (if-not read
+          {:valid? :unknown, :error "no final read"}
+          (let [ids  (set (for [[_ chs] @(:initial-channels test) ch chs] (:channel_id ch)))
+                ends (for [[node chs] (:channels read)
+                           ch         chs
+                           :when      (ids (:channel_id ch))]
+                       {:node node, :channel (:channel_id ch), :state (:state ch)})
+                open (vec (remove #(= "closed" (state-name {:state (:state %)})) ends))]
+            {:valid?         (and (seq ends) (empty? open))
+             :close-requests request
+             :final-states   (frequencies (map :state ends))
+             :not-closed     open}))))))

@@ -29,6 +29,17 @@
   []
   {:f :pay, :value {:amount (* 1000000 (inc (rand-int 20)))}})
 
+(defn payments
+  "Payments for the whole fault window. With --close, every channel is asked to close
+  cooperatively halfway through, and payments go on against the closing channels."
+  [opts]
+  (let [pays (->> pay-op (gen/stagger (/ (:rate opts))))]
+    (if (:close opts)
+      (gen/phases (gen/time-limit (/ (:time-limit opts) 2) pays)
+                  (gen/once {:f :close})
+                  pays)
+      pays)))
+
 (defn nemesis-package
   "Composes only the nemesis packages for the requested faults. The full
   nc/nemesis-package also sets up file-corruption tooling (it downloads bitflip
@@ -69,19 +80,19 @@
                                     (cond-> {:stats      (checker/stats)
                                              :exceptions (checker/unhandled-exceptions)
                                              :perf       (checker/perf {:nemeses (:perf pkg)})
-                                             :timeline   (timeline/html)
-                                             :fiber      (fiber-checker/checker)}
+                                             :timeline   (timeline/html)}
+                                      (not (:close opts)) (assoc :fiber (fiber-checker/checker))
+                                      (:close opts)       (assoc :close (fiber-checker/close-checker))
                                       (:nonce-check opts) (assoc :nonce (nonce/checker))))
             :generator            (gen/phases
-                                    (->> pay-op
-                                         (gen/stagger (/ (:rate opts)))
+                                    (->> (payments opts)
                                          (gen/nemesis (:generator pkg))
                                          (gen/time-limit (:time-limit opts)))
                                     (gen/log "Healing all faults")
                                     (gen/nemesis (:final-generator pkg))
                                     (gen/log "Waiting for the network to converge")
                                     (gen/sleep (:quiesce opts))
-                                    (gen/clients (gen/once {:f :probe}))
+                                    (when-not (:close opts) (gen/clients (gen/once {:f :probe})))
                                     (gen/clients (gen/once {:f :read})))})))
 
 (def cli-opts
@@ -104,7 +115,9 @@
     :default  [:one :all]
     :parse-fn (fn [s] (mapv keyword (str/split s #",")))]
    [nil "--nonce-check" (str "Check MuSig2 nonce use. Needs an fnn built with the nonce-oracle"
-                             " feature (scripts/build-fnn-nonce-oracle.sh).")]])
+                             " feature (scripts/build-fnn-nonce-oracle.sh).")]
+   [nil "--close" (str "Halfway through the faults, ask every channel to close cooperatively, and"
+                       " check that all of them end Closed instead of the usual invariants.")]])
 
 (defn -main
   [& args]
