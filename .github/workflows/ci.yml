@@ -16,9 +16,12 @@ jobs:
     container: clojure:temurin-21-lein-bookworm
     steps:
       - uses: actions/checkout@v4
+      # lein keeps its Maven repository under the JVM's user.home, which is root's
+      # home directory from /etc/passwd. In a container job $HOME is /github/home,
+      # so ~/.m2 would name a directory lein never writes.
       - uses: actions/cache@v4
         with:
-          path: ~/.m2/repository
+          path: /root/.m2/repository
           key: m2-${{ hashFiles('project.clj') }}
           restore-keys: m2-
       - run: lein check
