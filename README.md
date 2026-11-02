@@ -64,9 +64,16 @@ scripts/run.sh --time-limit 300 --faults kill,pause,partition --rate 10
 
 # several runs, one summary line each: verdict, post-heal probe, channel states, store directory
 scripts/repeat.sh 4 --time-limit 60 --faults kill --kill-targets all --rate 20 --nemesis-interval 8 --quiesce 60
+
+# no faults: checks the harness itself (the cluster comes up, payments flow, every checker passes)
+scripts/run.sh --time-limit 45 --faults none --ledger
 ```
 
+CI runs that last command on every pull request that touches the harness, and on `main` after a merge, against the Fiber commit pinned in `.github/workflows/smoke.yml`; fnn and the snapshot are built once per pinned commit and cached. It is a check of this suite, not of Fiber, so it never injects faults.
+
 Results, including node logs and a timeline, are written to `store/`. To test another fnn build, copy it over `docker/build/bin/fnn`; `run.sh` rebuilds the node image.
+
+The node image is Debian 12 (glibc 2.36), so build fnn on a system with glibc 2.36 or older, or in a `rust:1-bookworm` container as CI does. An fnn linked on Ubuntu 24.04 needs glibc 2.38 and doesn't start in the nodes; Jepsen then reports only that the RPC never came up.
 
 `scripts/stall_report.py store/<test>/<run> ...` lists, for each channel with a problem, whether it is stalled on an unbalanced revocation nonce ledger ([#1561](https://github.com/nervosnetwork/fiber/issues/1561)), closed, or fine but still holding TLCs. It needs channel debug logs: add `--log-level 'info,fnn::fiber::channel=debug'` to the run.
 

@@ -68,7 +68,9 @@
         pkg    (nemesis-package db opts)]
     (merge tests/noop-test
            opts
-           {:name                 (str "fiber-" (str/join "," (map name (sort faults))))
+           {:name                 (str "fiber-" (if (seq faults)
+                                                  (str/join "," (map name (sort faults)))
+                                                  "none"))
             :os                   os/noop
             :db                   db
             :client               (client/client)
@@ -99,9 +101,10 @@
                                     (gen/clients (gen/once {:f :read})))})))
 
 (def cli-opts
-  [[nil "--faults FAULTS" "Comma-separated faults to inject: kill, pause, partition, disconnect."
+  [[nil "--faults FAULTS" (str "Comma-separated faults to inject: kill, pause, partition, disconnect;"
+                               " or none, for a run without faults (a smoke test of the harness).")
     :default  [:kill]
-    :parse-fn (fn [s] (mapv keyword (str/split s #",")))
+    :parse-fn (fn [s] (if (= "none" s) [] (mapv keyword (str/split s #","))))
     :validate [#(every? supported-faults %) (str "Must be a subset of " supported-faults)]]
    [nil "--rate HZ" "Approximate number of payments per second."
     :default  5
