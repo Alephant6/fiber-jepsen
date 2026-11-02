@@ -4,7 +4,7 @@
 
 Fiber's unit tests drive nodes in-process, and its integration tests replay scripted scenarios. This suite does something different. It runs real `fnn` binaries on separate hosts and sends concurrent payments through them while injecting faults: crashes, pauses and network partitions. It then checks invariants over the final state of every node.
 
-**Status: early work in progress.** The first milestone is one end-to-end run (payments, `kill -9`, invariant check) against a CKB devnet.
+**Status: work in progress.** It runs end to end against a CKB devnet; what it has found so far is in [FINDINGS.md](FINDINGS.md).
 
 ## What it checks
 
@@ -12,13 +12,16 @@ After all faults are healed and the network has had time to converge:
 
 - every channel opened during setup is still `ChannelReady`, with no pending TLCs;
 - both ends of a channel agree on its balances (A's local balance equals B's remote balance);
-- no channel's total (local + remote + in-flight TLCs) changed: payments move money within a channel, they never create or destroy it;
+- no channel's total (local + remote) changed: payments move money within a channel, they never create or destroy it;
 - every payment reached `Success` or `Failed`;
-- no payment the client saw succeed reports a different status later.
+- no payment the client saw succeed reports a different status later;
+- a fresh payment each way over every channel (the probe) succeeds, unless the sender's balance on that channel is below the probe amount.
 
 With `--nonce-check` and an instrumented fnn, it also checks that no MuSig2 nonce signed two different contexts, across restarts (see [below](#musig2-nonce-reuse---nonce-check)).
 
 With `--close`, every channel is asked to close cooperatively halfway through the faults (payments carry on), and the test instead checks that every channel ends `Closed`. This exercises the closing signatures, which the other workloads never reach.
+
+With `--ledger`, it also checks that money adds up at every node, not only on every channel (see [below](#per-node-ledger---ledger)).
 
 ## Faults
 
@@ -40,6 +43,7 @@ Planned: **clock skew**. Fiber expires TLCs by wall-clock timestamp (off-chain c
   - `topology.clj` (opens channels n1 - n2 - n3)
   - `client.clj` (keysend payments, final read)
   - `checker.clj` (invariants)
+  - `ledger.clj` (per-node money check, with `--ledger`)
   - `nonce.clj` (MuSig2 nonce reuse, with `--nonce-check`)
   - `nemesis.clj` (the `disconnect` fault)
 - `instrument/`: the logging-only fnn instrumentation the nonce check needs.
@@ -89,6 +93,16 @@ scripts/nonce_report.py store/fiber-kill/<run> ...    # per node: restarts, repl
 - `SIGKILL` keeps the OS page cache, so kills test "persisted before sent" at the process level, not across a power loss.
 - A record is written when the signing code returns a partial signature for the peer. A crash before the message actually leaves counts it as sent, which can only add violations.
 - Signatures that are only aggregated locally (V1 `sign_and_aggregate`) become visible only if that transaction is published. They are recorded as `Aggregated`, count toward `:revealable-count`, and are not violations by themselves.
+
+### Per-node ledger (`--ledger`)
+
+The per-channel checks can't see a payment that is only half done. Say n1 pays n3 through n2, and n2 settles its TLC with n3 while the TLC from n1 fails. n1 reports `Failed`, both channels still conserve their totals, both ends still agree, and the payment is final, so every check above passes; yet n2 has paid n3 for nothing.
+
+With `--ledger`, the checker compares each node's balance change, summed over the channels opened during setup, with the change its payments imply: the sender loses the amount plus the fee, the receiver gains the amount, and the node in between gains the fee. To count every payment, each one carries its attempt id in a custom record (key `0xf1be`), and the final read lists every node's payment sessions with `list_payments`. Payments whose `send_payment` reply never arrived (a timeout during a pause, say) are counted too. Amounts and destinations come from the history; statuses and fees come from the sending node.
+
+The result is invalid when a node's change differs from the expected one, when the status the client saw when a payment finished differs from the sender's final status (or the client was told no payment was created and one succeeded), or when one attempt produced two payments. A difference is `:unknown` rather than invalid when the final records can't show every settlement: a channel that is closed, missing or still holds TLCs, a payment that hasn't finished, or a payment the sender no longer lists. The check doesn't read the chain, so settlement after a force close is not covered. `repeat.sh` prints the outcome (`balanced`, `unbalanced`, `client-mismatch` or `incomplete`); `test/jepsen/fiber/ledger_test.clj` covers the rules.
+
+The option is off by default, so runs without it send the same requests to the nodes and run the same checks as before.
 
 ### Mixed versions, and a tally over several batches
 

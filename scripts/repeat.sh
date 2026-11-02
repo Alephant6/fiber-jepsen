@@ -15,9 +15,11 @@ for i in $(seq 1 "$runs"); do
   summary="$(tr '\n' ' ' <"$log" | grep -oE ':channel-summary +\{[^}]*\}' | tail -1 | tr -s ' ')"
   # Only with --nonce-check: nonces whose partial signatures left a node in two contexts.
   nonce="$(tr '\n' ' ' <"$log" | grep -oE ':nonce-violations +[0-9]+' | tail -1 | grep -oE '[0-9]+$')"
+  # Only with --ledger: balanced, unbalanced, client-mismatch or incomplete.
+  ledger="$(tr '\n' ' ' <"$log" | grep -oE ':outcome +:[a-z-]+' | tail -1 | grep -oE '[a-z-]+$')"
   store="$(readlink "$here/../store/latest" 2>/dev/null)"
   echo "run $i/$runs: ${verdict:-no verdict}; unfinished payments: $stuck;" \
        "channel ends with pending TLCs: $tlcs; post-heal probe: $probe; ${summary:-no summary};" \
-       "nonce violations: ${nonce:--}; store: ${store:-unknown}"
+       "nonce violations: ${nonce:--}; ledger: ${ledger:--}; store: ${store:-unknown}"
   rm -f "$log"
 done

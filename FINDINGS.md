@@ -1,5 +1,9 @@
 # Findings
 
+1. [A crash during in-flight payments can wedge channels permanently](#1-a-crash-during-in-flight-payments-can-wedge-channels-permanently-revocation-nonce-deadlock) (#1561), on develop `ae6f7d34`.
+2. [Deferred TLC updates survive a disconnect](#2-deferred-tlc-updates-survive-a-disconnect-1689) (#1689, fixed by #1700). Found with a schedule explorer, not with this suite.
+3. [Channel V2 under the same faults](#3-channel-v2-under-the-same-faults-1677--393b77fc) (#1677 @ `393b77fc`): no nonce reuse and no stalls, but the 30-second reply deadline force-closed channels whose peer was still there.
+
 ## 1. A crash during in-flight payments can wedge channels permanently (revocation-nonce deadlock)
 
 **Tested version:** fnn `develop @ ae6f7d34` (v0.10.0-rc1, 2026-09-29), ckb 0.202.0, topology n1 - n2 - n3.
@@ -40,7 +44,7 @@ On each channel, one side is missing its revocation *send* nonce and the other i
 
 - **No new payment from any node leaves `Created`.** The first hop rejects the TLC: `Generating TlcErr from error WaitingTlcAck to error_code TemporaryChannelFailure`. The payment is never failed back to the caller; the periodic check only logs `Payment ... is still not final after periodic check, maybe the channel is down. Status: Created`.
 - **TLCs that were in flight at the crash stay `Committed` on both ends.** Neither the payee (for a direct keysend) nor the forwarding node (for n3 → n1) settles or forwards them. Their expiry is about 20 h after creation, so the funds stay locked until then.
-- **Funds are not lost.** A force close recovers them. This is a liveness failure.
+- **No loss was seen, but it isn't ruled out.** The checker reported no balance mismatch, so as far as the channel records show this is a liveness failure. A force close should recover the locked funds, but the suite doesn't check on-chain settlement, so that is not verified.
 
 ### How the crash leads there (n1's log, channel n1-n2)
 
@@ -68,13 +72,30 @@ All runs lasted 60 s on fnn `develop @ ae6f7d34`. A run "fails" when, after heal
 | `kill`, all nodes | ~20/s | 8 s | **4 of 4** |
 | `kill`, one node at a time | ~20/s | 8 s | **4 of 4** |
 | `pause` (SIGSTOP), one node | ~10/s | 8 s | 0 of 2 |
-| `partition` (iptables), one node isolated | ~10/s | 8 s | 1 of 6 |
+| `partition` (iptables), one node isolated | ~10/s | 8 s | 1 of 6, a different failure (see the correction below) |
 
 How the failing runs were confirmed:
 
 - **Nonce state checked directly: one run** (`kill`, all nodes, debug logs, nodes left running for inspection; the case described above).
-- **Same symptoms, nonce state not checked: the other kill failures and the partition failure.** Those runs used info-level logs, which don't record nonce state. The symptoms were pending TLCs on both ends of the affected channels after the quiet period, and, in almost every case, no successful payment after the last restart. In the failing partition run, only 1 of about 600 payments succeeded.
+- **Same symptoms, nonce state not checked: the other kill failures.** Those runs used info-level logs, which don't record nonce state. The symptoms were pending TLCs on both ends of the affected channels after the quiet period, and, in almost every case, no successful payment after the last restart.
+- **Correction (2026-10-01): the failing partition run was a different failure.** In that run (`fiber-partition/2026-09-30T01:29:33`, info-level logs), n3's existing peer-response check (`peer_does_not_reply_ack_in_time`, no reply for more than 30 s) force-closed channel n2-n3, and channel n1-n2 was left with TLCs pending on both ends, most likely waiting on the closed channel (not verified). No ready channel reestablished during the run, so the crossing described above can't have happened. An earlier version of this file counted it as the same failure.
 
 `WaitingTlcAck` rejections are **not** a signal on their own. Passing runs log them too: a channel rejects new TLCs briefly while a commitment round is in flight.
 
 Since these runs, the checker also sends a fresh payment each way over every channel after the quiet period (`:probe-failures`), so a wedged network is reported directly.
+
+## 2. Deferred TLC updates survive a disconnect (#1689)
+
+**Found with** a randomized schedule explorer (two real nodes, random payments, restarts and disconnects, with and without message loss), which is not part of this repository.
+
+**Issue and fix:** [nervosnetwork/fiber#1689](https://github.com/nervosnetwork/fiber/issues/1689); fixed by [#1700](https://github.com/nervosnetwork/fiber/pull/1700), merged on 2026-10-19.
+
+During a replay after a reconnect, a channel defers the peer's `AddTlc` and `RemoveTlc` and applies them just before it verifies the peer's next `CommitmentSigned`. The deferral flag and queue weren't cleared when the connection dropped. If it dropped between a deferred update and its `CommitmentSigned`, the peer replayed the update after reconnecting, the queue held it twice, and applying the second copy failed. That dropped the `CommitmentSigned`, so no `RevokeAndAck` went back, and the channel usually force-closed with `Musig2VerifyError(BadSignature)` or one side waited for an ack forever. On develop (`2ba4b25`), 18 of 6,000 random schedules ended this way; with the fix, none did.
+
+## 3. Channel V2 under the same faults (#1677 @ `393b77fc`)
+
+**Tested version:** [#1677](https://github.com/nervosnetwork/fiber/pull/1677) at `393b77fc`, with logging-only hooks for the nonce check (`--nonce-check`); develop at `2ba4b255` as the control. Three nodes in a line, about 60 s of faults per run (3 minutes in one batch), 2026-10-09 to 10-11. The full table is in the [review on #1677](https://github.com/nervosnetwork/fiber/pull/1677#pullrequestreview-5486167720). Nothing has been rerun on later heads.
+
+- **No nonce reuse.** Of 919,782 V2 partial signatures (83 Jepsen runs, 6,000 randomized crash and reconnect schedules, and the unit tests), no nonce signed two different contexts. The check isn't vacuous: a build that plants one reuse per restart fails a single run with 15 violations. Only hashes of public nonces and signing contexts are recorded, never secret nonces. Power loss is not covered: `SIGKILL` keeps the page cache, and at `393b77fc` fnn's RocksDB writes were not synced.
+- **No stalls.** Under the same 7 fault types, channels stalled on the revocation-nonce ledger (#1561) in 19 of 50 develop runs and in 0 of 72 V2 runs.
+- **Deadline force closes.** 15 of the 72 V2 runs force-closed a channel through the 30-second peer-response deadline (`PEER_CHANNEL_RESPONSE_TIMEOUT`): kill all nodes 2 of 10, kill all nodes with 3 minutes of faults 1 of 4, partition 6 of 18, mixed faults 6 of 10. The deadline was counted from the persisted `peer_wait_started_at`, so a node's own downtime counted: after a kill, the restarted node closed the channel right after starting, while its peer had the channel ready again almost at once. Under partitions, one end was cut off for most of the 30 s. The review asked whether counting the node's own downtime was intended; quake then changed it in `c817e616` (a restart resets outstanding peer-response timers, a reconnect within the same process keeps the original deadline). The close rate after that change has not been measured.

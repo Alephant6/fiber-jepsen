@@ -13,6 +13,7 @@
             [jepsen.fiber [checker :as fiber-checker]
                           [client :as client]
                           [db :as db]
+                          [ledger :as ledger]
                           [nemesis :as fiber-nemesis]
                           [nonce :as nonce]])
   (:gen-class))
@@ -25,9 +26,10 @@
   #{:kill :pause :partition :disconnect})
 
 (defn pay-op
-  "A payment of 0.01-0.2 CKB. The client picks the destination."
+  "A payment of 0.01-0.2 CKB. The client picks the destination. :id names the
+  attempt; with --ledger the payment carries it to the node."
   []
-  {:f :pay, :value {:amount (* 1000000 (inc (rand-int 20)))}})
+  {:f :pay, :value {:id (client/attempt-id), :amount (* 1000000 (inc (rand-int 20)))}})
 
 (defn payments
   "Payments for the whole fault window. With --close, every channel is asked to close
@@ -83,7 +85,8 @@
                                              :timeline   (timeline/html)}
                                       (not (:close opts)) (assoc :fiber (fiber-checker/checker))
                                       (:close opts)       (assoc :close (fiber-checker/close-checker))
-                                      (:nonce-check opts) (assoc :nonce (nonce/checker))))
+                                      (:nonce-check opts) (assoc :nonce (nonce/checker))
+                                      (:ledger opts)      (assoc :ledger (ledger/checker))))
             :generator            (gen/phases
                                     (->> (payments opts)
                                          (gen/nemesis (:generator pkg))
@@ -117,7 +120,10 @@
    [nil "--nonce-check" (str "Check MuSig2 nonce use. Needs an fnn built with the nonce-oracle"
                              " feature (scripts/build-fnn-nonce-oracle.sh).")]
    [nil "--close" (str "Halfway through the faults, ask every channel to close cooperatively, and"
-                       " check that all of them end Closed instead of the usual invariants.")]])
+                       " check that all of them end Closed instead of the usual invariants.")]
+   [nil "--ledger" (str "Check each node's balance change against the payments it sent, received"
+                        " and forwarded. Tags every payment with its attempt id and lists every"
+                        " node's payments in the final read.")]])
 
 (defn -main
   [& args]

@@ -7,13 +7,41 @@
                     [util :refer [await-fn]]]
             [jepsen.fiber [rpc :as rpc]
                           [topology :as topology]])
-  (:import (java.net ConnectException)))
+  (:import (java.io IOException)
+           (java.net ConnectException)
+           (java.util.concurrent ThreadLocalRandom)
+           (org.apache.http.conn ConnectTimeoutException)))
 
 (def terminal-statuses #{"Success" "Failed"})
 
 (def payment-timeout-ms
   "How long a client waits for a payment to finish before recording it as :info."
   15000)
+
+(def attempt-record-key
+  "With --ledger, every payment carries its attempt id in this custom record (keys up
+  to 65535 are left to applications), so the final read can match each payment a
+  node holds to the operation that asked for it, even when the client never saw
+  the send_payment reply."
+  0xf1be)
+
+(defn attempt-id
+  "A random, non-negative id for one payment attempt."
+  []
+  (bit-and Long/MAX_VALUE (.nextLong (ThreadLocalRandom/current))))
+
+(defn attempt-records
+  "send_payment's custom_records, tagging the payment with attempt `id`."
+  [id]
+  {(str "0x" (Long/toHexString attempt-record-key)) (format "0x%016x" id)})
+
+(defn records->attempt-id
+  "The attempt id in a payment's custom_records as rpc/call returns them (keys
+  keywordized, e.g. :0xf1be), or nil."
+  [records]
+  (some-> (get records (keyword (str "0x" (Long/toHexString attempt-record-key))))
+          rpc/hex->int
+          long))
 
 (defn await-payment
   "Polls get_payment until the payment is Success or Failed, or the timeout
@@ -29,6 +57,28 @@
           (do (Thread/sleep 200)
               (recur res)))))))
 
+(defn send-keysend!
+  "Asks `node` to pay `amount` shannons to `to` by keysend; with --ledger the payment
+  carries attempt `id`. Returns send_payment's result, or
+    {::definite error}    the node certainly created no payment;
+    {::indefinite error}  it may have: the call timed out or the connection dropped."
+  [test node to amount id]
+  (try
+    (rpc/call node "send_payment"
+              (cond-> {:target_pubkey (get @(:pubkeys test) to)
+                       :amount        (rpc/int->hex amount)
+                       :keysend       true}
+                (and (:ledger test) id) (assoc :custom_records (attempt-records id))))
+    ; Nothing reached the node, so the payment definitely wasn't created.
+    (catch ConnectException _ {::definite :node-down})
+    (catch ConnectTimeoutException _ {::definite :node-unreachable})
+    (catch clojure.lang.ExceptionInfo e
+      (if (= :rpc-error (:type (ex-data e)))
+        {::definite (ex-message e)}
+        (throw e)))
+    (catch IOException e
+      {::indefinite [:no-reply (.getSimpleName (class e))]})))
+
 (defn pay!
   [test node op]
   (let [to     (let [t (get-in op [:value :to])]
@@ -37,23 +87,13 @@
                    t))
         amount (get-in op [:value :amount])
         value  (assoc (:value op) :from node :to to)
-        res    (try
-                 (rpc/call node "send_payment"
-                           {:target_pubkey (get @(:pubkeys test) to)
-                            :amount        (rpc/int->hex amount)
-                            :keysend       true})
-                 ; Nothing reached the node, so the payment definitely wasn't created.
-                 (catch ConnectException _ ::node-down)
-                 (catch clojure.lang.ExceptionInfo e
-                   (if (= :rpc-error (:type (ex-data e)))
-                     {::rejected (ex-message e)}
-                     (throw e))))]
+        res    (send-keysend! test node to amount (get-in op [:value :id]))]
     (cond
-      (= ::node-down res)
-      (assoc op :type :fail, :value value, :error :node-down)
+      (::definite res)
+      (assoc op :type :fail, :value value, :error (::definite res))
 
-      (::rejected res)
-      (assoc op :type :fail, :value value, :error (::rejected res))
+      (::indefinite res)
+      (assoc op :type :info, :value value, :error (::indefinite res))
 
       :else
       (let [hash  (:payment_hash res)
@@ -67,25 +107,32 @@
 
 (defn probe!
   "After the network has healed, sends one small keysend each way over every
-  channel. A healthy network completes them; a wedged channel leaves them stuck."
+  channel. A healthy network completes them; a wedged channel leaves them stuck.
+  Status is Rejected when the node certainly created no payment, and Unknown when
+  the call got no reply."
   [test]
   (vec (for [[a b]     (topology/edges (:nodes test))
              [from to] [[a b] [b a]]
-             :let      [amount 1000000]]
-         (let [res (try (rpc/call from "send_payment"
-                                  {:target_pubkey (get @(:pubkeys test) to)
-                                   :amount        (rpc/int->hex amount)
-                                   :keysend       true})
-                        (catch Exception e {::rejected (ex-message e)}))]
-           (if-let [err (::rejected res)]
-             {:from from, :to to, :amount amount, :status "Rejected", :error err}
+             :let      [amount 1000000
+                        id     (attempt-id)]]
+         (let [res   (try (send-keysend! test from to amount id)
+                          (catch Exception e {::indefinite (ex-message e)}))
+               entry {:from from, :to to, :amount amount, :id id}
+               ; The checker matches errors as strings.
+               err   #(if (string? %) % (pr-str %))]
+           (cond
+             (::definite res)
+             (assoc entry :status "Rejected", :error (err (::definite res)))
+
+             (::indefinite res)
+             (assoc entry :status "Unknown", :error (err (::indefinite res)))
+
+             :else
              (let [final (await-payment from (:payment_hash res))]
-               {:from   from
-                :to     to
-                :amount amount
-                :hash   (:payment_hash res)
-                :status (:status final)
-                :error  (:failed_error final)}))))))
+               (assoc entry
+                      :hash   (:payment_hash res)
+                      :status (:status final)
+                      :error  (:failed_error final))))))))
 
 (defn channel-between
   "The id of the channel opened between nodes a and b during setup."
@@ -120,18 +167,63 @@
             {:log-message (str "Waiting to read channels from " node)
              :timeout     120000}))
 
+(def list-page-size
+  "list_payments returns at most 500 payments per call."
+  500)
+
+(defn listed-payment
+  "The parts of a list_payments entry the ledger needs. The status goes under
+  :payment-status so that scripts/repeat.sh, which counts `:status \"Inflight\"`
+  in the log, still counts only what it did before --ledger."
+  [p]
+  {:hash           (:payment_hash p)
+   :id             (records->attempt-id (:custom_records p))
+   :payment-status (:status p)
+   :fee            (or (rpc/hex->int (:fee p)) 0)
+   :error          (:failed_error p)})
+
+(defn list-payments
+  "Every payment session on `node` (the payments it sent), following list_payments'
+  cursor."
+  [node]
+  (loop [after nil, acc []]
+    (let [res  (rpc/call node "list_payments"
+                         (cond-> {:limit (rpc/int->hex list-page-size)}
+                           after (assoc :after after))
+                         {:timeout 30000})
+          page (:payments res)
+          acc  (into acc (map listed-payment) page)]
+      (if (and (= list-page-size (count page)) (:last_cursor res))
+        (recur (:last_cursor res) acc)
+        acc))))
+
+(defn read-payments
+  "list-payments, retried while the node recovers from faults; {:error message} if
+  the node rejects the call (an fnn without list_payments, for example)."
+  [node]
+  (await-fn #(try (list-payments node)
+                  (catch clojure.lang.ExceptionInfo e
+                    (if (= :rpc-error (:type (ex-data e)))
+                      {:error (ex-message e)}
+                      (throw e))))
+            {:log-message (str "Waiting to list payments on " node)
+             :timeout     120000}))
+
 (defn read-all
   [test]
-  {:channels (into {} (for [n (:nodes test)] [n (read-node n)]))
-   :payments (vec (for [{:keys [node hash]} @(:payments test)]
-                    (let [res (try (rpc/call node "get_payment" {:payment_hash hash})
-                                   (catch Exception e
-                                     (warn e "Couldn't read payment" hash "from" node)
-                                     nil))]
-                      {:node   node
-                       :hash   hash
-                       :status (:status res)
-                       :error  (:failed_error res)})))})
+  (cond-> {:channels (into {} (for [n (:nodes test)] [n (read-node n)]))
+           :payments (vec (for [{:keys [node hash]} @(:payments test)]
+                            (let [res (try (rpc/call node "get_payment" {:payment_hash hash})
+                                           (catch Exception e
+                                             (warn e "Couldn't read payment" hash "from" node)
+                                             nil))]
+                              {:node   node
+                               :hash   hash
+                               :status (:status res)
+                               :error  (:failed_error res)})))}
+    ; With --ledger: every payment each node holds, including ones the client never
+    ; got a hash for.
+    (:ledger test) (assoc :listed (into {} (for [n (:nodes test)] [n (read-payments n)])))))
 
 (defrecord Client [node]
   client/Client

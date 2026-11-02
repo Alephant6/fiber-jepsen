@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  clojure:
+    name: lein check and lein test
+    runs-on: ubuntu-24.04
+    # The image the Jepsen control node is built from (docker/control/Dockerfile).
+    container: clojure:temurin-21-lein-bookworm
+    steps:
+      - uses: actions/checkout@v4
+      # lein keeps its Maven repository under the JVM's user.home, which is root's
+      # home directory from /etc/passwd. In a container job $HOME is /github/home,
+      # so ~/.m2 would name a directory lein never writes.
+      - uses: actions/cache@v4
+        with:
+          path: /root/.m2/repository
+          key: m2-${{ hashFiles('project.clj') }}
+          restore-keys: m2-
+      - run: lein check
+      - run: lein test
+
+  scripts:
+    name: script syntax
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m py_compile scripts/*.py instrument/*.py
+      - run: for f in scripts/*.sh docker/chain/entrypoint.sh; do bash -n "$f"; done
