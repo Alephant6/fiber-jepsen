@@ -13,6 +13,9 @@
 (def binary "/usr/local/bin/fnn")
 (def logfile "/fiber/fnn.log")
 (def pidfile "/fiber/fnn.pid")
+; MuSig2 nonce-use records, written only by fnn builds with the nonce-oracle feature
+; (instrument/). Kept across restarts within a test; see jepsen.fiber.nonce.
+(def nonce-file "/fiber/nonce-oracle.log")
 
 (defn node-id
   "n1 -> \"1\""
@@ -32,7 +35,8 @@
        :chdir   (node-dir node)
        :env     {:FIBER_SECRET_KEY_PASSWORD (str "password" (node-id node))
                  :RUST_LOG                  (:log-level test "info")
-                 :RUST_BACKTRACE            "1"}}
+                 :RUST_BACKTRACE            "1"
+                 :FIBER_NONCE_ORACLE_FILE   nonce-file}}
       binary
       :-d (node-dir node))))
 
@@ -45,7 +49,7 @@
 (defrecord FiberDB []
   db/DB
   (setup! [_ test node]
-    (c/su (c/exec :rm :-rf (str (node-dir node) "/fiber/store") logfile pidfile))
+    (c/su (c/exec :rm :-rf (str (node-dir node) "/fiber/store") logfile pidfile nonce-file))
     (start-fnn! test node)
     (await-rpc! node))
 
@@ -76,7 +80,9 @@
 
   db/LogFiles
   (log-files [_ _test _node]
-    [logfile]))
+    ; Jepsen skips files that don't exist, e.g. the nonce records of an uninstrumented fnn.
+    {logfile    "fnn.log"
+     nonce-file "nonce-oracle.log"}))
 
 (defn db
   []

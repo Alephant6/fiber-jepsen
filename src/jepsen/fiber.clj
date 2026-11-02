@@ -12,19 +12,33 @@
             [jepsen.nemesis.combined :as nc]
             [jepsen.fiber [checker :as fiber-checker]
                           [client :as client]
-                          [db :as db]])
+                          [db :as db]
+                          [nemesis :as fiber-nemesis]
+                          [nonce :as nonce]])
   (:gen-class))
 
 (def supported-faults
   "Faults this suite can inject. Jepsen's :clock fault changes the host clock,
   which Docker containers share, so clock skew needs a per-process approach
-  (libfaketime) instead."
-  #{:kill :pause :partition})
+  (libfaketime) instead. :disconnect closes a p2p connection over RPC and
+  reconnects it later, so channels reestablish without a restart."
+  #{:kill :pause :partition :disconnect})
 
 (defn pay-op
   "A payment of 0.01-0.2 CKB. The client picks the destination."
   []
   {:f :pay, :value {:amount (* 1000000 (inc (rand-int 20)))}})
+
+(defn payments
+  "Payments for the whole fault window. With --close, every channel is asked to close
+  cooperatively halfway through, and payments go on against the closing channels."
+  [opts]
+  (let [pays (->> pay-op (gen/stagger (/ (:rate opts))))]
+    (if (:close opts)
+      (gen/phases (gen/time-limit (/ (:time-limit opts) 2) pays)
+                  (gen/once {:f :close})
+                  pays)
+      pays)))
 
 (defn nemesis-package
   "Composes only the nemesis packages for the requested faults. The full
@@ -42,7 +56,8 @@
     (nc/compose-packages
       (cond-> []
         (faults :partition)             (conj (nc/partition-package popts))
-        (some faults [:kill :pause])    (conj (nc/db-package popts))))))
+        (some faults [:kill :pause])    (conj (nc/db-package popts))
+        (faults :disconnect)            (conj (fiber-nemesis/disconnect-package popts))))))
 
 (defn fiber-test
   [opts]
@@ -62,25 +77,26 @@
             :initial-channels     (atom nil)
             :nonserializable-keys [:pubkeys :payments :initial-channels]
             :checker              (checker/compose
-                                    {:stats      (checker/stats)
-                                     :exceptions (checker/unhandled-exceptions)
-                                     :perf       (checker/perf {:nemeses (:perf pkg)})
-                                     :timeline   (timeline/html)
-                                     :fiber      (fiber-checker/checker)})
+                                    (cond-> {:stats      (checker/stats)
+                                             :exceptions (checker/unhandled-exceptions)
+                                             :perf       (checker/perf {:nemeses (:perf pkg)})
+                                             :timeline   (timeline/html)}
+                                      (not (:close opts)) (assoc :fiber (fiber-checker/checker))
+                                      (:close opts)       (assoc :close (fiber-checker/close-checker))
+                                      (:nonce-check opts) (assoc :nonce (nonce/checker))))
             :generator            (gen/phases
-                                    (->> pay-op
-                                         (gen/stagger (/ (:rate opts)))
+                                    (->> (payments opts)
                                          (gen/nemesis (:generator pkg))
                                          (gen/time-limit (:time-limit opts)))
                                     (gen/log "Healing all faults")
                                     (gen/nemesis (:final-generator pkg))
                                     (gen/log "Waiting for the network to converge")
                                     (gen/sleep (:quiesce opts))
-                                    (gen/clients (gen/once {:f :probe}))
+                                    (when-not (:close opts) (gen/clients (gen/once {:f :probe})))
                                     (gen/clients (gen/once {:f :read})))})))
 
 (def cli-opts
-  [[nil "--faults FAULTS" "Comma-separated faults to inject: kill, pause, partition."
+  [[nil "--faults FAULTS" "Comma-separated faults to inject: kill, pause, partition, disconnect."
     :default  [:kill]
     :parse-fn (fn [s] (mapv keyword (str/split s #",")))
     :validate [#(every? supported-faults %) (str "Must be a subset of " supported-faults)]]
@@ -97,7 +113,11 @@
     :default  "info"]
    [nil "--kill-targets TARGETS" "Comma-separated kill targets: one, all."
     :default  [:one :all]
-    :parse-fn (fn [s] (mapv keyword (str/split s #",")))]])
+    :parse-fn (fn [s] (mapv keyword (str/split s #",")))]
+   [nil "--nonce-check" (str "Check MuSig2 nonce use. Needs an fnn built with the nonce-oracle"
+                             " feature (scripts/build-fnn-nonce-oracle.sh).")]
+   [nil "--close" (str "Halfway through the faults, ask every channel to close cooperatively, and"
+                       " check that all of them end Closed instead of the usual invariants.")]])
 
 (defn -main
   [& args]

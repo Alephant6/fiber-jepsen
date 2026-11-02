@@ -5,3 +5,6 @@
 /target/
 /.lein-*
 /.nrepl-port
+# Python bytecode
+__pycache__/
+*.pyc

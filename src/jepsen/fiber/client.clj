@@ -1,7 +1,8 @@
 (ns jepsen.fiber.client
   "Sends keysend payments from the client's node to another node, and performs
   the final read of every node's channels and every payment's status."
-  (:require [clojure.tools.logging :refer [warn]]
+  (:require [clojure.set :as set]
+            [clojure.tools.logging :refer [warn]]
             [jepsen [client :as client]
                     [util :refer [await-fn]]]
             [jepsen.fiber [rpc :as rpc]
@@ -86,6 +87,32 @@
                 :status (:status final)
                 :error  (:failed_error final)}))))))
 
+(defn channel-between
+  "The id of the channel opened between nodes a and b during setup."
+  [test a b]
+  (let [ids (fn [n] (set (map :channel_id (get @(:initial-channels test) n))))]
+    (first (set/intersection (ids a) (ids b)))))
+
+(defn close!
+  "Asks every channel to close cooperatively (--close). Faults keep running, so it
+  retries for about 20 s, alternating between the two ends while one is down."
+  [test]
+  (vec (for [[a b] (topology/edges (:nodes test))]
+         (let [ch      (channel-between test a b)
+               attempt (fn [node]
+                         (try (rpc/call node "shutdown_channel"
+                                        {:channel_id ch, :fee_rate (rpc/int->hex 1000)}
+                                        {:timeout 10000})
+                              :ok
+                              (catch Exception e (or (ex-message e) (str (class e))))))]
+           (loop [tries 1]
+             (let [node   (if (odd? tries) a b)
+                   result (attempt node)]
+               (if (or (= :ok result) (<= 20 tries))
+                 {:channel ch, :by node, :result result, :tries tries}
+                 (do (Thread/sleep 1000)
+                     (recur (inc tries))))))))))
+
 (defn read-node
   "Every channel of one node. Retries while the node recovers from faults."
   [node]
@@ -116,6 +143,7 @@
   (invoke! [_ test op]
     (case (:f op)
       :pay   (pay! test node op)
+      :close (assoc op :type :info, :value (close! test))
       :probe (assoc op :type :ok, :value (probe! test))
       :read  (assoc op :type :ok, :value (read-all test))))
 
