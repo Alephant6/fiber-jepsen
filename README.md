@@ -73,6 +73,8 @@ CI runs that last command on every pull request that touches the harness, and on
 
 Results, including node logs and a timeline, are written to `store/`. To test another fnn build, copy it over `docker/build/bin/fnn`; `run.sh` rebuilds the node image.
 
+The node image is Debian 12 (glibc 2.36), so build fnn on a system with glibc 2.36 or older, or in a `rust:1-bookworm` container as CI does. An fnn linked on Ubuntu 24.04 needs glibc 2.38 and doesn't start in the nodes; Jepsen then reports only that the RPC never came up.
+
 `scripts/stall_report.py store/<test>/<run> ...` lists, for each channel with a problem, whether it is stalled on an unbalanced revocation nonce ledger ([#1561](https://github.com/nervosnetwork/fiber/issues/1561)), closed, or fine but still holding TLCs. It needs channel debug logs: add `--log-level 'info,fnn::fiber::channel=debug'` to the run.
 
 ### MuSig2 nonce reuse (`--nonce-check`)
