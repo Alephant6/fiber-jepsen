@@ -1,0 +1,121 @@
+name: Smoke
+
+# One short run without faults against a pinned Fiber build: the cluster comes
+# up, payments flow, and every checker passes, --ledger included. It tests this
+# harness, not Fiber; fault runs against Fiber's develop don't gate merges.
+#
+# Runs on main too, so that main holds the build cache pull requests restore
+# (a cache saved by a pull request's run serves only that pull request).
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'docker/**'
+      - 'scripts/**'
+      - 'project.clj'
+      - '.github/workflows/smoke.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'docker/**'
+      - 'scripts/**'
+      - 'project.clj'
+      - '.github/workflows/smoke.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # The Fiber build under test: develop at the commit of FINDINGS.md's first
+  # finding. Move it in a commit of its own.
+  FIBER_REF: ae6f7d3440c23025385537c1519d2af607f3b6a0
+  CKB_VERSION: 0.202.0
+
+jobs:
+  smoke:
+    name: run without faults
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+
+      # fnn, ckb and the devnet snapshot depend only on the Fiber commit, the ckb
+      # version and the snapshot scripts, so they are built once per combination
+      # and saved before the run, whatever the run's outcome.
+      - id: key
+        run: echo "key=build-${FIBER_REF}-ckb${CKB_VERSION}-${{ hashFiles('scripts/make-snapshot.sh', 'scripts/patch_node_config.py') }}" >> "$GITHUB_OUTPUT"
+      - id: build
+        uses: actions/cache/restore@v5
+        with:
+          path: docker/build
+          key: ${{ steps.key.outputs.key }}
+
+      - if: steps.build.outputs.cache-hit != 'true'
+        uses: actions/checkout@v6
+        with:
+          repository: nervosnetwork/fiber
+          ref: ${{ env.FIBER_REF }}
+          path: fiber
+      - name: Install ckb, ckb-cli and the snapshot script's tools
+        if: steps.build.outputs.cache-hit != 'true'
+        run: |
+          pkg="ckb_v${CKB_VERSION}_x86_64-unknown-linux-gnu-portable"
+          curl -sSfL --retry 3 -o ckb.tar.gz \
+            "https://github.com/nervosnetwork/ckb/releases/download/v${CKB_VERSION}/${pkg}.tar.gz"
+          tar -xzf ckb.tar.gz
+          mkdir -p ~/.local/bin
+          install "${pkg}/ckb" "${pkg}/ckb-cli" ~/.local/bin/
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          sudo apt-get update -q
+          sudo apt-get install -y -q python3-yaml netcat-openbsd
+      - name: Build fnn
+        if: steps.build.outputs.cache-hit != 'true'
+        working-directory: fiber
+        run: |
+          # The toolchain fiber's rust-toolchain.toml names.
+          rustup toolchain install || rustup show
+          cargo build --release --locked -p fiber-bin
+      - name: Create the devnet snapshot
+        if: steps.build.outputs.cache-hit != 'true'
+        run: FNN_BIN="$PWD/fiber/target/release/fnn" FIBER_SNAP="$PWD/fiber" scripts/make-snapshot.sh
+      - if: steps.build.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: docker/build
+          key: ${{ steps.key.outputs.key }}
+
+      - name: Run without faults
+        run: |
+          set -o pipefail
+          scripts/run.sh --time-limit 45 --faults none --ledger 2>&1 | tee run.log
+
+      - name: Summary
+        if: always()
+        run: |
+          log=run.log
+          [ -f "$log" ] || log=/dev/null
+          verdict="$(grep -oE 'Everything looks good|Analysis invalid|Errors occurred during analysis|Jepsen broke' "$log" | tail -1)"
+          ledger="$(tr '\n' ' ' <"$log" | grep -oE ':outcome +:[a-z-]+' | tail -1 | grep -oE '[a-z-]+$')"
+          fnn="$(sha256sum docker/build/bin/fnn 2>/dev/null | cut -c1-16)"
+          {
+            echo "### Run without faults"
+            echo "- Fiber \`${FIBER_REF:0:10}\`, ckb ${CKB_VERSION}, fnn sha256 \`${fnn:-none}\` (first 16 hex digits)"
+            echo "- Build restored from cache: ${{ steps.build.outputs.cache-hit == 'true' }}"
+            echo "- Verdict: ${verdict:-none}"
+            echo "- Ledger: ${ledger:-none}"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-store
+          path: |
+            store/
+            run.log
+          retention-days: 14
