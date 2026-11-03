@@ -47,6 +47,7 @@ Planned: **clock skew**. Fiber expires TLCs by wall-clock timestamp (off-chain c
   - `nonce.clj` (MuSig2 nonce reuse, with `--nonce-check`)
   - `nemesis.clj` (the `disconnect` fault)
 - `instrument/`: the logging-only fnn instrumentation the nonce check needs.
+- `.github/workflows/`: `ci.yml` (lint and unit tests), `smoke.yml` (a run without faults whenever the harness changes) and `jepsen.yml` (any arguments against any Fiber commit; other repositories can call it, see [below](#in-another-repositorys-ci)).
 
 ## Running
 
@@ -69,11 +70,11 @@ scripts/repeat.sh 4 --time-limit 60 --faults kill --kill-targets all --rate 20 -
 scripts/run.sh --time-limit 45 --faults none --ledger
 ```
 
-CI runs that last command on every pull request that touches the harness, and on `main` after a merge, against the Fiber commit pinned in `.github/workflows/smoke.yml`; fnn and the snapshot are built once per pinned commit and cached. It is a check of this suite, not of Fiber, so it never injects faults.
+CI runs that last command on every pull request that touches the harness, and on `main` after a merge, against the Fiber commit pinned in `.github/workflows/smoke.yml`; fnn and the snapshot are built once per pinned commit and cached. It is a check of this suite, not of Fiber, so it never injects faults. To run any arguments against another Fiber commit on a GitHub runner, start the Jepsen workflow (`jepsen.yml`) by hand from the Actions tab.
 
 Results, including node logs and a timeline, are written to `store/`. To test another fnn build, copy it over `docker/build/bin/fnn`; `run.sh` rebuilds the node image.
 
-The node image is Debian 12 (glibc 2.36), so build fnn on a system with glibc 2.36 or older, or in a `rust:1-bookworm` container as CI does. An fnn linked on Ubuntu 24.04 needs glibc 2.38 and doesn't start in the nodes; Jepsen then reports only that the RPC never came up.
+The node image is Ubuntu 24.04 (glibc 2.39), the system of the GitHub `ubuntu-24.04` runners on which both Fiber's CI and this repository's CI build fnn. An fnn built on a system with glibc 2.39 or older runs in it: one from Fiber's Docker image (built on Debian 12) or a portable release package (built on Ubuntu 22.04) does too. One linked against a newer glibc doesn't start, and Jepsen then reports only that the RPC never came up. `NODE_BASE=debian:bookworm-slim scripts/run.sh ...` builds the nodes on another base.
 
 `scripts/stall_report.py store/<test>/<run> ...` lists, for each channel with a problem, whether it is stalled on an unbalanced revocation nonce ledger ([#1561](https://github.com/nervosnetwork/fiber/issues/1561)), closed, or fine but still holding TLCs. It needs channel debug logs: add `--log-level 'info,fnn::fiber::channel=debug'` to the run.
 
@@ -110,6 +111,24 @@ With `--ledger`, the checker compares each node's balance change, summed over th
 The result is invalid when a node's change differs from the expected one, when the status the client saw when a payment finished differs from the sender's final status (or the client was told no payment was created and one succeeded), or when one attempt produced two payments. A difference is `:unknown` rather than invalid when the final records can't show every settlement: a channel that is closed, missing or still holds TLCs, a payment that hasn't finished, or a payment the sender no longer lists. The check doesn't read the chain, so settlement after a force close is not covered. `repeat.sh` prints the outcome (`balanced`, `unbalanced`, `client-mismatch` or `incomplete`); `test/jepsen/fiber/ledger_test.clj` covers the rules.
 
 The option is off by default, so runs without it send the same requests to the nodes and run the same checks as before.
+
+### In another repository's CI
+
+`jepsen.yml` is a reusable workflow, so another repository's workflow can call it, pinned to a commit of this repository. A called workflow sees the caller's `github` context, so a call from Fiber's CI tests that run's Fiber commit, while the harness is checked out at the pinned commit. It needs no secrets and only read access:
+
+```yaml
+jobs:
+  jepsen:
+    if: contains(github.event.pull_request.body || '', '#jepsen-test')
+    permissions:
+      contents: read
+    uses: Alephant6/fiber-jepsen/.github/workflows/jepsen.yml@<commit>
+    with:
+      args: --time-limit 60 --faults kill --kill-targets all --ledger
+      runs: 1
+```
+
+Inputs: `fiber-repository` and `fiber-ref` (default: the caller's repository and commit), `args` for `run.sh`, `runs`, `ckb-version` and `label`. The job summary has one row per run; the job fails if any run's verdict isn't valid, after all runs have finished, and then uploads the store.
 
 ### Mixed versions, and a tally over several batches
 

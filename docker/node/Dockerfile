@@ -1,6 +1,13 @@
 # An fnn node that Jepsen drives over SSH. All three node directories are baked in;
 # node nN runs out of /fiber/tests/nodes/N (the same layout as Fiber's tests/).
-FROM debian:bookworm-slim
+#
+# The base is the Ubuntu release of GitHub's ubuntu-24.04 runners, which Fiber's
+# CI and ours build fnn on, so a binary built there runs here. glibc is backward
+# compatible, so builds from older systems run too: Fiber's Docker image builds
+# on Debian 12, its portable release packages on Ubuntu 22.04. NODE_BASE picks
+# another base, e.g. NODE_BASE=debian:bookworm-slim scripts/run.sh ...
+ARG NODE_BASE=ubuntu:24.04
+FROM ${NODE_BASE}
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \

@@ -1,0 +1,218 @@
+name: Jepsen
+
+# Runs Jepsen against one Fiber commit on a GitHub runner: checks out Fiber and
+# this harness, builds fnn and the devnet snapshot (once per Fiber commit, then
+# cached), runs the test `runs` times and writes a table of the runs to the job
+# summary. A run whose verdict isn't valid fails the job once all runs are done.
+#
+# smoke.yml calls it, it can be run by hand, and another repository's workflow
+# (Fiber's CI, say) can call it pinned to a commit of this repository:
+#
+#   jobs:
+#     jepsen:
+#       uses: Alephant6/fiber-jepsen/.github/workflows/jepsen.yml@<commit>
+#       with:
+#         args: --time-limit 60 --faults kill --ledger
+#
+# A called workflow sees the caller's github context, so such a call tests the
+# caller's commit by default. The harness is checked out at the commit this file
+# was called at (job.workflow_sha), whoever the caller is.
+on:
+  workflow_call:
+    inputs:
+      fiber-repository:
+        description: The Fiber repository. Empty means the calling repository.
+        type: string
+        default: ''
+      fiber-ref:
+        description: The Fiber commit, branch or tag. Empty means the calling run's commit.
+        type: string
+        default: ''
+      args:
+        description: Arguments for scripts/run.sh, the same for every run.
+        type: string
+        default: --time-limit 45 --faults none --ledger
+      runs:
+        description: How many times to run the test.
+        type: number
+        default: 1
+      ckb-version:
+        type: string
+        default: 0.202.0
+      label:
+        description: Names the summary and the artifact; give each call in one workflow its own.
+        type: string
+        default: jepsen
+  workflow_dispatch:
+    inputs:
+      fiber-repository:
+        description: The Fiber repository
+        default: nervosnetwork/fiber
+      fiber-ref:
+        description: The Fiber commit, branch or tag
+        default: develop
+      args:
+        description: Arguments for scripts/run.sh
+        default: --time-limit 60 --faults kill --kill-targets all --rate 20 --nemesis-interval 8 --quiesce 60 --ledger
+      runs:
+        description: How many times to run the test
+        default: '1'
+      ckb-version:
+        description: The ckb release for the devnet
+        default: 0.202.0
+      label:
+        description: Names the summary and the artifact
+        default: jepsen
+
+permissions:
+  contents: read
+
+jobs:
+  jepsen:
+    name: ${{ inputs.label }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      FIBER_REPOSITORY: ${{ inputs.fiber-repository || github.repository }}
+      FIBER_REF: ${{ inputs.fiber-ref || github.sha }}
+      ARGS: ${{ inputs.args }}
+      RUNS: ${{ inputs.runs }}
+      CKB_VERSION: ${{ inputs.ckb-version }}
+      LABEL: ${{ inputs.label }}
+    steps:
+      - name: Check out the harness
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ job.workflow_repository || 'Alephant6/fiber-jepsen' }}
+          ref: ${{ job.workflow_sha }}
+      - name: Check out Fiber
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.FIBER_REPOSITORY }}
+          ref: ${{ env.FIBER_REF }}
+          path: fiber
+
+      # fnn, ckb and the devnet snapshot depend only on the Fiber commit, the
+      # system fnn is built on, the ckb version and the snapshot scripts, so they
+      # are built once per combination and saved before the runs, whatever their
+      # outcome.
+      - id: key
+        run: |
+          sha="$(git -C fiber rev-parse HEAD)"
+          echo "fiber-sha=$sha" >>"$GITHUB_OUTPUT"
+          echo "harness-sha=$(git rev-parse HEAD)" >>"$GITHUB_OUTPUT"
+          echo "key=jepsen-build-${sha}-ubuntu-24.04-ckb${CKB_VERSION}-${{ hashFiles('scripts/make-snapshot.sh', 'scripts/patch_node_config.py') }}" >>"$GITHUB_OUTPUT"
+      - id: build
+        uses: actions/cache/restore@v5
+        with:
+          path: docker/build
+          key: ${{ steps.key.outputs.key }}
+
+      - name: Install ckb, ckb-cli and the snapshot script's tools
+        if: steps.build.outputs.cache-hit != 'true'
+        run: |
+          pkg="ckb_v${CKB_VERSION}_x86_64-unknown-linux-gnu-portable"
+          curl -sSfL --retry 3 -o ckb.tar.gz \
+            "https://github.com/nervosnetwork/ckb/releases/download/v${CKB_VERSION}/${pkg}.tar.gz"
+          tar -xzf ckb.tar.gz
+          mkdir -p ~/.local/bin
+          install "${pkg}/ckb" "${pkg}/ckb-cli" ~/.local/bin/
+          echo "$HOME/.local/bin" >>"$GITHUB_PATH"
+          sudo apt-get update -q
+          sudo apt-get install -y -q python3-yaml netcat-openbsd
+      # On the runner, as Fiber's CI builds it; the node image is the runner's
+      # Ubuntu release, so the binary runs there. rustup installs the toolchain
+      # Fiber's rust-toolchain.toml names, which the deploy script's udt-init
+      # build in the next step uses too.
+      - name: Build fnn
+        if: steps.build.outputs.cache-hit != 'true'
+        working-directory: fiber
+        run: |
+          rustup toolchain install || rustup show
+          cargo build --release --locked -p fiber-bin
+      - name: Create the devnet snapshot
+        if: steps.build.outputs.cache-hit != 'true'
+        run: FNN_BIN="$PWD/fiber/target/release/fnn" FIBER_SNAP="$PWD/fiber" scripts/make-snapshot.sh
+      - if: steps.build.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: docker/build
+          key: ${{ steps.key.outputs.key }}
+
+      # Every run starts from the snapshot; runs.txt gets one line per run: its
+      # number, run.sh's exit status and its store directory.
+      - name: Run
+        run: |
+          set +e -u -o pipefail
+          status=0
+          for i in $(seq 1 "$RUNS"); do
+            echo "::group::run $i of $RUNS"
+            # ARGS is a list of arguments, so it is split on purpose.
+            # shellcheck disable=SC2086
+            scripts/run.sh $ARGS 2>&1 | tee "run-$i.log"
+            code=${PIPESTATUS[0]}
+            echo "::endgroup::"
+            # store/latest names the run's directory; the control container sees
+            # this checkout at /jepsen.
+            dir="$(readlink store/latest 2>/dev/null)"
+            dir="${dir#/jepsen/store/}"
+            echo "$i $code ${dir:-none}" >>runs.txt
+            [ "$code" -eq 0 ] || status=1
+          done
+          exit "$status"
+
+      - name: Summary
+        if: always()
+        env:
+          FIBER_SHA: ${{ steps.key.outputs.fiber-sha }}
+          HARNESS_SHA: ${{ steps.key.outputs.harness-sha }}
+          HARNESS_REPOSITORY: ${{ job.workflow_repository }}
+          CACHE_HIT: ${{ steps.build.outputs.cache-hit == 'true' }}
+        run: |
+          fnn="$(sha256sum docker/build/bin/fnn 2>/dev/null | cut -c1-16)"
+          {
+            echo "### ${LABEL}: \`${ARGS}\`"
+            echo "- Fiber \`${FIBER_REPOSITORY}@${FIBER_SHA:0:10}\`, ckb ${CKB_VERSION}, fnn sha256 \`${fnn:-none}\` (first 16 hex digits)"
+            echo "- Harness \`${HARNESS_REPOSITORY}@${HARNESS_SHA:0:10}\`"
+            echo "- Build restored from cache: ${CACHE_HIT}"
+            echo
+            echo "| Run | Exit | Verdict | Ledger | Post-heal probe | Channels | Store |"
+            echo "| --- | --- | --- | --- | --- | --- | --- |"
+            [ -f runs.txt ] || : >runs.txt
+            while read -r i code store; do
+              log="run-$i.log"
+              verdict="$(grep -oE 'Everything looks good|Analysis invalid|Errors occurred during analysis|Jepsen broke' "$log" | tail -1 || true)"
+              ledger="$(tr '\n' ' ' <"$log" | grep -oE ':outcome +:[a-z-]+' | tail -1 | grep -oE '[a-z-]+$' || true)"
+              if [ -z "$verdict" ]; then probe="-"
+              elif grep -q ':probe-failures \[\]' "$log"; then probe="ok"
+              else probe="failed"; fi
+              # pprint may put the map on the line after its key.
+              channels="$(tr '\n' ' ' <"$log" | grep -oE ':channel-summary +\{[^}]*\}' | tail -1 | sed -E 's/:channel-summary +//' | tr -s ' ' || true)"
+              echo "| $i | $code | ${verdict:-none} | ${ledger:--} | $probe | ${channels:--} | \`${store}\` |"
+            done <runs.txt
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      # Jepsen reports only that a node's RPC never came up; fnn's log says why.
+      - name: Show the end of each node's fnn log in failed runs
+        if: failure()
+        run: |
+          [ -f runs.txt ] || exit 0
+          while read -r i code store; do
+            [ "$code" -ne 0 ] || continue
+            for f in store/"$store"/n*/fnn.log; do
+              [ -f "$f" ] || continue
+              echo "== run $i: $f"
+              tail -n 40 "$f"
+            done
+          done <runs.txt
+      # upload-artifact rejects ':' in file names, and Jepsen names each run's
+      # directory by its start time, so the store goes up as one tarball.
+      - name: Pack the store
+        if: failure()
+        run: tar -czf "$LABEL-store.tgz" --ignore-failed-read store run-*.log runs.txt
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.label }}-store
+          path: ${{ inputs.label }}-store.tgz
+          retention-days: 14
