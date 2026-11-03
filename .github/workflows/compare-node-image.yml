@@ -1,0 +1,101 @@
+name: Compare node images (temporary)
+
+# Temporary, for the pull request that moves the node image to Ubuntu 24.04, and
+# removed before it merges.
+#
+# compare: one fnn binary on both bases, the same eight runs on each. The binary
+# is the ae6f7d34 build main's Smoke runs saved, built in rust:1-bookworm
+# (glibc 2.36), so it runs on either.
+#
+# develop: jepsen.yml called the way another repository would call it, pinned to
+# a commit, against Fiber's develop: fnn built on the runner, one kill run.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    name: same fnn on ${{ matrix.label }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {base: 'debian:bookworm-slim', label: debian-12}
+          - {base: 'ubuntu:24.04', label: ubuntu-24.04}
+    env:
+      NODE_BASE: ${{ matrix.base }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/cache/restore@v5
+        with:
+          path: docker/build
+          key: build-ae6f7d3440c23025385537c1519d2af607f3b6a0-bookworm-ckb0.202.0-${{ hashFiles('scripts/make-snapshot.sh', 'scripts/patch_node_config.py') }}
+          fail-on-cache-miss: true
+      - name: Runs
+        run: |
+          set +e -u -o pipefail
+          i=0
+          while IFS= read -r args; do
+            [ -n "$args" ] || continue
+            i=$((i + 1))
+            echo "::group::run $i: $args"
+            # shellcheck disable=SC2086
+            # run.sh must not read the list below from stdin.
+            scripts/run.sh $args </dev/null 2>&1 | tee "run-$i.log"
+            code=${PIPESTATUS[0]}
+            echo "::endgroup::"
+            dir="$(readlink store/latest 2>/dev/null)"
+            dir="${dir#/jepsen/store/}"
+            echo "$i $code ${dir:-none}" >>runs.txt
+            echo "$args" >"args-$i.txt"
+          done <<'EOF'
+          --time-limit 45 --faults none --ledger
+          --time-limit 60 --faults kill --kill-targets all --rate 20 --nemesis-interval 8 --quiesce 60 --ledger
+          --time-limit 60 --faults kill --kill-targets all --rate 20 --nemesis-interval 8 --quiesce 60 --ledger
+          --time-limit 60 --faults kill --kill-targets all --rate 20 --nemesis-interval 8 --quiesce 60 --ledger
+          --time-limit 60 --faults partition --rate 20 --nemesis-interval 8 --quiesce 60 --ledger
+          --time-limit 60 --faults partition --rate 20 --nemesis-interval 8 --quiesce 60 --ledger
+          --time-limit 60 --faults pause --rate 20 --nemesis-interval 8 --quiesce 60 --ledger
+          --time-limit 60 --faults disconnect --rate 20 --nemesis-interval 8 --quiesce 60 --ledger
+          EOF
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Same fnn (ae6f7d34, sha256 \`$(sha256sum docker/build/bin/fnn | cut -c1-16)\`) on ${NODE_BASE}"
+            echo
+            echo "| Run | Arguments | Exit | Verdict | Ledger | Post-heal probe | Channels | Store |"
+            echo "| --- | --- | --- | --- | --- | --- | --- | --- |"
+            while read -r i code store; do
+              log="run-$i.log"
+              verdict="$(grep -oE 'Everything looks good|Analysis invalid|Errors occurred during analysis|Jepsen broke' "$log" | tail -1 || true)"
+              ledger="$(tr '\n' ' ' <"$log" | grep -oE ':outcome +:[a-z-]+' | tail -1 | grep -oE '[a-z-]+$' || true)"
+              if [ -z "$verdict" ]; then probe="-"
+              elif grep -q ':probe-failures \[\]' "$log"; then probe="ok"
+              else probe="failed"; fi
+              channels="$(tr '\n' ' ' <"$log" | grep -oE ':channel-summary +\{[^}]*\}' | tail -1 | sed -E 's/:channel-summary +//' | tr -s ' ' || true)"
+              echo "| $i | \`$(cat "args-$i.txt")\` | $code | ${verdict:-none} | ${ledger:--} | $probe | ${channels:--} | \`${store}\` |"
+            done <runs.txt
+          } >>"$GITHUB_STEP_SUMMARY"
+      - name: Pack the store
+        if: always()
+        run: tar -czf "compare-${{ matrix.label }}.tgz" --ignore-failed-read store run-*.log args-*.txt runs.txt
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compare-${{ matrix.label }}
+          path: compare-${{ matrix.label }}.tgz
+          retention-days: 7
+
+  develop:
+    name: develop
+    uses: Alephant6/fiber-jepsen/.github/workflows/jepsen.yml@f6646cde91b4b6e3324a187ce847c566f4100f36
+    with:
+      fiber-repository: nervosnetwork/fiber
+      fiber-ref: 45ffdac8bd2d56f6e9cd4a01c2b2e4975c3e4397
+      args: --time-limit 60 --faults kill --kill-targets all --rate 20 --nemesis-interval 8 --quiesce 60 --ledger
+      label: develop-kill
