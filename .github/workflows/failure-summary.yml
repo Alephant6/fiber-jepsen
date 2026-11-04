@@ -25,12 +25,6 @@ on:
     # Workflows whose manual or scheduled runs get a summary.
     workflows: [Jepsen]
     types: [completed]
-  # Temporary, to be removed before merging: summarize the stored batch of run
-  # 41569102145 (artifact compare-ubuntu-24.04, three failed runs).
-  pull_request:
-    paths:
-      - '.github/workflows/failure-summary.yml'
-      - '.github/failure-summary/**'
   workflow_dispatch:
     inputs:
       run-id:
@@ -45,15 +39,14 @@ permissions:
 jobs:
   summarize:
     if: >-
-      github.event_name == 'pull_request' ||
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'failure' &&
        contains(fromJSON('["schedule", "workflow_dispatch"]'), github.event.workflow_run.event))
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
-      RUN_ID: ${{ github.event_name == 'pull_request' && '41569102145' || inputs.run-id || github.event.workflow_run.id }}
-      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.event_name == 'pull_request' && '41569102145' || inputs.run-id || github.event.workflow_run.id }}
+      RUN_ID: ${{ inputs.run-id || github.event.workflow_run.id }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ inputs.run-id || github.event.workflow_run.id }}
     steps:
       - uses: actions/checkout@v6
       # Each artifact lands in a directory of its own, named after it. A job
@@ -61,7 +54,7 @@ jobs:
       - uses: actions/download-artifact@v4
         continue-on-error: true
         with:
-          pattern: ${{ github.event_name == 'pull_request' && 'compare-ubuntu-24.04' || '*-store' }}
+          pattern: '*-store'
           run-id: ${{ env.RUN_ID }}
           github-token: ${{ github.token }}
           path: artifacts
