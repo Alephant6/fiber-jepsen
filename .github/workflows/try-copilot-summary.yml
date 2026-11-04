@@ -4,8 +4,9 @@ name: Try a Copilot summary of failed runs (temporary)
 # workflow's own token, as a way to summarize failed Jepsen runs. The input is
 # a stored batch from an earlier run (41569102145, eight runs on ubuntu-24.04,
 # three of them invalid with the known ae6f7d34 stall), so no cluster runs here.
-# The digest script cuts each failed run down to the start of results.edn and
-# counted WARN/ERROR lines, and the session is capped at 30 AI credits (the
+# The digest script cuts each failed run down to the start of results.edn,
+# every close / shutdown / panic line and counted WARN/ERROR lines; the prompt
+# adds the known issues from FINDINGS.md; and the session is capped at 30 AI credits (the
 # minimum), billed to the repository owner's Copilot plan. The verdicts stay
 # with Jepsen's checkers; the model only writes a note on top of them.
 on:
@@ -47,7 +48,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -o pipefail
-          prompt="$(cat .github/try-copilot/prompt.md digest.md)"
+          prompt="$(cat .github/try-copilot/prompt.md .github/try-copilot/known-issues.md digest.md)"
           # No -s, so the usage statistics are printed after the answer. No
           # --reasoning-effort: the Student plan has only the "auto" model,
           # which rejects it.

@@ -21,6 +21,17 @@ while read -r i code store; do
   for f in "$d"/n*/fnn.log; do
     [ -f "$f" ] || continue
     n="$(basename "$(dirname "$f")")"
+    echo "## $n fnn.log: process starts (Jepsen restarts) $(grep -c 'Jepsen starting' "$f")"
+    # Close, force-close and panic lines are rare, so the top-12 count below can
+    # drop them; keep every distinct one, with the time it first appeared.
+    echo "## $n fnn.log: close / shutdown / panic lines, first time seen and count (always kept)"
+    echo '```'
+    strip <"$f" | grep -E '^ *[0-9T:.-]+Z +[A-Z]+ ' \
+      | grep -iE 'forcefully|force.?clos|closing transaction|shutting ?down|shutdown channel|ChannelStopped|abort|panicked' \
+      | sed -E 's/^ *([0-9T:.-]+)Z +/\1 /; s/0x[0-9a-f]{16,}/0x…/g; s/Pubkey\([0-9a-f]+\)/Pubkey(…)/g' \
+      | cut -c1-220 \
+      | awk '{t=$1; $1=""; k=substr($0,2); if (!(k in c)) {o[++m]=k; f[k]=t} c[k]++} END {for (i=1;i<=m && i<=20;i++) print f[o[i]] " x" c[o[i]] " " o[i]}'
+    echo '```'
     echo "## $n fnn.log: WARN/ERROR lines, timestamps dropped, counted (top 12)"
     echo '```'
     strip <"$f" | grep -E '^ *[0-9T:.-]+Z +(WARN|ERROR) ' \
