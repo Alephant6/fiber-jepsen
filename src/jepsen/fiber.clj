@@ -15,7 +15,8 @@
                           [db :as db]
                           [ledger :as ledger]
                           [nemesis :as fiber-nemesis]
-                          [nonce :as nonce]])
+                          [nonce :as nonce]
+                          [schedule :as schedule]])
   (:gen-class))
 
 (def supported-faults
@@ -25,27 +26,25 @@
   reconnects it later, so channels reestablish without a restart."
   #{:kill :pause :partition :disconnect})
 
-(defn pay-op
-  "A payment of 0.01-0.2 CKB. The client picks the destination. :id names the
-  attempt; with --ledger the payment carries it to the node."
-  []
-  {:f :pay, :value {:id (client/attempt-id), :amount (* 1000000 (inc (rand-int 20)))}})
-
 (defn payments
-  "Payments for the whole fault window. With --close, every channel is asked to close
-  cooperatively halfway through, and payments go on against the closing channels."
-  [opts]
-  (let [pays (->> pay-op (gen/stagger (/ (:rate opts))))]
+  "Payments for the whole fault window, drawn from the run's seed (see
+  jepsen.fiber.schedule): 0.01-0.2 CKB each, about :rate a second. With --close,
+  every channel is asked to close cooperatively halfway through, and payments go on
+  against the closing channels, from a stream of their own."
+  [opts streams]
+  (let [pays (fn [k] (schedule/paced-payments streams k (:rate opts) (count (:nodes opts))))]
     (if (:close opts)
-      (gen/phases (gen/time-limit (/ (:time-limit opts) 2) pays)
+      (gen/phases (gen/time-limit (/ (:time-limit opts) 2) (pays :pay))
                   (gen/once {:f :close})
-                  pays)
-      pays)))
+                  (pays :pay-after-close))
+      (pays :pay))))
 
 (defn nemesis-package
   "Composes only the nemesis packages for the requested faults. The full
   nc/nemesis-package also sets up file-corruption tooling (it downloads bitflip
-  onto every node) even when that fault is disabled."
+  onto every node) even when that fault is disabled. fiber-test uses the package's
+  nemesis, final generator and perf, but takes the faults themselves from
+  jepsen.fiber.schedule, so that the seed fixes them."
   [db opts]
   (let [faults (set (:faults opts))
         popts  {:db        db
@@ -62,15 +61,20 @@
         (faults :disconnect)            (conj (fiber-nemesis/disconnect-package popts))))))
 
 (defn fiber-test
+  "The test for `opts`. Without --seed it picks a seed, which jepsen.log shows in
+  the test map (:seed): pass it as --seed to run the same payments and faults again."
   [opts]
-  (let [db     (db/db)
-        faults (set (:faults opts))
-        pkg    (nemesis-package db opts)]
+  (let [db      (db/db)
+        faults  (set (:faults opts))
+        pkg     (nemesis-package db opts)
+        seed    (or (:seed opts) (schedule/new-seed))
+        streams (schedule/streams seed)]
     (merge tests/noop-test
            opts
            {:name                 (str "fiber-" (if (seq faults)
                                                   (str/join "," (map name (sort faults)))
                                                   "none"))
+            :seed                 seed
             :os                   os/noop
             :db                   db
             :client               (client/client)
@@ -90,8 +94,8 @@
                                       (:nonce-check opts) (assoc :nonce (nonce/checker))
                                       (:ledger opts)      (assoc :ledger (ledger/checker))))
             :generator            (gen/phases
-                                    (->> (payments opts)
-                                         (gen/nemesis (:generator pkg))
+                                    (->> (payments opts streams)
+                                         (gen/nemesis (schedule/faults streams opts))
                                          (gen/time-limit (:time-limit opts)))
                                     (gen/log "Healing all faults")
                                     (gen/nemesis (:final-generator pkg))

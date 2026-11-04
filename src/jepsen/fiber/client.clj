@@ -4,12 +4,12 @@
   (:require [clojure.set :as set]
             [clojure.tools.logging :refer [warn]]
             [jepsen [client :as client]
+                    [random :as rand]
                     [util :refer [await-fn]]]
             [jepsen.fiber [rpc :as rpc]
                           [topology :as topology]])
   (:import (java.io IOException)
            (java.net ConnectException)
-           (java.util.concurrent ThreadLocalRandom)
            (org.apache.http.conn ConnectTimeoutException)))
 
 (def terminal-statuses #{"Success" "Failed"})
@@ -26,9 +26,10 @@
   0xf1be)
 
 (defn attempt-id
-  "A random, non-negative id for one payment attempt."
+  "A random, non-negative id for one payment attempt. Payments get theirs from
+  jepsen.fiber.schedule; this one is for the post-heal probes."
   []
-  (bit-and Long/MAX_VALUE (.nextLong (ThreadLocalRandom/current))))
+  (rand/long Long/MAX_VALUE))
 
 (defn attempt-records
   "send_payment's custom_records, tagging the payment with attempt `id`."
@@ -79,14 +80,21 @@
     (catch IOException e
       {::indefinite [:no-reply (.getSimpleName (class e))]})))
 
+(defn destination
+  "Where `node` sends the payment in `op`: its :to if that is another node, else
+  the other node at :to-index (drawn by jepsen.fiber.schedule), else a random one."
+  [test node op]
+  (let [{:keys [to to-index]} (:value op)
+        others                (vec (remove #{node} (:nodes test)))]
+    (cond (and to (not= to node)) to
+          to-index                (nth others (mod to-index (count others)))
+          :else                   (rand/nth others))))
+
 (defn pay!
   [test node op]
-  (let [to     (let [t (get-in op [:value :to])]
-                 (if (or (nil? t) (= t node))
-                   (rand-nth (remove #{node} (:nodes test)))
-                   t))
+  (let [to     (destination test node op)
         amount (get-in op [:value :amount])
-        value  (assoc (:value op) :from node :to to)
+        value  (-> (:value op) (dissoc :to-index) (assoc :from node :to to))
         res    (send-keysend! test node to amount (get-in op [:value :id]))]
     (cond
       (::definite res)
