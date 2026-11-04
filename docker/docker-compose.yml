@@ -6,6 +6,8 @@ x-fnn-node: &fnn-node
   build:
     context: .
     dockerfile: node/Dockerfile
+    args:
+      NODE_BASE: ${NODE_BASE:-ubuntu:24.04}
   image: fiber-jepsen-node
   # iptables for partitions
   cap_add: [NET_ADMIN]
