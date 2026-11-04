@@ -1,9 +1,9 @@
 name: Jepsen
 
 # Runs Jepsen against one Fiber commit on a GitHub runner: checks out Fiber and
-# this harness, builds fnn and the devnet snapshot (once per Fiber commit, then
-# cached), runs the test `runs` times and writes a table of the runs to the job
-# summary. A run whose verdict isn't valid fails the job once all runs are done.
+# this harness, builds fnn (once per Fiber commit, then cached) and the devnet
+# snapshot (once per version of Fiber's test files, then cached), runs the test
+# `runs` times and writes a table of the runs to the job summary. A run whose verdict isn't valid fails the job once all runs are done.
 #
 # smoke.yml calls it, it can be run by hand, and another repository's workflow
 # (Fiber's CI, say) can call it pinned to a commit of this repository:
@@ -92,24 +92,35 @@ jobs:
           ref: ${{ env.FIBER_REF }}
           path: fiber
 
-      # fnn, ckb and the devnet snapshot depend only on the Fiber commit, the
-      # system fnn is built on, the ckb version and the snapshot scripts, so they
-      # are built once per combination and saved before the runs, whatever their
-      # outcome.
+      # Two caches, both saved before the runs, whatever their outcome:
+      # - fnn, per Fiber commit and the system it is built on;
+      # - the devnet snapshot (ckb, the chain, the node directories, the ssh
+      #   key), which doesn't use fnn: Fiber's scripts build it from
+      #   tests/deploy and tests/nodes only. It is keyed on every file there,
+      #   the ckb version and the snapshot scripts, so a commit that changes
+      #   only Fiber's code reuses it. SNAPSHOT_VERSION forces a rebuild.
       - id: key
+        env:
+          SNAPSHOT_VERSION: 1
         run: |
           sha="$(git -C fiber rev-parse HEAD)"
           echo "fiber-sha=$sha" >>"$GITHUB_OUTPUT"
           echo "harness-sha=$(git rev-parse HEAD)" >>"$GITHUB_OUTPUT"
-          echo "key=jepsen-build-${sha}-ubuntu-24.04-ckb${CKB_VERSION}-${{ hashFiles('scripts/make-snapshot.sh', 'scripts/patch_node_config.py') }}" >>"$GITHUB_OUTPUT"
-      - id: build
+          echo "fnn=jepsen-fnn-${sha}-ubuntu-24.04" >>"$GITHUB_OUTPUT"
+          echo "snapshot=jepsen-snapshot-v${SNAPSHOT_VERSION}-ckb${CKB_VERSION}-${{ hashFiles('fiber/tests/deploy/**', 'fiber/tests/nodes/**') }}-${{ hashFiles('scripts/make-snapshot.sh', 'scripts/patch_node_config.py') }}" >>"$GITHUB_OUTPUT"
+      - id: fnn
+        uses: actions/cache/restore@v5
+        with:
+          path: fnn-bin
+          key: ${{ steps.key.outputs.fnn }}
+      - id: snapshot
         uses: actions/cache/restore@v5
         with:
           path: docker/build
-          key: ${{ steps.key.outputs.key }}
+          key: ${{ steps.key.outputs.snapshot }}
 
       - name: Install ckb, ckb-cli and the snapshot script's tools
-        if: steps.build.outputs.cache-hit != 'true'
+        if: steps.snapshot.outputs.cache-hit != 'true'
         run: |
           pkg="ckb_v${CKB_VERSION}_x86_64-unknown-linux-gnu-portable"
           curl -sSfL --retry 3 -o ckb.tar.gz \
@@ -125,17 +136,19 @@ jobs:
       # the toolchain Fiber's rust-toolchain.toml names, which the deploy
       # script's udt-init build in the snapshot step uses too.
       - name: Install the Rust toolchain
-        if: steps.build.outputs.cache-hit != 'true'
+        if: steps.fnn.outputs.cache-hit != 'true' || steps.snapshot.outputs.cache-hit != 'true'
         working-directory: fiber
         run: rustup toolchain install || rustup show
       # The compiled dependencies of fnn and of udt-init, kept across Fiber
       # commits (Fiber's CI caches its builds with the same action). A new
       # commit then compiles Fiber's own crates and any dependency whose
       # version changed, not all of them. Saved after the job, also when a run
-      # fails, since the build itself succeeded.
+      # fails, since the build itself succeeded. Only when fnn is built, so a
+      # job that builds just the snapshot never saves a cache without fnn's
+      # dependencies.
       - name: Restore the compiled dependencies
         id: deps
-        if: steps.build.outputs.cache-hit != 'true'
+        if: steps.fnn.outputs.cache-hit != 'true'
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
@@ -146,17 +159,26 @@ jobs:
           key: ${{ hashFiles('fiber/rust-toolchain.toml') }}
           cache-on-failure: true
       - name: Build fnn
-        if: steps.build.outputs.cache-hit != 'true'
+        if: steps.fnn.outputs.cache-hit != 'true'
         working-directory: fiber
-        run: cargo build --release --locked -p fiber-bin
+        run: |
+          cargo build --release --locked -p fiber-bin
+          install -D target/release/fnn ../fnn-bin/fnn
+      - if: steps.fnn.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: fnn-bin
+          key: ${{ steps.key.outputs.fnn }}
       - name: Create the devnet snapshot
-        if: steps.build.outputs.cache-hit != 'true'
-        run: FNN_BIN="$PWD/fiber/target/release/fnn" FIBER_SNAP="$PWD/fiber" scripts/make-snapshot.sh
-      - if: steps.build.outputs.cache-hit != 'true'
+        if: steps.snapshot.outputs.cache-hit != 'true'
+        run: FNN_BIN= FIBER_SNAP="$PWD/fiber" scripts/make-snapshot.sh
+      - if: steps.snapshot.outputs.cache-hit != 'true'
         uses: actions/cache/save@v5
         with:
           path: docker/build
-          key: ${{ steps.key.outputs.key }}
+          key: ${{ steps.key.outputs.snapshot }}
+      - name: Put fnn into the snapshot
+        run: install -D fnn-bin/fnn docker/build/bin/fnn
 
       # Every run starts from the snapshot; runs.txt gets one line per run: its
       # number, run.sh's exit status and its store directory.
@@ -186,7 +208,8 @@ jobs:
           FIBER_SHA: ${{ steps.key.outputs.fiber-sha }}
           HARNESS_SHA: ${{ steps.key.outputs.harness-sha }}
           HARNESS_REPOSITORY: ${{ job.workflow_repository }}
-          CACHE_HIT: ${{ steps.build.outputs.cache-hit == 'true' }}
+          FNN_HIT: ${{ steps.fnn.outputs.cache-hit == 'true' }}
+          SNAPSHOT_HIT: ${{ steps.snapshot.outputs.cache-hit == 'true' }}
           DEPS_HIT: ${{ steps.deps.outputs.cache-hit }}
         run: |
           fnn="$(sha256sum docker/build/bin/fnn 2>/dev/null | cut -c1-16)"
@@ -194,7 +217,7 @@ jobs:
             echo "### ${LABEL}: \`${ARGS}\`"
             echo "- Fiber \`${FIBER_REPOSITORY}@${FIBER_SHA:0:10}\`, ckb ${CKB_VERSION}, fnn sha256 \`${fnn:-none}\` (first 16 hex digits)"
             echo "- Harness \`${HARNESS_REPOSITORY}@${HARNESS_SHA:0:10}\`"
-            echo "- Build restored from cache: ${CACHE_HIT}${DEPS_HIT:+ (compiled dependencies: exact match ${DEPS_HIT})}"
+            echo "- Restored from cache: fnn ${FNN_HIT}${DEPS_HIT:+ (compiled dependencies: exact match ${DEPS_HIT})}, devnet snapshot ${SNAPSHOT_HIT}"
             echo
             echo "| Run | Exit | Verdict | Ledger | Post-heal probe | Channels | Store |"
             echo "| --- | --- | --- | --- | --- | --- | --- |"

@@ -37,7 +37,7 @@ Planned: **clock skew**. Fiber expires TLCs by wall-clock timestamp (off-chain c
 ## Layout
 
 - `docker/`: a CKB devnet (`chain`), three fnn nodes (`n1`–`n3`) and the Jepsen control node, on a private network `10.77.0.0/24`.
-- `scripts/make-snapshot.sh`: creates the devnet with Fiber's own `tests/deploy/init-dev-chain.sh` (funded wallets, contracts, UDT), then stages it with the binaries into `docker/build/`. Every test starts from this snapshot.
+- `scripts/make-snapshot.sh`: creates the devnet with Fiber's own `tests/deploy/init-dev-chain.sh` (funded wallets, contracts, UDT), then stages it with the binaries into `docker/build/`. Every test starts from this snapshot. With `FNN_BIN` set empty it leaves out `bin/fnn`, which nothing else depends on; CI adds each commit's fnn afterwards.
 - `src/jepsen/fiber/`:
   - `db.clj` (process lifecycle)
   - `topology.clj` (opens channels n1 - n2 - n3)
@@ -70,7 +70,7 @@ scripts/repeat.sh 4 --time-limit 60 --faults kill --kill-targets all --rate 20 -
 scripts/run.sh --time-limit 45 --faults none --ledger
 ```
 
-CI runs that last command on every pull request that touches the harness, and on `main` after a merge, against the Fiber commit pinned in `.github/workflows/smoke.yml`; fnn and the snapshot are built once per pinned commit and cached, and fnn's compiled dependencies are cached across commits, so a new commit compiles only Fiber's own crates. It is a check of this suite, not of Fiber, so it never injects faults. To run any arguments against another Fiber commit on a GitHub runner, start the Jepsen workflow (`jepsen.yml`) by hand from the Actions tab.
+CI runs that last command on every pull request that touches the harness, and on `main` after a merge, against the Fiber commit pinned in `.github/workflows/smoke.yml`; fnn is built once per Fiber commit and cached, and its compiled dependencies are cached across commits, so a new commit compiles only Fiber's own crates. The devnet snapshot doesn't use fnn, so it is cached by the contents of Fiber's `tests/deploy` and `tests/nodes` (with the ckb version and the snapshot scripts): a commit that changes only Fiber's code reuses it. The smoke run is a check of this suite, not of Fiber, so it never injects faults. To run any arguments against another Fiber commit on a GitHub runner, start the Jepsen workflow (`jepsen.yml`) by hand from the Actions tab.
 
 Results, including node logs and a timeline, are written to `store/`. To test another fnn build, copy it over `docker/build/bin/fnn`; `run.sh` rebuilds the node image.
 
