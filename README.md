@@ -70,7 +70,7 @@ scripts/repeat.sh 4 --time-limit 60 --faults kill --kill-targets all --rate 20 -
 scripts/run.sh --time-limit 45 --faults none --ledger
 ```
 
-CI runs that last command on every pull request that touches the harness, and on `main` after a merge, against the Fiber commit pinned in `.github/workflows/smoke.yml`; fnn and the snapshot are built once per pinned commit and cached. It is a check of this suite, not of Fiber, so it never injects faults. To run any arguments against another Fiber commit on a GitHub runner, start the Jepsen workflow (`jepsen.yml`) by hand from the Actions tab.
+CI runs that last command on every pull request that touches the harness, and on `main` after a merge, against the Fiber commit pinned in `.github/workflows/smoke.yml`; fnn and the snapshot are built once per pinned commit and cached, and fnn's compiled dependencies are cached across commits, so a new commit compiles only Fiber's own crates. It is a check of this suite, not of Fiber, so it never injects faults. To run any arguments against another Fiber commit on a GitHub runner, start the Jepsen workflow (`jepsen.yml`) by hand from the Actions tab.
 
 Results, including node logs and a timeline, are written to `store/`. To test another fnn build, copy it over `docker/build/bin/fnn`; `run.sh` rebuilds the node image.
 
