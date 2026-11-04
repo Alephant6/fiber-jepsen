@@ -48,8 +48,10 @@ jobs:
         run: |
           set -o pipefail
           prompt="$(cat .github/try-copilot/prompt.md digest.md)"
-          # No -s, so the usage statistics are printed after the answer.
-          copilot -p "$prompt" --max-ai-credits 30 --reasoning-effort low \
+          # No -s, so the usage statistics are printed after the answer. No
+          # --reasoning-effort: the Student plan has only the "auto" model,
+          # which rejects it.
+          copilot -p "$prompt" --max-ai-credits 30 \
             --disable-builtin-mcps --deny-tool shell --deny-tool write \
             2>&1 | tee copilot.out
       - name: Job summary
