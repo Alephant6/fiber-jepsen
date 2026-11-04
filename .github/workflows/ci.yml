@@ -40,4 +40,4 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - run: python3 -m py_compile scripts/*.py instrument/*.py
-      - run: for f in scripts/*.sh docker/chain/entrypoint.sh; do bash -n "$f"; done
+      - run: for f in scripts/*.sh docker/chain/entrypoint.sh .github/failure-summary/*.sh; do bash -n "$f"; done

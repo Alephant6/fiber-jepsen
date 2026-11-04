@@ -1,0 +1,125 @@
+name: Failure summary
+
+# When a Jepsen workflow run started by hand or on a schedule fails, Copilot CLI
+# reads a digest of its failed runs and writes a short note: which checker
+# failed, the symptom, the likely cause and which known issue it looks like,
+# and what would confirm it. The verdicts stay with Jepsen's checkers, in the
+# failed run's own summary; the note is auto-generated and not verified.
+#
+# It is a workflow of its own, triggered by workflow_run, rather than a step of
+# jepsen.yml, for two reasons. A called workflow can't get more permissions
+# than its caller grants, so a step needing copilot-requests: write would make
+# every caller (smoke.yml, Fiber's CI) grant it and pay for it. And
+# workflow_run fires once per watched run, so a run with many jobs gets one
+# report. The job below admits only manual and scheduled runs, never pull
+# requests, so a fork's pull request can't put text in front of the model.
+#
+# Input: each failed job's store artifact (<label>-store, see jepsen.yml),
+# cut down by .github/failure-summary/digest.sh; the prompt and the known
+# issues (kept in step with FINDINGS.md) are in the same directory. Copilot
+# runs with this workflow's own token and is billed to the repository owner's
+# Copilot plan, at most 30 AI credits a session (the minimum cap); one report
+# has cost about 0.5. It may not use tools.
+on:
+  workflow_run:
+    # Workflows whose manual or scheduled runs get a summary.
+    workflows: [Jepsen]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run-id:
+        description: The ID of a failed run (of any workflow in this repository) with store artifacts
+        required: true
+
+permissions:
+  contents: read
+  actions: read            # to download the failed run's artifacts
+  copilot-requests: write  # Copilot CLI with GITHUB_TOKEN
+
+jobs:
+  summarize:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'failure' &&
+       contains(fromJSON('["schedule", "workflow_dispatch"]'), github.event.workflow_run.event))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      RUN_ID: ${{ inputs.run-id || github.event.workflow_run.id }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ inputs.run-id || github.event.workflow_run.id }}
+    steps:
+      - uses: actions/checkout@v6
+      # Each artifact lands in a directory of its own, named after it. A job
+      # that failed before its runs (a build error, say) uploaded no store.
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: '*-store'
+          run-id: ${{ env.RUN_ID }}
+          github-token: ${{ github.token }}
+          path: artifacts
+      - name: Digest of the failed runs
+        id: digest
+        run: |
+          : >digest.md
+          jobs=0
+          while read -r t; do
+            job="$(basename "$t" .tgz)"
+            job="${job%-store}"
+            mkdir -p "batch/$job"
+            tar -xzf "$t" -C "batch/$job"
+            [ -f "batch/$job/runs.txt" ] || continue
+            { echo "# Job $job"; echo; .github/failure-summary/digest.sh "batch/$job"; echo; } >>digest.md
+            jobs=$((jobs + 1))
+          done < <(find artifacts -name '*.tgz' 2>/dev/null | sort)
+          # The prompt is one command-line argument, which Linux caps at 128 KiB.
+          if [ "$(wc -c <digest.md)" -gt 100000 ]; then
+            head -c 100000 digest.md >digest.cut
+            printf '\n\n(The digest was cut at 100000 bytes.)\n' >>digest.cut
+            mv digest.cut digest.md
+          fi
+          echo "jobs=$jobs" >>"$GITHUB_OUTPUT"
+          echo "$jobs job(s), digest $(wc -c <digest.md) bytes"
+      - if: steps.digest.outputs.jobs != '0'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Copilot CLI
+        if: steps.digest.outputs.jobs != '0'
+        run: npm install -g @github/copilot@1.0.105
+      - name: Summarize
+        if: steps.digest.outputs.jobs != '0'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          prompt="$(cat .github/failure-summary/prompt.md .github/failure-summary/known-issues.md digest.md)"
+          # No -s, so the usage statistics are printed after the answer. No
+          # --reasoning-effort: with only the "auto" model (Copilot Student),
+          # it is rejected.
+          copilot -p "$prompt" --max-ai-credits 30 \
+            --disable-builtin-mcps --deny-tool shell --deny-tool write \
+            2>&1 | tee copilot.out
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "### Failed Jepsen runs: Copilot summary (auto-generated, not verified)"
+            echo
+            echo "Run summarized: ${RUN_URL}. Its own summary has the checkers' verdicts, which this note doesn't replace."
+            echo
+            if [ "${{ steps.digest.outputs.jobs }}" = "0" ]; then
+              echo "No store artifact with a runs.txt in that run, so there was nothing to summarize: the job may have failed before its runs."
+            else
+              cat copilot.out 2>/dev/null || echo "(no output)"
+            fi
+          } >>"$GITHUB_STEP_SUMMARY"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failure-summary
+          path: |
+            digest.md
+            copilot.out
+          if-no-files-found: ignore
+          retention-days: 14
