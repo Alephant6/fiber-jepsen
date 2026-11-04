@@ -3,7 +3,7 @@ name: Jepsen
 # Runs Jepsen against one Fiber commit on a GitHub runner: checks out Fiber and
 # this harness, builds fnn (once per Fiber commit, then cached) and the devnet
 # snapshot (once per version of Fiber's test files, then cached), runs the test
-# `runs` times and writes a table of the runs to the job summary. A run whose verdict isn't valid fails the job once all runs are done.
+# `runs` times, each with its own seed, and writes a table of the runs to the job summary. A run whose verdict isn't valid fails the job once all runs are done.
 #
 # smoke.yml calls it, it can be run by hand, and another repository's workflow
 # (Fiber's CI, say) can call it pinned to a commit of this repository:
@@ -52,7 +52,7 @@ on:
         description: The Fiber commit, branch or tag
         default: develop
       args:
-        description: Arguments for scripts/run.sh
+        description: Arguments for scripts/run.sh (add --seed N to run a run's payments and faults again)
         default: --time-limit 60 --faults kill --kill-targets all --rate 20 --nemesis-interval 8 --quiesce 60 --ledger
       runs:
         description: How many times to run the test
@@ -181,16 +181,22 @@ jobs:
         run: install -D fnn-bin/fnn docker/build/bin/fnn
 
       # Every run starts from the snapshot; runs.txt gets one line per run: its
-      # number, run.sh's exit status and its store directory.
+      # number, run.sh's exit status and its store directory. Each run gets its
+      # own seed, unless the arguments give one to replay a run; seeds.txt gets
+      # the run's number and its seed.
       - name: Run
         run: |
           set +e -u -o pipefail
           status=0
+          given="$(grep -oE -- '--seed[= ]+[0-9]+' <<<"$ARGS" | grep -oE '[0-9]+$' || true)"
           for i in $(seq 1 "$RUNS"); do
-            echo "::group::run $i of $RUNS"
+            seed="${given:-$(od -An -N6 -tu8 /dev/urandom | tr -d ' ')}"
+            extra=()
+            [ -n "$given" ] || extra=(--seed "$seed")
+            echo "::group::run $i of $RUNS, seed $seed"
             # ARGS is a list of arguments, so it is split on purpose.
             # shellcheck disable=SC2086
-            scripts/run.sh $ARGS 2>&1 | tee "run-$i.log"
+            scripts/run.sh $ARGS "${extra[@]}" 2>&1 | tee "run-$i.log"
             code=${PIPESTATUS[0]}
             echo "::endgroup::"
             # store/latest names the run's directory; the control container sees
@@ -198,6 +204,7 @@ jobs:
             dir="$(readlink store/latest 2>/dev/null)"
             dir="${dir#/jepsen/store/}"
             echo "$i $code ${dir:-none}" >>runs.txt
+            echo "$i $seed" >>seeds.txt
             [ "$code" -eq 0 ] || status=1
           done
           exit "$status"
@@ -218,12 +225,14 @@ jobs:
             echo "- Fiber \`${FIBER_REPOSITORY}@${FIBER_SHA:0:10}\`, ckb ${CKB_VERSION}, fnn sha256 \`${fnn:-none}\` (first 16 hex digits)"
             echo "- Harness \`${HARNESS_REPOSITORY}@${HARNESS_SHA:0:10}\`"
             echo "- Restored from cache: fnn ${FNN_HIT}${DEPS_HIT:+ (compiled dependencies: exact match ${DEPS_HIT})}, devnet snapshot ${SNAPSHOT_HIT}"
+            echo "- To run a run's payments and faults again, add \`--seed <its seed>\` to the arguments, with the same Fiber commit. Timing still differs, so a failure may take several runs to come back."
             echo
-            echo "| Run | Exit | Verdict | Ledger | Post-heal probe | Channels | Store |"
-            echo "| --- | --- | --- | --- | --- | --- | --- |"
+            echo "| Run | Seed | Exit | Verdict | Ledger | Post-heal probe | Channels | Store |"
+            echo "| --- | --- | --- | --- | --- | --- | --- | --- |"
             [ -f runs.txt ] || : >runs.txt
             while read -r i code store; do
               log="run-$i.log"
+              seed="$(awk -v i="$i" '$1 == i { print $2 }' seeds.txt 2>/dev/null || true)"
               verdict="$(grep -oE 'Everything looks good|Analysis invalid|Errors occurred during analysis|Jepsen broke' "$log" | tail -1 || true)"
               ledger="$(tr '\n' ' ' <"$log" | grep -oE ':outcome +:[a-z-]+' | tail -1 | grep -oE '[a-z-]+$' || true)"
               if [ -z "$verdict" ]; then probe="-"
@@ -231,7 +240,7 @@ jobs:
               else probe="failed"; fi
               # pprint may put the map on the line after its key.
               channels="$(tr '\n' ' ' <"$log" | grep -oE ':channel-summary +\{[^}]*\}' | tail -1 | sed -E 's/:channel-summary +//' | tr -s ' ' || true)"
-              echo "| $i | $code | ${verdict:-none} | ${ledger:--} | $probe | ${channels:--} | \`${store}\` |"
+              echo "| $i | \`${seed:--}\` | $code | ${verdict:-none} | ${ledger:--} | $probe | ${channels:--} | \`${store}\` |"
             done <runs.txt
           } >>"$GITHUB_STEP_SUMMARY"
 
@@ -252,7 +261,7 @@ jobs:
       # directory by its start time, so the store goes up as one tarball.
       - name: Pack the store
         if: failure()
-        run: tar -czf "$LABEL-store.tgz" --ignore-failed-read store run-*.log runs.txt
+        run: tar -czf "$LABEL-store.tgz" --ignore-failed-read store run-*.log runs.txt seeds.txt
       - if: failure()
         uses: actions/upload-artifact@v4
         with:

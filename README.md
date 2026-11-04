@@ -46,6 +46,7 @@ Planned: **clock skew**. Fiber expires TLCs by wall-clock timestamp (off-chain c
   - `ledger.clj` (per-node money check, with `--ledger`)
   - `nonce.clj` (MuSig2 nonce reuse, with `--nonce-check`)
   - `nemesis.clj` (the `disconnect` fault)
+  - `schedule.clj` (payments and faults, drawn in advance from the run's seed)
 - `instrument/`: the logging-only fnn instrumentation the nonce check needs.
 - `.github/workflows/`: `ci.yml` (lint and unit tests), `smoke.yml` (a run without faults whenever the harness changes), `jepsen.yml` (any arguments against any Fiber commit; other repositories can call it, see [below](#in-another-repositorys-ci)) and `failure-summary.yml` (a Copilot note on failed manual runs, see [below](#a-note-on-failed-runs-copilot)); `.github/failure-summary/` has its digest script, prompt and known issues.
 
@@ -63,7 +64,7 @@ FNN_BIN=/path/to/fiber/target/release/fnn FIBER_SNAP=/path/to/a/clean/fiber/chec
 scripts/run.sh --time-limit 60 --faults kill
 scripts/run.sh --time-limit 300 --faults kill,pause,partition --rate 10
 
-# several runs, one summary line each: verdict, post-heal probe, channel states, store directory
+# several runs, one summary line each: verdict, post-heal probe, channel states, seed, store directory
 scripts/repeat.sh 4 --time-limit 60 --faults kill --kill-targets all --rate 20 --nemesis-interval 8 --quiesce 60
 
 # no faults: checks the harness itself (the cluster comes up, payments flow, every checker passes)
@@ -77,6 +78,18 @@ Results, including node logs and a timeline, are written to `store/`. To test an
 The node image is Ubuntu 24.04 (glibc 2.39), the system of the GitHub `ubuntu-24.04` runners on which both Fiber's CI and this repository's CI build fnn. An fnn built on a system with glibc 2.39 or older runs in it: one from Fiber's Docker image (built on Debian 12) or a portable release package (built on Ubuntu 22.04) does too. One linked against a newer glibc doesn't start, and Jepsen then reports only that the RPC never came up. `NODE_BASE=debian:bookworm-slim scripts/run.sh ...` builds the nodes on another base.
 
 `scripts/stall_report.py store/<test>/<run> ...` lists, for each channel with a problem, whether it is stalled on an unbalanced revocation nonce ledger ([#1561](https://github.com/nervosnetwork/fiber/issues/1561)), closed, or fine but still holding TLCs. It needs channel debug logs: add `--log-level 'info,fnn::fiber::channel=debug'` to the run.
+
+### Running a run again (`--seed`)
+
+Every run has a seed, and the payments and faults are drawn from it in advance (`schedule.clj`): each payment's amount, destination and attempt id, each fault's kind and target (node or channel), and the gaps between operations. A run with the same seed, arguments and Fiber build issues the same payments, and the same faults, in the same order. Without `--seed` the harness picks one; it is in the test map at the top of `jepsen.log` (`:seed`), and `repeat.sh` prints it. In CI every run gets its own, listed in the job summary.
+
+```bash
+scripts/run.sh --time-limit 60 --faults kill --seed 123456789
+```
+
+A seed doesn't make a run deterministic. When each operation runs, how payments and faults interleave, which node sends each payment (the first client that is free), and everything inside fnn and ckb (keysend preimages, MuSig2 nonces, funding transactions, block times) still vary, so a failure that depends on timing may take several runs with its seed to come back.
+
+Jepsen's own `--seed` isn't enough for this. When the next operation isn't due yet, Jepsen drops the generator's answer and asks again later, and a generator that draws random values when asked draws new ones each time. How often Jepsen asks depends on when operations complete, so with such generators the same seed gives different payments and faults; `test/jepsen/fiber/schedule_test.clj` checks that the drawn-in-advance ones don't change with latency.
 
 ### MuSig2 nonce reuse (`--nonce-check`)
 

@@ -6,7 +6,8 @@
   and retransmits once it heals, so no reestablishment happens."
   (:require [clojure.tools.logging :refer [warn]]
             [jepsen [generator :as gen]
-                    [nemesis :as n]]
+                    [nemesis :as n]
+                    [random :as rand]]
             [jepsen.fiber [rpc :as rpc]
                           [topology :as topology]]))
 
@@ -33,7 +34,7 @@
             pubkeys @(:pubkeys test)]
         (case (:f op)
           :disconnect
-          (let [[a b] (rand-nth edges)]
+          (let [[a b] (or (:value op) (rand/nth edges))]
             (assoc op :value {:from a, :to b
                               :result (try-call a "disconnect_peer" {:pubkey (pubkeys b)})}))
 
@@ -48,7 +49,10 @@
     (teardown! [_ _test])))
 
 (defn disconnect-package
-  "A nemesis package for :disconnect, in the shape jepsen.nemesis.combined uses."
+  "A nemesis package for :disconnect, in the shape jepsen.nemesis.combined uses.
+  A :disconnect op's :value names the pair [a b] to disconnect; this package's
+  generator leaves it out, so the nemesis picks a random pair. fiber-test takes its
+  :disconnect ops from jepsen.fiber.schedule instead, which names the pair."
   [opts]
   (let [needed? ((:faults opts) :disconnect)
         start   {:type :info, :f :disconnect}
