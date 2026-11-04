@@ -47,7 +47,7 @@ Planned: **clock skew**. Fiber expires TLCs by wall-clock timestamp (off-chain c
   - `nonce.clj` (MuSig2 nonce reuse, with `--nonce-check`)
   - `nemesis.clj` (the `disconnect` fault)
 - `instrument/`: the logging-only fnn instrumentation the nonce check needs.
-- `.github/workflows/`: `ci.yml` (lint and unit tests), `smoke.yml` (a run without faults whenever the harness changes) and `jepsen.yml` (any arguments against any Fiber commit; other repositories can call it, see [below](#in-another-repositorys-ci)).
+- `.github/workflows/`: `ci.yml` (lint and unit tests), `smoke.yml` (a run without faults whenever the harness changes), `jepsen.yml` (any arguments against any Fiber commit; other repositories can call it, see [below](#in-another-repositorys-ci)) and `failure-summary.yml` (a Copilot note on failed manual runs, see [below](#a-note-on-failed-runs-copilot)); `.github/failure-summary/` has its digest script, prompt and known issues.
 
 ## Running
 
@@ -129,6 +129,10 @@ jobs:
 ```
 
 Inputs: `fiber-repository` and `fiber-ref` (default: the caller's repository and commit), `args` for `run.sh`, `runs`, `ckb-version` and `label`. The job summary has one row per run; the job fails if any run's verdict isn't valid, after all runs have finished, and then uploads the store.
+
+### A note on failed runs (Copilot)
+
+When a Jepsen run started by hand from the Actions tab (later, a scheduled one) fails, the Failure summary workflow (`failure-summary.yml`) digests the store of each failed job, keeping the checkers' output, every close, force-close and panic line and the most frequent warnings, and asks Copilot CLI which checker failed, what the likely cause is, which known issue it looks like and what would confirm it. The note goes to that workflow's job summary, linked to the failed run, and is marked as auto-generated and not verified: the verdicts are the checkers'. It runs with the workflow's own token and is billed to the repository owner's Copilot plan (a report has cost about 0.5 AI credits), never for pull requests, and not for calls from other repositories, which keep only read access. To summarize an earlier failed run, start the workflow by hand with that run's ID. The known issues the model is given are in `.github/failure-summary/known-issues.md`; update them with `FINDINGS.md`.
 
 ### Mixed versions, and a tally over several batches
 
