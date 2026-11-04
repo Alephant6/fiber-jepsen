@@ -1,0 +1,72 @@
+name: Try a Copilot summary of failed runs (temporary)
+
+# Temporary, to be removed before merging. It tries Copilot CLI, run with the
+# workflow's own token, as a way to summarize failed Jepsen runs. The input is
+# a stored batch from an earlier run (41569102145, eight runs on ubuntu-24.04,
+# three of them invalid with the known ae6f7d34 stall), so no cluster runs here.
+# The digest script cuts each failed run down to the start of results.edn and
+# counted WARN/ERROR lines, and the session is capped at 30 AI credits (the
+# minimum), billed to the repository owner's Copilot plan. The verdicts stay
+# with Jepsen's checkers; the model only writes a note on top of them.
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/try-copilot-summary.yml'
+      - '.github/try-copilot/**'
+
+permissions:
+  contents: read
+  actions: read            # to download another run's artifact
+  copilot-requests: write  # Copilot CLI with GITHUB_TOKEN
+
+jobs:
+  summarize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: compare-ubuntu-24.04
+          run-id: 41569102145
+          github-token: ${{ github.token }}
+          path: artifact
+      - name: Digest of the failed runs
+        run: |
+          mkdir batch
+          tar -xzf artifact/compare-ubuntu-24.04.tgz -C batch
+          .github/try-copilot/digest.sh batch >digest.md
+          wc -c digest.md
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Copilot CLI
+        run: npm install -g @github/copilot@1.0.105
+      - name: Summarize
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          prompt="$(cat .github/try-copilot/prompt.md digest.md)"
+          # No -s, so the usage statistics are printed after the answer.
+          copilot -p "$prompt" --max-ai-credits 30 --reasoning-effort low \
+            --disable-builtin-mcps --deny-tool shell --deny-tool write \
+            2>&1 | tee copilot.out
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "### Copilot summary of the failed runs (auto-generated, not verified)"
+            echo
+            echo "Input: run 41569102145, artifact compare-ubuntu-24.04; digest $(wc -c <digest.md) bytes."
+            echo
+            cat copilot.out 2>/dev/null || echo "(no output)"
+          } >>"$GITHUB_STEP_SUMMARY"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: copilot-summary
+          path: |
+            digest.md
+            copilot.out
+          retention-days: 7
