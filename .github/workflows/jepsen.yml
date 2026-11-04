@@ -120,16 +120,35 @@ jobs:
           echo "$HOME/.local/bin" >>"$GITHUB_PATH"
           sudo apt-get update -q
           sudo apt-get install -y -q python3-yaml netcat-openbsd
-      # On the runner, as Fiber's CI builds it; the node image is the runner's
-      # Ubuntu release, so the binary runs there. rustup installs the toolchain
-      # Fiber's rust-toolchain.toml names, which the deploy script's udt-init
-      # build in the next step uses too.
+      # fnn is built on the runner, as Fiber's CI builds it; the node image is
+      # the runner's Ubuntu release, so the binary runs there. rustup installs
+      # the toolchain Fiber's rust-toolchain.toml names, which the deploy
+      # script's udt-init build in the snapshot step uses too.
+      - name: Install the Rust toolchain
+        if: steps.build.outputs.cache-hit != 'true'
+        working-directory: fiber
+        run: rustup toolchain install || rustup show
+      # The compiled dependencies of fnn and of udt-init, kept across Fiber
+      # commits (Fiber's CI caches its builds with the same action). A new
+      # commit then compiles Fiber's own crates and any dependency whose
+      # version changed, not all of them. Saved after the job, also when a run
+      # fails, since the build itself succeeded.
+      - name: Restore the compiled dependencies
+        id: deps
+        if: steps.build.outputs.cache-hit != 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            fiber -> target
+            fiber/tests/deploy/udt-init -> target
+          shared-key: fnn-release
+          # The toolchain is Fiber's, which the action's own key doesn't see.
+          key: ${{ hashFiles('fiber/rust-toolchain.toml') }}
+          cache-on-failure: true
       - name: Build fnn
         if: steps.build.outputs.cache-hit != 'true'
         working-directory: fiber
-        run: |
-          rustup toolchain install || rustup show
-          cargo build --release --locked -p fiber-bin
+        run: cargo build --release --locked -p fiber-bin
       - name: Create the devnet snapshot
         if: steps.build.outputs.cache-hit != 'true'
         run: FNN_BIN="$PWD/fiber/target/release/fnn" FIBER_SNAP="$PWD/fiber" scripts/make-snapshot.sh
@@ -168,13 +187,14 @@ jobs:
           HARNESS_SHA: ${{ steps.key.outputs.harness-sha }}
           HARNESS_REPOSITORY: ${{ job.workflow_repository }}
           CACHE_HIT: ${{ steps.build.outputs.cache-hit == 'true' }}
+          DEPS_HIT: ${{ steps.deps.outputs.cache-hit }}
         run: |
           fnn="$(sha256sum docker/build/bin/fnn 2>/dev/null | cut -c1-16)"
           {
             echo "### ${LABEL}: \`${ARGS}\`"
             echo "- Fiber \`${FIBER_REPOSITORY}@${FIBER_SHA:0:10}\`, ckb ${CKB_VERSION}, fnn sha256 \`${fnn:-none}\` (first 16 hex digits)"
             echo "- Harness \`${HARNESS_REPOSITORY}@${HARNESS_SHA:0:10}\`"
-            echo "- Build restored from cache: ${CACHE_HIT}"
+            echo "- Build restored from cache: ${CACHE_HIT}${DEPS_HIT:+ (compiled dependencies: exact match ${DEPS_HIT})}"
             echo
             echo "| Run | Exit | Verdict | Ledger | Post-heal probe | Channels | Store |"
             echo "| --- | --- | --- | --- | --- | --- | --- |"
