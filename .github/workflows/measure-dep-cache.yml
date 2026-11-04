@@ -1,0 +1,30 @@
+name: Measure the dependency cache (temporary)
+
+# To be removed before merging. Two cold builds in a row, of Fiber commits that
+# have no build cache: the first compiles every dependency and saves them, the
+# second (develop three commits later, same Cargo.lock) restores them.
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/measure-dep-cache.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  first:
+    uses: ./.github/workflows/jepsen.yml
+    with:
+      fiber-repository: nervosnetwork/fiber
+      fiber-ref: 45ffdac8bd2d56f6e9cd4a01c2b2e4975c3e4397
+      args: --time-limit 45 --faults none --ledger
+      label: first-45ffdac
+  second:
+    needs: first
+    if: always()
+    uses: ./.github/workflows/jepsen.yml
+    with:
+      fiber-repository: nervosnetwork/fiber
+      fiber-ref: a374fd53ebb6d6dd077029e61d1b2b5de6f5e1a9
+      args: --time-limit 45 --faults none --ledger
+      label: second-a374fd5
