@@ -3,14 +3,20 @@
   with fnn's disconnect_peer RPC, and a later :reconnect op connects every pair again
   with connect_peer, so channels reestablish while both processes keep running.
   Partitions rarely get there: TCP keeps the connection open through an iptables drop
-  and retransmits once it heals, so no reestablishment happens."
+  and retransmits once it heals, so no reestablishment happens.
+
+  With --disconnect-flash MIN-MAX, each fault is a flash disconnect instead: one
+  :flash-disconnect op disconnects the pair, waits a drawn MIN-MAX milliseconds and
+  connects it again (C-05's network blips of 100 ms to 5 s, as a real disconnect:
+  packet loss that short never breaks TCP)."
   (:require [clojure.tools.logging :refer [warn]]
             [jepsen [generator :as gen]
                     [nemesis :as n]
                     [random :as rand]]
             [jepsen.fiber [rpc :as rpc]
                           [schedule :as schedule]
-                          [topology :as topology]]))
+                          [topology :as topology]])
+  (:import (java.util SplittableRandom)))
 
 (defn- try-call
   "Calls the RPC and returns its result, or a short failure string: the node may be
@@ -25,7 +31,7 @@
   []
   (reify
     n/Reflection
-    (fs [_] #{:disconnect :reconnect})
+    (fs [_] #{:disconnect :reconnect :flash-disconnect})
 
     n/Nemesis
     (setup! [this _test] this)
@@ -38,6 +44,21 @@
           (let [[a b] (or (:value op) (rand/nth edges))]
             (assoc op :value {:from a, :to b
                               :result (try-call a "disconnect_peer" {:pubkey (pubkeys b)})}))
+
+          :flash-disconnect
+          (let [{[a b] :edge, down-ms :down-ms} (:value op)
+                ; Fetched first, so the reconnect isn't later than drawn.
+                info (try (rpc/call b "node_info") (catch Exception _ nil))
+                down (try-call a "disconnect_peer" {:pubkey (pubkeys b)})
+                _    (Thread/sleep (long down-ms))
+                ; Whether a still saw b as a peer when the wait ended: true means the
+                ; connection came back before the reconnect, or never went away.
+                seen (try (boolean (some #(= (pubkeys b) (:pubkey %))
+                                         (:peers (rpc/call a "list_peers"))))
+                          (catch Exception e (str "failed: " (.getMessage e))))
+                up   (try-call a "connect_peer" {:address (topology/p2p-address b info)})]
+            (assoc op :value {:from a, :to b, :down-ms down-ms, :disconnect down
+                              :peer-before-reconnect seen, :reconnect up}))
 
           :reconnect
           (assoc op :value
@@ -66,16 +87,30 @@
      :perf            #{{:name  "disconnect"
                          :start #{:disconnect}
                          :stop  #{:reconnect}
-                         :color "#A0C4E9"}}}))
+                         :color "#A0C4E9"}
+                        ; A flash is one op: lines at its start and its end.
+                        {:name  "flash disconnect"
+                         :start #{}
+                         :stop  #{}
+                         :fs    #{:flash-disconnect}
+                         :color "#5B8FC9"}}}))
 
 (defn ops
-  "Endless pairs of a :disconnect of one random channel's peers and a :reconnect."
-  [r opts]
+  "Endless pairs of a :disconnect of one random channel's peers and a :reconnect.
+  With :disconnect-flash [min max] (ms), endless :flash-disconnect ops instead, each
+  of one random channel's peers for a time drawn uniformly from that range."
+  [^SplittableRandom r opts]
   (let [edges (vec (topology/edges opts))]
-    (mapcat (fn [edge]
-              [{:type :info, :f :disconnect, :value edge}
-               {:type :info, :f :reconnect}])
-            (repeatedly #(schedule/pick r edges)))))
+    (if-let [[lo hi] (:disconnect-flash opts)]
+      (repeatedly (fn []
+                    (let [edge (schedule/pick r edges)]
+                      {:type  :info
+                       :f     :flash-disconnect
+                       :value {:edge edge, :down-ms (+ lo (.nextInt r (int (inc (- hi lo)))))}})))
+      (mapcat (fn [edge]
+                [{:type :info, :f :disconnect, :value edge}
+                 {:type :info, :f :reconnect}])
+              (repeatedly #(schedule/pick r edges))))))
 
 (def fault
   {:faults  #{:disconnect}
