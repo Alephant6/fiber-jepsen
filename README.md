@@ -25,6 +25,8 @@ With `--ledger`, it also checks that money adds up at every node, not only on ev
 
 With `--force-close-ok`, a channel that ended closed (every end `Closed`) doesn't fail the run, nor do its ends' balances, a payment whose TLC it still holds, a probe over it, or a route probe between nodes it cut apart; the result lists them under `:force-closed`. A node force-closes a channel when its peer hasn't answered an update for 30 s, so a pause or partition longer than that closes channels. Whether that is expected is open question 1 on the [chaos-test plan](https://gist.github.com/quake/c73bba93b5b1928391063038fc9fe34a); until it is answered, the default stays: a closed channel fails the run.
 
+With `--onchain`, after the final read it closes every channel and checks on chain that each party got its last balance (see [below](#on-chain-settlement---onchain)).
+
 With `--availability-window`, it also checks that the payment success rate after healing is back to what it was before the first fault (see [below](#availability-after-healing---availability-window)).
 
 ## Faults
@@ -54,6 +56,7 @@ Planned: **clock skew**. Fiber expires TLCs by wall-clock timestamp (off-chain c
   - `ledger.clj` (per-node money check, with `--ledger`)
   - `closes.clj` (what `--force-close-ok` excuses)
   - `nonce.clj` (MuSig2 nonce reuse, with `--nonce-check`)
+  - `onchain.clj` and `chain.clj` (on-chain settlement, with `--onchain`; reading the CKB node)
   - `faults.clj` and `faults/` (one namespace per fault: `process` for kill and pause, `partition`, `disconnect`, `packet`)
   - `scenarios.clj` (named scenarios of the chaos-test plan, `--scenario`)
   - `schedule.clj` (payments, and the random streams faults draw from, fixed in advance by the run's seed)
@@ -155,6 +158,18 @@ On a graph other than a line (`--topology ring` or `mesh`) a payment can take an
 The result is invalid when a node's change differs from the expected one, when the status the client saw when a payment finished differs from the sender's final status (or the client was told no payment was created and one succeeded), or when one attempt produced two payments. A difference is `:unknown` rather than invalid when the final records can't show every settlement: a channel that is closed, missing or still holds TLCs, a payment that hasn't finished, or a payment the sender no longer lists. The check doesn't read the chain, so settlement after a force close is not covered. `repeat.sh` prints the outcome (`balanced`, `unbalanced`, `client-mismatch` or `incomplete`); `test/jepsen/fiber/ledger_test.clj` covers the rules.
 
 The option is off by default, so runs without it send the same requests to the nodes and run the same checks as before.
+
+### On-chain settlement (`--onchain`)
+
+The plan's assertion 6: once every channel is closed, what each party got on chain matches its last channel balance. The other checks read only the nodes; this one reads the CKB node (its RPC and indexer).
+
+A node's wallet is the cells of its default funding lock script (`node_info`): Fiber funds channels from it, pays the node's share of a closed channel to it, and takes the fees of settlement transactions from it. With `--onchain` the test records every wallet before the faults. After the final read it asks every channel that is still open to close cooperatively (and force-closes one that hasn't closed a minute later), waits up to `--settle-timeout` seconds (default 300) for the closes to settle, and traces each channel from its funding cell: the transaction that spent it (the shutdown transaction, or a commitment transaction after a force close), then every transaction that spent a non-wallet cell it created (the commitment cell, which the watchtowers settle after the commitment delay of one epoch, ten blocks on the devnet).
+
+A party's receipt is what its wallet gained from those transactions: outputs to its lock minus inputs from it, since a settlement transaction spends wallet cells for its fee and returns the change. Fiber pays each party its balance plus the CKB it reserved at opening (a cell's occupied capacity plus 1 CKB), less fees. Both parties use the default lock script, so each reserved half of (funding capacity − local − remote). So for each party, from its own record of the closed channel:
+
+    balance + reserve − offered TLCs − the channel's fees  ≤  receipt  ≤  balance + reserve + received TLCs
+
+A pending TLC goes to one side or the other: to the receiver with the preimage, back to the offerer once it expires. The result is invalid when a receipt is outside its range, when another node's wallet got something from the channel, when a channel is still open, or when its cells are still unspent after the wait; that last one is `:unknown` instead while one of the channel's TLCs hasn't expired, which in a release build takes hours. It is also invalid when a wallet's change since the start differs from what the channels' funding and closing transactions explain. Per channel the result shows each party's balance, reserve, receipt and the difference; `test/jepsen/fiber/onchain_test.clj` covers the rules.
 
 ### Availability after healing (`--availability-window`)
 

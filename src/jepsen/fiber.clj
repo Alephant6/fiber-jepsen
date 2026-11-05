@@ -19,6 +19,7 @@
                           [invoice]
                           [ledger :as ledger]
                           [nonce :as nonce]
+                          [onchain :as onchain]
                           [scenarios :as scenarios]
                           [schedule :as schedule]
                           [topology :as topology]]
@@ -125,12 +126,14 @@
                                       (:close opts)       (assoc :close (fiber-checker/close-checker))
                                       (:nonce-check opts) (assoc :nonce (nonce/checker))
                                       (:ledger opts)      (assoc :ledger (ledger/checker))
+                                      (:onchain opts)     (assoc :onchain (onchain/checker))
                                       (availability? opts)
                                       (assoc :availability (fiber-checker/availability-checker
                                                              (:availability-tolerance opts 5)))))
             ; With --availability-window, a baseline window of payments before the
             ; faults and a recovery window after the network has converged.
             :generator            (gen/phases
+                                    (when (:onchain opts) (gen/clients (gen/once {:f :chain-baseline})))
                                     (availability-window opts streams :pay-baseline :baseline)
                                     (fault-window opts streams)
                                     (gen/log "Healing all faults")
@@ -139,7 +142,10 @@
                                     (gen/sleep (:quiesce opts))
                                     (availability-window opts streams :pay-recovery :recovery)
                                     (when-not (:close opts) (gen/clients (gen/once {:f :probe})))
-                                    (gen/clients (gen/once {:f :read})))})))
+                                    (gen/clients (gen/once {:f :read}))
+                                    (when (:onchain opts)
+                                      (gen/phases (gen/log "Closing every channel and waiting for it to settle on chain")
+                                                  (gen/clients (gen/once {:f :settle})))))})))
 
 (defn- keywords
   [s]
@@ -244,7 +250,13 @@
                               " channel with, so that the probe tests multi-hop routing.")]
    [nil "--force-close-ok" (str "Don't fail the run for channels that ended closed, nor for what"
                                 " they explain (open question 1 on the chaos-test plan: a pause or"
-                                " partition over 30 s force-closes channels). They are reported.")]])
+                                " partition over 30 s force-closes channels). They are reported.")]
+   [nil "--onchain" (str "After the final read, close every channel and check on chain that each"
+                         " party received its last balance plus its reserve, less fees, and that"
+                         " every node's wallet changed by what its channels' transactions explain.")]
+   [nil "--settle-timeout SECONDS" "With --onchain, how long to wait for the closes to settle on chain."
+    :default  300
+    :parse-fn parse-long]])
 
 (defn -main
   [& args]
