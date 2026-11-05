@@ -1,8 +1,9 @@
-# The Jepsen control node. The project is bind-mounted at /jepsen.
+# The Jepsen control node. The project is bind-mounted at /jepsen. curl talks to
+# Docker's Engine API over the socket docker-compose.yml mounts (--faults cpu,memory).
 FROM clojure:temurin-21-lein-bookworm
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends openssh-client gnuplot-nox git \
+ && apt-get install -y --no-install-recommends openssh-client gnuplot-nox git curl \
  && rm -rf /var/lib/apt/lists/*
 
 COPY build/ssh/id_rsa /root/.ssh/id_rsa

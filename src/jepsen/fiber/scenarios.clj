@@ -158,6 +158,19 @@
                             " each wallet. A TLC still pending on a force-closed channel settles"
                             " only once it expires, hours later in a release build, so that"
                             " channel's verdict is unknown rather than valid.")}
+    "c-12"  {:priority :p1
+             :plan     (str "A-B-C under high load; limit a node's CPU or memory with cgroups;"
+                            " no OOM, no disconnect loop, recovers once the limit is lifted")
+             :args     ["--faults" "cpu,memory" "--resource-targets" "one,all" "--rate" "20"
+                        "--nemesis-interval" "30" "--time-limit" "300"
+                        "--log-level" "info,fnn::fiber::network=debug"]
+             :differs  (str "Limits are Docker's (docker update), on the node's whole container:"
+                            " fnn and sshd. Each limit draws CPU (0.1-0.5 CPUs) or memory"
+                            " (128-256 MiB, no swap) and one node or all of them, and lasts an"
+                            " exponential 30 s on average, capped at 100 s. Lifting sets the limits"
+                            " to the host's size, since Docker can't remove one. A disconnect loop"
+                            " is a pair of nodes disconnecting 3 times or more within a limit and"
+                            " the minute after it, from fnn's debug log.")}
     "c-14"  {:priority :p2
              :plan     "A-B, payments and invoices; a node's clock jumps forward or back"
              :args     ["--faults" "clock" "--clock-targets" "one,all" "--clock-jump" "60-1800"

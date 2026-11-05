@@ -26,7 +26,8 @@
                                  [outage :as outage]
                                  [packet :as packet]
                                  [partition :as partition]
-                                 [process :as process]]))
+                                 [process :as process]
+                                 [resources :as resources]]))
 
 (def registry
   "Every fault, in the order their generators and final generators combine."
@@ -36,7 +37,8 @@
    packet/fault
    chain-partition/fault
    clock/fault
-   outage/fault])
+   outage/fault
+   resources/fault])
 
 (def supported
   "Every name --faults accepts."

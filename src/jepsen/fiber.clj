@@ -31,7 +31,8 @@
                                  [outage :as outage]
                                  [packet :as packet]
                                  [partition :as partition]
-                                 [process :as process]])
+                                 [process :as process]
+                                 [resources :as resources]])
   (:gen-class))
 
 (def supported-faults
@@ -355,6 +356,24 @@
     :default  0
     :parse-fn parse-long
     :validate [#(and % (<= 0 %)) "Must be 0 or more"]]
+   [nil "--resource-targets TARGETS" (str "With --faults cpu or memory, comma-separated target specs to"
+                                          " choose from: one (a random node), all.")
+    :default  [:one]
+    :parse-fn keywords
+    :validate [#(every? resources/target-specs %) (str "Must be a subset of " resources/target-specs)]]
+   [nil "--cpu-limit CPUS" (str "With --faults cpu, the CPUs a limited node's container gets (a CFS"
+                                " quota), or a range MIN-MAX drawn per fault.")
+    :default  [0.1 0.5]
+    :parse-fn resources/parse-range
+    :validate [(fn [[lo hi]] (and lo hi (<= 0.01 lo hi))) "Must be CPUS or MIN-MAX, 0.01 <= MIN <= MAX"]]
+   [nil "--memory-limit MIB" (str "With --faults memory, the memory a limited node's container gets"
+                                  " (MiB, no swap), or a range MIN-MAX drawn per fault. The default"
+                                  " starts above fnn's anonymous memory under c-12's load (at most"
+                                  " 92 MiB on ae6f7d34), so an OOM kill means fnn grew, not that the"
+                                  " limit was below what it always needs.")
+    :default  [128 256]
+    :parse-fn resources/parse-range
+    :validate [(fn [[lo hi]] (and lo hi (<= 16 lo hi))) "Must be MIB or MIN-MAX, 16 <= MIN <= MAX"]]
    [nil "--nonce-check" (str "Check MuSig2 nonce use. Needs an fnn built with the nonce-oracle"
                              " feature (scripts/build-fnn-nonce-oracle.sh).")]
    [nil "--close" (str "Halfway through the faults, ask every channel to close cooperatively, and"
