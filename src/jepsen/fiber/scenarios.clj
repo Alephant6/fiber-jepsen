@@ -26,7 +26,22 @@
              :args     ["--faults" "pause" "--nemesis-interval" "30" "--time-limit" "300"]
              :differs  (str "Three nodes in a line rather than A-B. A pause lasts an exponential"
                             " 30 s on average, capped at 100 s, so some cross V2's 30 s"
-                            " peer-response deadline.")}))
+                            " peer-response deadline.")}
+    "c-10"  {:priority :p0
+             :plan     (str "Any topology; continuous payments plus force closes; CKB delay of 1-10 s"
+                            " with jitter. On-chain transactions confirm and balances reconcile.")
+             :args     ["--faults" "packet" "--packet-targets" "chain" "--packet-delay" "1000-10000"
+                        "--nemesis-interval" "30" "--channel-ops" "open,force-close"
+                        "--channel-interval" "20" "--onchain" "--time-limit" "300"]
+             :differs  (str "Three nodes in a line. The delay applies to the nodes' traffic to the"
+                            " CKB node, not the replies, with a tenth of it as jitter, and alternates"
+                            " with healing, each phase an exponential 30 s on average. Every 20 s on"
+                            " average a client opens a channel or force-closes one on an edge,"
+                            " keeping one ready channel per edge. After the final read every channel"
+                            " still open is closed and --onchain checks each party's receipt and"
+                            " each wallet. A TLC still pending on a force-closed channel settles"
+                            " only once it expires, hours later in a release build, so that"
+                            " channel's verdict is unknown rather than valid.")}))
 
 (defn scenario-args
   "The arguments of scenario `name`. Throws for an unknown name."
