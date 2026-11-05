@@ -10,7 +10,9 @@
   resolved when the operation runs, among the channels that are ready then, so
   the same seed can close a different channel in another run. A close never
   takes the last --channel-keep ready channels of an edge: payments and the
-  post-heal probe still need a route.
+  post-heal probe still need a route. A channel counts as ready only when both
+  ends say so, since an end can stay ChannelReady for minutes after the other
+  end force-closed it (below).
 
   The checker (assertion 4 of the chaos-test plan, and C-09's): after the
   faults heal, every end of every channel is ChannelReady or Closed, never in
@@ -84,6 +86,16 @@
          sort
          vec)))
 
+(defn edge-ready-channels
+  "Ids of the channels between `a` and `b` that both ends report
+  ChannelReady, sorted. When `b` can't be read, `a`'s view alone, with
+  :peer-view :unavailable."
+  [test a b]
+  (let [mine (ready-channels test a b)]
+    (try {:ready (vec (sort (filter (set (ready-channels test b a)) mine)))}
+         (catch Exception _
+           {:ready mine, :peer-view :unavailable}))))
+
 (defn- attempt
   "Calls the RPC; :ok-shaped op on success, :fail with the error otherwise.
   A timeout leaves the outcome unknown: :info."
@@ -115,16 +127,17 @@
                 {:temporary-channel (:temporary_channel_id res)}))))
 
 (defn close!
-  "Closes one of the edge's ready channels, as `actor` sees them, cooperatively
-  or by force. When the edge has --channel-keep ready channels or fewer, does
-  nothing: the op is :ok with :skipped :keeping-last, since keeping them is the
-  workload's choice, not a failure (and Jepsen's stats checker would fail a run
-  in which every close of a kind was a :fail)."
+  "Closes one of the edge's ready channels (edge-ready-channels), cooperatively
+  or by force, from the op's acting end. When the edge has --channel-keep ready
+  channels or fewer, does nothing: the op is :ok with :skipped :keeping-last,
+  since keeping them is the workload's choice, not a failure (and Jepsen's stats
+  checker would fail a run in which every close of a kind was a :fail)."
   [test op force?]
   (let [[a b] (edge-ends test (:value op))
         value (assoc (:value op) :by a, :peer b)]
     (try
-      (let [ready (ready-channels test a b)
+      (let [{:keys [ready peer-view]} (edge-ready-channels test a b)
+            value (cond-> value peer-view (assoc :peer-view peer-view))
             keep  (:channel-keep test 1)]
         (if (<= (count ready) keep)
           (assoc op :type :ok, :value (assoc value :ready (count ready), :skipped :keeping-last))

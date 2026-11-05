@@ -5,6 +5,7 @@
             [jepsen.fiber :as fiber]
             [jepsen.fiber [channels :as channels]
                           [checker :as fc]
+                          [rpc :as rpc]
                           [schedule :as schedule]]))
 
 (def nodes ["n1" "n2" "n3"])
@@ -139,3 +140,47 @@
     (is (nil? (fc/sender-balance {"n1" [(assoc (ch "a" "Closed") :local_balance "0x64")]
                                   "n2" [(ch "a" "Closed")]}
                                  "n1" "n2")))))
+
+(defn- fake-nodes
+  "rpc/call over fake nodes: list_channels answers from `views` ({node {channel
+  state}}, all with the one peer), shutdown_channel is recorded in `closed`,
+  and a node missing from `views` is down."
+  [views closed]
+  (fn [node method params & _]
+    (case method
+      "list_channels"
+      (if-let [view (get views node)]
+        {:channels (for [[id st] view] {:channel_id id, :state {:state_name st}})}
+        (throw (java.net.ConnectException. "down")))
+      "shutdown_channel" (do (swap! closed conj [node (:channel_id params)]) {}))))
+
+(deftest close-counts-channels-ready-at-both-ends
+  (let [test {:nodes nodes, :pubkeys (atom {"n1" "p1", "n2" "p2", "n3" "p3"}), :channel-keep 1}
+        op   {:type :invoke, :f :force-close, :value {:edge 0, :flip? false, :pick 0}}]
+    (testing "n2 force-closed 0xa, and n1 hasn't noticed: only 0xb is ready, so it is kept"
+      (let [closed (atom [])]
+        (with-redefs [rpc/call (fake-nodes {"n1" {"0xa" "ChannelReady", "0xb" "ChannelReady"}
+                                            "n2" {"0xa" "Closed", "0xb" "ChannelReady"}}
+                                           closed)]
+          (let [res (channels/close! test op true)]
+            (is (= :ok (:type res)))
+            (is (= :keeping-last (get-in res [:value :skipped])))
+            (is (= 1 (get-in res [:value :ready])))
+            (is (empty? @closed))))))
+    (testing "two channels ready at both ends: one is closed"
+      (let [closed (atom [])]
+        (with-redefs [rpc/call (fake-nodes {"n1" {"0xa" "ChannelReady", "0xb" "ChannelReady"}
+                                            "n2" {"0xa" "ChannelReady", "0xb" "ChannelReady"}}
+                                           closed)]
+          (let [res (channels/close! test op true)]
+            (is (= :ok (:type res)))
+            (is (= "0xa" (get-in res [:value :channel])))
+            (is (= [["n1" "0xa"]] @closed))))))
+    (testing "the peer can't be read: the acting end's view alone"
+      (let [closed (atom [])]
+        (with-redefs [rpc/call (fake-nodes {"n1" {"0xa" "ChannelReady", "0xb" "ChannelReady"}}
+                                           closed)]
+          (let [res (channels/close! test op false)]
+            (is (= :ok (:type res)))
+            (is (= :unavailable (get-in res [:value :peer-view])))
+            (is (= 1 (count @closed)))))))))
