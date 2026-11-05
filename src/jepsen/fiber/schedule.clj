@@ -120,8 +120,27 @@
             to     (.nextLong r (max 1 (dec node-count)))]
         {:f :pay, :value {:id id, :amount amount, :to-index to}}))))
 
+(defn with-kinds
+  "Payment ops `ps`, each with a :kind drawn uniformly from `kinds` with `r` (a
+  kind listed twice is drawn twice as often). Nothing is drawn for a single kind,
+  and keysend alone, the default, adds no :kind, so keysend runs keep their ops."
+  [^SplittableRandom r kinds ps]
+  (let [kinds (vec kinds)]
+    (cond (every? #{:keysend} kinds) ps
+          (apply = kinds)            (map #(assoc-in % [:value :kind] (first kinds)) ps)
+          :else                      (map #(assoc-in % [:value :kind] (pick r kinds)) ps))))
+
+(defn kinds-stream
+  "The stream of the payment kinds of payment stream `k`."
+  ^SplittableRandom [streams k]
+  (stream streams (keyword (str (name k) "-kind"))))
+
 (defn paced-payments
-  "Payments from stream `k`, with gaps averaging 1/rate seconds."
-  [streams k rate node-count]
-  (paced (gaps (gaps-stream streams k) (/ 1.0 rate))
-         (payments (stream streams k) node-count)))
+  "Payments from stream `k`, with gaps averaging 1/rate seconds, each of a kind
+  drawn from `kinds` (default keysend; see with-kinds)."
+  ([streams k rate node-count]
+   (paced-payments streams k rate node-count [:keysend]))
+  ([streams k rate node-count kinds]
+   (paced (gaps (gaps-stream streams k) (/ 1.0 rate))
+          (with-kinds (kinds-stream streams k) kinds
+                      (payments (stream streams k) node-count)))))

@@ -15,6 +15,7 @@
                           [client :as client]
                           [db :as db]
                           [faults :as faults]
+                          [invoice]
                           [ledger :as ledger]
                           [nonce :as nonce]
                           [onchain :as onchain]
@@ -32,16 +33,39 @@
 
 (defn payments
   "Payments for the whole fault window, drawn from the run's seed (see
-  jepsen.fiber.schedule): 0.01-0.2 CKB each, about :rate a second. With --close,
+  jepsen.fiber.schedule): 0.01-0.2 CKB each, about :rate a second, of the kinds
+  in --pay-kinds (keysend, invoice: jepsen.fiber.invoice). With --close,
   every channel is asked to close cooperatively halfway through, and payments go on
   against the closing channels, from a stream of their own."
   [opts streams]
-  (let [pays (fn [k] (schedule/paced-payments streams k (:rate opts) (count (:nodes opts))))]
+  (let [pays (fn [k] (schedule/paced-payments streams k (:rate opts) (count (:nodes opts))
+                                              (:pay-kinds opts [:keysend])))]
     (if (:close opts)
       (gen/phases (gen/time-limit (/ (:time-limit opts) 2) (pays :pay))
                   (gen/once {:f :close})
                   (pays :pay-after-close))
       (pays :pay))))
+
+(defn availability?
+  "Whether the test measures the success rate before the faults and after
+  healing (--availability-window). Not with --close: every channel is closed
+  by the end."
+  [opts]
+  (and (pos? (:availability-window opts 0)) (not (:close opts))))
+
+(defn availability-window
+  "With --availability-window, payments without faults for that many seconds,
+  at --rate and of the --pay-kinds, from a stream of their own (`k`), each op
+  marked with :window `window` for jepsen.fiber.checker/availability-checker.
+  Nil without the option. The streams are new, so the fault window's payments
+  for a seed don't change."
+  [opts streams k window]
+  (when (availability? opts)
+    (->> (schedule/paced-payments streams k (:rate opts) (count (:nodes opts))
+                                  (:pay-kinds opts [:keysend]))
+         (gen/map #(assoc % :window window))
+         (gen/time-limit (:availability-window opts))
+         gen/clients)))
 
 (defn fault-window
   "The payments and the faults, each for :time-limit seconds.
@@ -96,14 +120,21 @@
                                       (:close opts)       (assoc :close (fiber-checker/close-checker))
                                       (:nonce-check opts) (assoc :nonce (nonce/checker))
                                       (:ledger opts)      (assoc :ledger (ledger/checker))
-                                      (:onchain opts)     (assoc :onchain (onchain/checker))))
+                                      (:onchain opts)     (assoc :onchain (onchain/checker))
+                                      (availability? opts)
+                                      (assoc :availability (fiber-checker/availability-checker
+                                                             (:availability-tolerance opts 5)))))
+            ; With --availability-window, a baseline window of payments before the
+            ; faults and a recovery window after the network has converged.
             :generator            (gen/phases
                                     (when (:onchain opts) (gen/clients (gen/once {:f :chain-baseline})))
+                                    (availability-window opts streams :pay-baseline :baseline)
                                     (fault-window opts streams)
                                     (gen/log "Healing all faults")
                                     (gen/nemesis (:final-generator pkg))
                                     (gen/log "Waiting for the network to converge")
                                     (gen/sleep (:quiesce opts))
+                                    (availability-window opts streams :pay-recovery :recovery)
                                     (when-not (:close opts) (gen/clients (gen/once {:f :probe})))
                                     (gen/clients (gen/once {:f :read}))
                                     (when (:onchain opts)
@@ -131,12 +162,31 @@
    [nil "--rate HZ" "Approximate number of payments per second."
     :default  5
     :parse-fn parse-double]
+   [nil "--pay-kinds KINDS" (str "Comma-separated payment kinds, each payment's drawn uniformly from"
+                                 " them (list one twice to draw it twice as often): keysend, invoice.")
+    :default  [:keysend]
+    :parse-fn keywords
+    :validate [#(every? (methods client/send-payment!) %)
+               (str "Each must be a payment kind: " (str/join ", " (map name (keys (methods client/send-payment!)))))]]
    [nil "--nemesis-interval SECONDS" "Seconds between fault operations."
     :default  15
     :parse-fn parse-long]
    [nil "--quiesce SECONDS" "Seconds to wait after healing before the final read."
     :default  30
     :parse-fn parse-long]
+   [nil "--availability-window SECONDS"
+    (str "Send payments without faults for this many seconds before the faults (the baseline)"
+         " and again after --quiesce (the recovery), and check that the success rate has come"
+         " back to the baseline's. 0 turns it off. Not with --close.")
+    :default  0
+    :parse-fn parse-long
+    :validate [#(and % (<= 0 %)) "Must be 0 or more"]]
+   [nil "--availability-tolerance POINTS"
+    (str "With --availability-window, how many percentage points the recovery's success rate"
+         " may fall below the baseline's.")
+    :default  5.0
+    :parse-fn parse-double
+    :validate [#(and % (<= 0 % 100)) "Must be 0 to 100"]]
    [nil "--log-level FILTER" "RUST_LOG filter for fnn."
     :default  "info"]
    [nil "--kill-targets TARGETS" "Comma-separated kill targets: one, all."
