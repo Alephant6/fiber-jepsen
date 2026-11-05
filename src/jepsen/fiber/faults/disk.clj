@@ -21,8 +21,9 @@
   also reports how the payments from or to the node in the window ended. After the space is
   freed, fnn must be healthy again, by itself or, if it had stopped, after a
   restart: a node that was running but not working after the space came back
-  fails. Lost state shows in the usual checks (channels, ledger), and panics
-  in the health checker."
+  fails, and so does a fill or free that threw (the disk may have stayed full).
+  Lost state shows in the usual checks (channels, ledger), and panics in the
+  health checker."
   (:require [clojure.string :as str]
             [jepsen [checker :as checker]
                     [control :as c]
@@ -224,29 +225,42 @@
                      (or (= node (get-in op [:value :from])) (= node (get-in op [:value :to]))))]
       (:type op))))
 
+(defn- per-node
+  "A :fill-disk or :free-disk completion's {node record}; nil for an invocation."
+  [op]
+  (let [v (:value op)]
+    (when (and (map? v) (every? string? (keys v)))
+      v)))
+
 (defn check
   [history]
   (let [fills   (atom {})
         windows (vec (for [op    history
-                           :let  [_ (when (and (= :fill-disk (:f op)) (map? (:value op)))
-                                      (doseq [n (keys (:value op))] (swap! fills assoc n (:time op))))]
-                           :when (and (= :free-disk (:f op)) (map? (:value op)))
-                           [node rec] (:value op)]
+                           :let  [_ (when (= :fill-disk (:f op))
+                                      (doseq [n (keys (per-node op))] (swap! fills assoc n (:time op))))]
+                           :when (= :free-disk (:f op))
+                           [node rec] (per-node op)]
                        (merge {:node node, :time (:time op)
                                :while-full (while-full rec), :after-free (after-free rec)
                                :payments (pays-of history node (get @fills node 0) (:time op))}
                               (select-keys rec [:space-errors :first-space-error :panics]))))
         bad     (vec (filter #(or (#{:unresponsive :hung} (:while-full %))
                                   (#{:not-working :not-recovered} (:after-free %)))
-                             windows))]
-    {:valid?     (cond (empty? windows)                                  :unknown
-                       (seq bad)                                         false
-                       (every? #(= :unaffected (:while-full %)) windows) :unknown
-                       :else                                             true)
-     :while-full (frequencies (map :while-full windows))
-     :after-free (frequencies (map :after-free windows))
-     :failures   bad
-     :windows    windows}))
+                             windows))
+        ; A fill or free that threw: a disk may have stayed full, or fnn down.
+        crashed (vec (for [op history
+                           :when (and (#{:fill-disk :free-disk} (:f op)) (:exception op))]
+                       (select-keys op [:f :time :error])))]
+    {:valid?         (cond (seq crashed)                                     false
+                           (empty? windows)                                  :unknown
+                           (seq bad)                                         false
+                           (every? #(= :unaffected (:while-full %)) windows) :unknown
+                           :else                                             true)
+     :while-full     (frequencies (map :while-full windows))
+     :after-free     (frequencies (map :after-free windows))
+     :failures       bad
+     :nemesis-errors crashed
+     :windows        windows}))
 
 (defn checker
   []

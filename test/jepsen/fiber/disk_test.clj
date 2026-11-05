@@ -83,6 +83,14 @@
   (testing "still not working once the space came back"
     (is (false? (:valid? (disk/check [(op :fill-disk {"n1" {}} 1)
                                       (op :free-disk {"n1" (rec {:status :not-working} {:status :not-working} ok)} 2)])))))
+  (testing "invocations are no windows"
+    (is (= [] (:windows (disk/check [(op :fill-disk {:nodes ["n1"]} 1) (op :free-disk nil 2)])))))
+  (testing "a fill or free that threw fails the run: a disk may have stayed full"
+    (let [r (disk/check [(op :fill-disk {"n1" {}} 1)
+                         (op :free-disk {"n1" (rec {:status :not-working} ok)} 2)
+                         (assoc (op :free-disk nil 3) :exception {:via []}, :error "indeterminate: boom")])]
+      (is (false? (:valid? r)))
+      (is (= [{:f :free-disk, :time 3, :error "indeterminate: boom"}] (:nemesis-errors r)))))
   (testing "a free with nothing filled, as the final generator's, is no window"
     (is (= [] (:windows (disk/check [(op :free-disk {} 5)])))))
   (testing "nothing ran, or the fault never bit"
