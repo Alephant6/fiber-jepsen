@@ -187,6 +187,10 @@
   [host path body & [opts]]
   (http-json :post (str "https://" host ":8080" path) (lnd-opts host (assoc opts :body body))))
 
+(defn lnd-delete
+  [host path & [opts]]
+  (http-json :delete (str "https://" host ":8080" path) (lnd-opts host opts)))
+
 (defn lnd-stream-last
   "The last message of one of LND's server-streaming REST responses, which are
   newline-separated JSON objects, each {:result ...} or {:error ...}."

@@ -9,7 +9,8 @@
             [clojure.string :as str]))
 
 (def scenarios
-  "Name -> {:priority  the plan's priority
+  "Name -> {:priority  the plan's priority (:p0, :p1, :p2), or :extra for a
+                       scenario the plan doesn't have (named after its fault)
             :plan      the plan's fault, abridged
             :args      the arguments that run it here
             :differs   where this suite departs from the plan
@@ -214,7 +215,37 @@
                             " wrapped-BTC channels with n3, and the BTC user is lnd-bob, on one"
                             " channel with the hub's lnd-ingrid. Keysend payments over the line go"
                             " on alongside. An LND disconnect is an iptables cut of either CCH's link"
-                            " to its LND or the link between the two LNDs. A kill is SIGKILL.")}))
+                            " to its LND or the link between the two LNDs. A kill is SIGKILL.")}
+    "power-sync-off"
+            {:priority :extra
+             :plan     (str "Not in the plan; proposed in a comment on it (open question 3). A node"
+                            " loses power: fnn dies, and every store write it didn't fsync is lost."
+                            " Run with fiber.store_sync_writes on and off")
+             :compose  "lazyfs"
+             :args     ["--faults" "power" "--store-sync-writes" "false" "--rate" "10"
+                        "--nemesis-interval" "20" "--time-limit" "180" "--ledger"]
+             :differs  (str "Unsynced writes, fnn's default: a node can come back with an older"
+                            " channel state than its peer's."
+                            " fnn's store is on LazyFS (scripts/run.sh --compose lazyfs), which keeps"
+                            " writes in a cache of its own until fsync; a power loss SIGKILLs fnn on"
+                            " one node or all of them and drops that cache. Needs Fiber from"
+                            " 4777d5d6 (#1703): an earlier build ignores the setting, and the power"
+                            " check is then unknown.")}
+    "power-sync-on"
+            {:priority :extra
+             :plan     (str "Not in the plan; proposed in a comment on it (open question 3). A node"
+                            " loses power: fnn dies, and every store write it didn't fsync is lost."
+                            " Run with fiber.store_sync_writes on and off")
+             :compose  "lazyfs"
+             :args     ["--faults" "power" "--store-sync-writes" "true" "--rate" "10"
+                        "--nemesis-interval" "20" "--time-limit" "180" "--ledger"]
+             :differs  (str "Synced writes: every store write waits for the disk, so a node should"
+                            " come back with everything it acknowledged."
+                            " fnn's store is on LazyFS (scripts/run.sh --compose lazyfs), which keeps"
+                            " writes in a cache of its own until fsync; a power loss SIGKILLs fnn on"
+                            " one node or all of them and drops that cache. Needs Fiber from"
+                            " 4777d5d6 (#1703): an earlier build ignores the setting, and the power"
+                            " check is then unknown.")}))
 
 (defn scenario-args
   "The arguments of scenario `name`. Throws for an unknown name."
@@ -244,12 +275,13 @@
 
 (defn select
   "The names of the scenarios `spec` asks for: `all`, a priority (`p0`, `p1`,
-  `p2`), or comma-separated names and priorities. Throws for an unknown name."
+  `p2`, `extra`), or comma-separated names and priorities. Throws for an unknown
+  name."
   [spec]
   (let [parts (remove str/blank? (map str/trim (str/split (or spec "all") #",")))]
     (->> (for [p parts]
            (cond (= "all" p)          (keys scenarios)
-                 (re-matches #"p\d" p) (for [[n s] scenarios
+                 (re-matches #"p\d|extra" p) (for [[n s] scenarios
                                             :when (= (keyword p) (:priority s))]
                                         n)
                  :else                (do (scenario-args p) [p])))

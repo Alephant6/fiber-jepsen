@@ -209,7 +209,7 @@
                          last
                          :value)
             request (->> history
-                         (filter #(and (= :close (:f %)) (= :info (:type %)) (:value %)))
+                         (filter #(and (= :close (:f %)) (#{:ok :info} (:type %)) (:value %)))
                          last
                          :value)]
         (if-not read
