@@ -15,6 +15,7 @@
                           [client :as client]
                           [db :as db]
                           [faults :as faults]
+                          [health :as health]
                           [ledger :as ledger]
                           [nonce :as nonce]
                           [scenarios :as scenarios]
@@ -80,7 +81,7 @@
             :os                   os/noop
             :db                   db
             :client               (client/client)
-            :nemesis              (:nemesis pkg)
+            :nemesis              (health/compose (:nemesis pkg))
             ; Shared state between the topology setup, the clients and the checker.
             :pubkeys              (atom {})
             :payments             (atom [])
@@ -90,7 +91,8 @@
                                     (cond-> {:stats      (checker/stats)
                                              :exceptions (checker/unhandled-exceptions)
                                              :perf       (checker/perf {:nemeses (:perf pkg)})
-                                             :timeline   (timeline/html)}
+                                             :timeline   (timeline/html)
+                                             :health     (health/checker)}
                                       (not (:close opts)) (assoc :fiber (fiber-checker/checker))
                                       (:close opts)       (assoc :close (fiber-checker/close-checker))
                                       (:nonce-check opts) (assoc :nonce (nonce/checker))
@@ -102,6 +104,8 @@
                                     (gen/log "Waiting for the network to converge")
                                     (gen/sleep (:quiesce opts))
                                     (when-not (:close opts) (gen/clients (gen/once {:f :probe})))
+                                    ; Assertion 7 (jepsen.fiber.health): is every fnn there and working?
+                                    (gen/nemesis (gen/once health/final-sample))
                                     (gen/clients (gen/once {:f :read})))})))
 
 (defn- keywords
