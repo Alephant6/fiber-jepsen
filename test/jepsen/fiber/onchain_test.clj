@@ -1,7 +1,8 @@
 (ns jepsen.fiber.onchain-test
   (:require [clojure.test :refer [deftest is testing]]
-            [jepsen.fiber.onchain :as oc]
-            [jepsen.fiber.rpc :as rpc]))
+            [jepsen.fiber [chain :as chain]
+                          [onchain :as oc]
+                          [rpc :as rpc]]))
 
 (def locks {"n1" "L1", "n2" "L2", "n3" "L3"})
 
@@ -165,3 +166,66 @@
       (is (= :unknown (:valid? (oc/analyze nil settle)))))
     (testing "no settle read"
       (is (= :unknown (:valid? (oc/analyze baseline nil)))))))
+
+;; Tracing against a fake chain
+
+(defn script
+  [args]
+  {:code_hash "0xc0de", :hash_type "type", :args args})
+
+(def fake-txs
+  "hash -> [inputs as [hash index], outputs as [script capacity], block]. W1 and
+  W2 are wallets; F the funding lock; C the commitment lock. 0xother spends
+  another cell of F's lock, which the trace must not take for the channel's."
+  {"0xfund"   [[["0xgen" 0]] [[(script "F") 1000] [(script "W1") 5000]] 5]
+   "0xgen"    [[] [[(script "W1") 6001] [(script "F") 77]] 1]
+   "0xother"  [[["0xgen" 1]] [[(script "W2") 77]] 8]
+   "0xcommit" [[["0xfund" 0]] [[(script "C") 996]] 20]
+   "0xsettle" [[["0xcommit" 0] ["0xfund" 1]] [[(script "W1") 5797] [(script "W2") 196]] 31]})
+
+(defn fake-transaction
+  [txs hash]
+  (when-let [[ins outs block] (get txs hash)]
+    {:transaction {:inputs  (vec (for [[h i] ins]
+                                   {:previous_output {:tx_hash h, :index (rpc/int->hex i)}}))
+                   :outputs (vec (for [[s cap] outs] {:capacity (rpc/int->hex cap), :lock s}))}
+     :tx_status   {:status "committed", :block_number (rpc/int->hex block)}}))
+
+(defn fake-transactions-of
+  [txs s]
+  (vec (for [[h [ins outs]] (sort-by (comp last val) txs)
+             [io cells]     [["input" (for [[ph i] ins] (get-in txs [ph 1 i 0]))]
+                             ["output" (map first outs)]]
+             c              cells
+             :when          (= s c)]
+         {:tx_hash h, :io_type io})))
+
+(defn trace-with
+  [txs]
+  (with-redefs [chain/transaction     (partial fake-transaction txs)
+                chain/transactions-of (partial fake-transactions-of txs)]
+    (oc/trace (atom {}) #{(chain/lock-key (script "W1")) (chain/lock-key (script "W2"))}
+              {:tx "0xfund", :index 0})))
+
+(deftest tracing
+  (testing "from the funding cell through the commitment to the settlement"
+    (let [t (trace-with fake-txs)]
+      (is (= ["0xcommit" "0xsettle"] (map :hash (:txs t))))
+      (is (= [] (:live t)))
+      (is (false? (:truncated? t)))
+      (is (= 1000 (:capacity t)))
+      (is (= {:fee 7, :net {(chain/lock-key (script "F")) -1000
+                            (chain/lock-key (script "C")) 0
+                            (chain/lock-key (script "W1")) 797
+                            (chain/lock-key (script "W2")) 196}}
+             (oc/accounting t)))))
+  (testing "a commitment cell nobody has spent yet"
+    (let [t (trace-with (dissoc fake-txs "0xsettle"))]
+      (is (= ["0xcommit"] (map :hash (:txs t))))
+      (is (= [{:tx "0xcommit", :index 0, :capacity 996, :lock (chain/lock-key (script "C"))}]
+             (:live t)))))
+  (testing "a funding cell nobody has spent: the channel is open"
+    (let [t (trace-with (dissoc fake-txs "0xcommit" "0xsettle"))]
+      (is (= [] (:txs t)))
+      (is (= [{:tx "0xfund", :index 0, :capacity 1000, :lock (chain/lock-key (script "F"))}]
+             (:live t))))))

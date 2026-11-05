@@ -112,8 +112,9 @@
   (update tx :outputs (partial mapv #(dissoc % :script))))
 
 (defn- spends?
-  [tx {:keys [tx index]}]
-  (some #(and (= tx (:tx %)) (= index (:index %))) (:inputs tx)))
+  "Whether traced transaction `t` spends `cell` ({:tx :index})."
+  [t cell]
+  (some #(and (= (:tx cell) (:tx %)) (= (:index cell) (:index %))) (:inputs t)))
 
 (defn- spender
   "The committed transaction that spent `cell` ({:tx :index :script}), or nil."
