@@ -11,7 +11,8 @@
                     [os :as os]
                     [tests :as tests]]
             [jepsen.checker.timeline :as timeline]
-            [jepsen.fiber [channels :as channels]
+            [jepsen.fiber [cch :as cch]
+                          [channels :as channels]
                           [checker :as fiber-checker]
                           [client :as client]
                           [closes :as closes]
@@ -25,9 +26,11 @@
                           [onchain :as onchain]
                           [scenarios :as scenarios]
                           [schedule :as schedule]
+                          [swap :as swap]
                           [topology :as topology]]
             [jepsen.fiber.faults [chain-partition :as chain-partition]
                                  [clock :as clock]
+                                 [lnd-disconnect :as lnd-disconnect]
                                  [outage :as outage]
                                  [packet :as packet]
                                  [partition :as partition]
@@ -50,12 +53,16 @@
   against the closing channels, from a stream of their own."
   [opts streams]
   (let [pays (fn [k] (schedule/paced-payments streams k (:rate opts) (count (:nodes opts))
-                                              (:pay-kinds opts [:keysend])))]
-    (if (:close opts)
-      (gen/phases (gen/time-limit (/ (:time-limit opts) 2) (pays :pay))
-                  (gen/once {:f :close})
-                  (pays :pay-after-close))
-      (pays :pay))))
+                                              (:pay-kinds opts [:keysend])))
+        base (if (:close opts)
+               (gen/phases (gen/time-limit (/ (:time-limit opts) 2) (pays :pay))
+                           (gen/once {:f :close})
+                           (pays :pay-after-close))
+               (pays :pay))]
+    ; With --cch, cross-chain swaps (jepsen.fiber.swap) go alongside.
+    (if (:cch opts)
+      (gen/any base (swap/generator opts streams))
+      base)))
 
 (defn availability?
   "Whether the test measures the success rate before the faults and after
@@ -111,7 +118,8 @@
   "The test for `opts`. Without --seed it picks a seed, which jepsen.log shows in
   the test map (:seed): pass it as --seed to run the same payments and faults again."
   [opts]
-  (let [db      (db/db)
+  (swap/check-opts! opts)
+  (let [db      (cond-> (db/db) (:cch opts) cch/db)
         faults  (set (:faults opts))
         pkg     (nemesis-package db opts)
         seed    (or (:seed opts) (schedule/new-seed))
@@ -131,7 +139,11 @@
             :fnn-env              (faults/fnn-env opts)
             :payments             (atom [])
             :initial-channels     (atom nil)
-            :nonserializable-keys [:pubkeys :payments :initial-channels]
+            ; With --cch: the swaps that got a payment hash, and the swap
+            ; environment's starting state (jepsen.fiber.cch).
+            :swaps                (atom [])
+            :swap-env             (atom nil)
+            :nonserializable-keys [:pubkeys :payments :initial-channels :swaps :swap-env]
             :checker              (checker/compose
                                     (cond-> (merge (faults/checkers opts)
                                                    {:stats      (checker/stats)
@@ -148,6 +160,7 @@
                                       (:onchain opts)     (assoc :onchain (onchain/checker))
                                       (seq (:channel-ops opts)) (assoc :channels (channels/checker))
                                       (:expiry-check opts) (assoc :expiry (expiry/checker))
+                                      (:cch opts)         (assoc :swap (swap/checker))
                                       (availability? opts)
                                       (assoc :availability (fiber-checker/availability-checker
                                                              (:availability-tolerance opts 5)))))
@@ -164,6 +177,7 @@
                                     (when (seq (:channel-ops opts))
                                       (gen/clients (gen/once {:f :settle-channels})))
                                     (availability-window opts streams :pay-recovery :recovery)
+                                    (swap/final-generator opts)
                                     (when-not (:close opts) (gen/clients (gen/once {:f :probe})))
                                     ; Assertion 7 (jepsen.fiber.health): is every fnn there and working?
                                     (gen/nemesis (gen/once health/final-sample))
@@ -407,7 +421,40 @@
    [nil "--expiry-check" (str "With --onchain (C-03): after the closes settle, read every payment"
                               " again and check that each is Success or Failed, and that a node got"
                               " back on chain every TLC of its own Failed payments that a closed"
-                              " channel still held.")]])
+                              " channel still held.")]
+   ; Cross-chain swaps (jepsen.fiber.swap, jepsen.fiber.cch; C-15).
+   [nil "--cch" (str "Also run cross-chain swaps through a standalone cross-chain hub (CCH) and two"
+                     " LNDs, and check that every order ends completed or refunded. Needs the hosts"
+                     " of docker/docker-compose.cch.yml: scripts/run.sh --compose cch.")]
+   [nil "--swap-rate HZ" "With --cch, approximate number of swaps per second."
+    :default  0.5
+    :parse-fn parse-double
+    :validate [pos? "Must be positive"]]
+   [nil "--swap-amount SATS" "With --cch, each swap's amount in sats, or a range MIN-MAX drawn per swap."
+    :default  [1000 20000]
+    :parse-fn swap/parse-range
+    :validate [(fn [[lo hi]] (and lo hi (<= 1 lo hi))) "Must be SATS or MIN-MAX, 1 <= MIN <= MAX"]]
+   [nil "--swap-kinds KINDS" (str "With --cch, comma-separated swap kinds to choose from: send-btc"
+                                  " (CKB to BTC), receive-btc (BTC to CKB).")
+    :default  [:send-btc :receive-btc]
+    :parse-fn keywords
+    :validate [#(every? swap/kinds %) (str "Must be a subset of " swap/kinds)]]
+   [nil "--swap-settle-timeout SECONDS" (str "With --cch, how long the final swap read waits for every"
+                                             " order to finish.")
+    :default  180
+    :parse-fn parse-long]
+   [nil "--lnd-disconnect-targets TARGETS" (str "With --faults lnd-disconnect, comma-separated links to"
+                                                " choose from: cch (CCH to the hub's LND), peer (the"
+                                                " hub's LND to the BTC user's).")
+    :default  [:cch :peer]
+    :parse-fn keywords
+    :validate [#(every? lnd-disconnect/target-specs %)
+               (str "Must be a subset of " lnd-disconnect/target-specs)]]
+   [nil "--lnd-disconnect-mode MODE" (str "With --faults lnd-disconnect: drop (calls hang until they"
+                                          " time out) or reject (TCP reset, they fail at once).")
+    :default  :drop
+    :parse-fn keyword
+    :validate [lnd-disconnect/modes (str "Must be one of " lnd-disconnect/modes)]]])
 
 (defn -main
   [& args]

@@ -195,7 +195,20 @@
                             " 30 s on average, capped at 100 s: well short of a TLC's expiry (hours)"
                             " and of an invoice's (1 h, so one made on a node 30 minutes ahead is"
                             " still unexpired on a node 30 minutes behind), so a force close or a"
-                            " stuck payment is a failure.")}))
+                            " stuck payment is a failure.")}
+    "c-15"  {:priority :p1
+             :plan     (str "CCH + LND, cross-chain swaps; kill CCH or disconnect LND at random."
+                            " Every order ends completed or refunded, and both sides' funds agree")
+             :args     ["--cch" "--faults" "cch-kill,lnd-disconnect" "--nemesis-interval" "20"
+                        "--time-limit" "300" "--swap-rate" "0.5" "--rate" "2" "--concurrency" "6"
+                        "--quiesce" "60"]
+             :differs  (str "Needs the hosts of docker/docker-compose.cch.yml (scripts/run.sh"
+                            " --compose cch). CCH runs as a separate service in front of n3, as in"
+                            " Fiber's cross-chain-hub-separate e2e test; the CKB user is n1, on two"
+                            " wrapped-BTC channels with n3, and the BTC user is lnd-bob, on one"
+                            " channel with the hub's lnd-ingrid. Keysend payments over the line go"
+                            " on alongside. An LND disconnect is an iptables cut of either CCH's link"
+                            " to its LND or the link between the two LNDs. A kill is SIGKILL.")}))
 
 (defn scenario-args
   "The arguments of scenario `name`. Throws for an unknown name."
