@@ -22,7 +22,8 @@
                           [scenarios :as scenarios]
                           [schedule :as schedule]
                           [topology :as topology]]
-            [jepsen.fiber.faults.packet :as packet])
+            [jepsen.fiber.faults [packet :as packet]
+                                 [process :as process]])
   (:gen-class))
 
 (def supported-faults
@@ -121,10 +122,11 @@
             :initial-channels     (atom nil)
             :nonserializable-keys [:pubkeys :payments :initial-channels]
             :checker              (checker/compose
-                                    (cond-> {:stats      (checker/stats)
-                                             :exceptions (checker/unhandled-exceptions)
-                                             :perf       (checker/perf {:nemeses (:perf pkg)})
-                                             :timeline   (timeline/html)}
+                                    (cond-> (merge (faults/checkers opts)
+                                                   {:stats      (checker/stats)
+                                                    :exceptions (checker/unhandled-exceptions)
+                                                    :perf       (checker/perf {:nemeses (:perf pkg)})
+                                                    :timeline   (timeline/html)})
                                       (not (:close opts)) (assoc :fiber (fiber-checker/checker))
                                       (:close opts)       (assoc :close (fiber-checker/close-checker))
                                       (:nonce-check opts) (assoc :nonce (nonce/checker))
@@ -196,9 +198,20 @@
     :validate [#(and % (<= 0 % 100)) "Must be 0 to 100"]]
    [nil "--log-level FILTER" "RUST_LOG filter for fnn."
     :default  "info"]
-   [nil "--kill-targets TARGETS" "Comma-separated kill targets: one, all."
+   [nil "--kill-targets TARGETS" (str "Comma-separated kill targets: one, all, middle (a node on more"
+                                      " than one channel, which forwards payments: n2 in line).")
     :default  [:one :all]
     :parse-fn keywords]
+   [nil "--kill-signal SIGNAL" (str "How a kill stops fnn: kill (SIGKILL, a crash) or term (SIGTERM, a"
+                                    " graceful shutdown, checked to finish within --term-grace).")
+    :default  :kill
+    :parse-fn keyword
+    :validate [process/kill-signals (str "Must be one of " process/kill-signals)]]
+   [nil "--term-grace SECONDS" (str "With --kill-signal term, seconds fnn has to exit after SIGTERM"
+                                    " before it gets SIGKILL and the run fails.")
+    :default  30
+    :parse-fn parse-long
+    :validate [#(and % (pos? %)) "Must be positive"]]
    [nil "--packet-targets TARGETS" (str "With --faults packet, comma-separated target specs to choose"
                                         " from: one, all, chain (the CKB node).")
     :default  [:one :all]
@@ -233,6 +246,12 @@
                                                 " checks for a counterparty's force close every 300 s.")
     :default  360
     :parse-fn parse-long]
+   [nil "--disconnect-flash MS" (str "With --faults disconnect, make each fault a flash: disconnect a pair"
+                                     " and connect it again after MS milliseconds, or after a time drawn"
+                                     " from MIN-MAX (C-05: 100-5000). Without it, a pair stays"
+                                     " disconnected until the next fault op.")
+    :parse-fn packet/parse-delay
+    :validate [(fn [[lo hi]] (and lo hi (<= 0 lo hi))) "Must be MS or MIN-MAX, 0 <= MIN <= MAX"]]
    [nil "--nonce-check" (str "Check MuSig2 nonce use. Needs an fnn built with the nonce-oracle"
                              " feature (scripts/build-fnn-nonce-oracle.sh).")]
    [nil "--close" (str "Halfway through the faults, ask every channel to close cooperatively, and"
