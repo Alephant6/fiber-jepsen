@@ -17,12 +17,14 @@ for i in $(seq 1 "$runs"); do
   nonce="$(tr '\n' ' ' <"$log" | grep -oE ':nonce-violations +[0-9]+' | tail -1 | grep -oE '[0-9]+$')"
   # Only with --ledger: balanced, unbalanced, client-mismatch or incomplete.
   ledger="$(tr '\n' ' ' <"$log" | grep -oE ':outcome +:[a-z-]+' | tail -1 | grep -oE '[a-z-]+$')"
+  # Only with --availability-window: the success rates before the faults and after healing.
+  rates="$(tr '\n' ' ' <"$log" | grep -oE ':success-rates +"[^"]*"' | tail -1 | sed -E 's/^:success-rates +"//; s/"$//')"
   store="$(readlink "$here/../store/latest" 2>/dev/null)"
   # The seed the run used (from the test map Jepsen logs at the start): pass it as
   # --seed to run the same payments and faults again.
   seed="$(tr '\n' ' ' <"$log" | grep -oE ':seed +[0-9]+' | head -1 | grep -oE '[0-9]+$')"
   echo "run $i/$runs: ${verdict:-no verdict}; unfinished payments: $stuck;" \
        "channel ends with pending TLCs: $tlcs; post-heal probe: $probe; ${summary:-no summary};" \
-       "nonce violations: ${nonce:--}; ledger: ${ledger:--}; seed: ${seed:-unknown}; store: ${store:-unknown}"
+       "nonce violations: ${nonce:--}; ledger: ${ledger:--}; success rate: ${rates:--}; seed: ${seed:-unknown}; store: ${store:-unknown}"
   rm -f "$log"
 done
