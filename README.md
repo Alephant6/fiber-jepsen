@@ -38,6 +38,7 @@ With `--availability-window`, it also checks that the payment success rate after
 | `partition` | iptables drops traffic between one node and the others, or with `--partition-targets half` (or `one,half`) between a random half of the nodes and the other half. A partition lasts until the next fault op, or with `--partition-duration MIN-MAX` a number of seconds drawn per partition, minutes if need be. |
 | `disconnect` | `disconnect_peer` over RPC closes the connection between two neighbours; a later `connect_peer` reconnects them. Channels reestablish while both processes keep running, which a partition rarely causes (TCP keeps the connection and retransmits). With `--disconnect-flash MIN-MAX`, each fault is a flash instead: one op disconnects a pair, waits a time drawn from MIN-MAX ms and reconnects it (C-05 uses 100-5000), and records whether the pair was already connected again before the reconnect. |
 | `packet` | tc netem delays traffic, and with `--packet-loss` drops some of it: to and from one node, between all nodes, or from the nodes to the CKB node (`--packet-targets one,all,chain`). Each fault draws its delay from `--packet-delay MIN-MAX` (ms; default 500-3000), with a jitter of a tenth of it. One shaping is active at a time. |
+| `chain-partition` | iptables on the fnn hosts cuts one node, or all of them, off the CKB node, while they keep talking to each other: `drop` (requests time out) or `reject` (TCP reset, they fail at once), with `--chain-partition-targets one,all` and `--chain-partition-mode drop\|reject`. fnn can't submit or follow funding, closing and settlement transactions until it heals. |
 
 Each fault is a namespace under `src/jepsen/fiber/faults/` that defines `fault`: the `--faults` names it handles, its nemesis package, and its operations, drawn from a random stream of its own so that the seed fixes them. `faults.clj` lists them; adding a fault is a new namespace and a line there, and changes no other fault's operations for a given seed (`test/jepsen/fiber/faults_test.clj` checks this).
 
@@ -57,7 +58,7 @@ Planned: **clock skew**. Fiber expires TLCs by wall-clock timestamp (off-chain c
   - `closes.clj` (what `--force-close-ok` excuses)
   - `nonce.clj` (MuSig2 nonce reuse, with `--nonce-check`)
   - `onchain.clj` and `chain.clj` (on-chain settlement, with `--onchain`; reading the CKB node)
-  - `faults.clj` and `faults/` (one namespace per fault: `process` for kill and pause, `partition`, `disconnect`, `packet`)
+  - `faults.clj` and `faults/` (one namespace per fault: `process` for kill and pause, `partition`, `disconnect`, `packet`, `chain-partition`)
   - `scenarios.clj` (named scenarios of the chaos-test plan, `--scenario`)
   - `schedule.clj` (payments, and the random streams faults draw from, fixed in advance by the run's seed)
 - `instrument/`: the logging-only fnn instrumentation the nonce check needs.

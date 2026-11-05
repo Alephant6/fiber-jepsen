@@ -18,7 +18,8 @@
   (:require [jepsen.generator :as gen]
             [jepsen.nemesis.combined :as nc]
             [jepsen.fiber.schedule :as schedule]
-            [jepsen.fiber.faults [disconnect :as disconnect]
+            [jepsen.fiber.faults [chain-partition :as chain-partition]
+                                 [disconnect :as disconnect]
                                  [packet :as packet]
                                  [partition :as partition]
                                  [process :as process]]))
@@ -28,7 +29,8 @@
   [partition/fault
    process/fault
    disconnect/fault
-   packet/fault])
+   packet/fault
+   chain-partition/fault])
 
 (def supported
   "Every name --faults accepts."

@@ -23,7 +23,8 @@
                           [scenarios :as scenarios]
                           [schedule :as schedule]
                           [topology :as topology]]
-            [jepsen.fiber.faults [packet :as packet]
+            [jepsen.fiber.faults [chain-partition :as chain-partition]
+                                 [packet :as packet]
                                  [partition :as partition]
                                  [process :as process]])
   (:gen-class))
@@ -233,6 +234,18 @@
                                             " the next fault op, like other faults (at most 100 s).")
     :parse-fn partition/parse-duration
     :validate [(fn [[lo hi]] (and lo hi (< 0 lo) (<= lo hi))) "Must be S or MIN-MAX, 0 < MIN <= MAX"]]
+   [nil "--chain-partition-targets TARGETS" (str "With --faults chain-partition, comma-separated"
+                                                 " target specs to choose from: one (a random fnn"
+                                                 " node), all.")
+    :default  [:one :all]
+    :parse-fn keywords
+    :validate [#(every? chain-partition/target-specs %)
+               (str "Must be a subset of " chain-partition/target-specs)]]
+   [nil "--chain-partition-mode MODE" (str "With --faults chain-partition: drop (requests to the CKB"
+                                           " node time out) or reject (TCP reset, they fail at once).")
+    :default  :drop
+    :parse-fn keyword
+    :validate [chain-partition/modes (str "Must be one of " chain-partition/modes)]]
    [nil "--disconnect-flash MS" (str "With --faults disconnect, make each fault a flash: disconnect a pair"
                                      " and connect it again after MS milliseconds, or after a time drawn"
                                      " from MIN-MAX (C-05: 100-5000). Without it, a pair stays"
