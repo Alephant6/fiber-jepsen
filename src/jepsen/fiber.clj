@@ -12,19 +12,25 @@
                     [tests :as tests]]
             [jepsen.checker.timeline :as timeline]
             [jepsen.fiber [cch :as cch]
+                          [channels :as channels]
                           [checker :as fiber-checker]
                           [client :as client]
+                          [closes :as closes]
                           [db :as db]
                           [faults :as faults]
                           [invoice]
                           [ledger :as ledger]
                           [nonce :as nonce]
+                          [onchain :as onchain]
                           [scenarios :as scenarios]
                           [schedule :as schedule]
                           [swap :as swap]
                           [topology :as topology]]
-            [jepsen.fiber.faults [lnd-disconnect :as lnd-disconnect]
-                                 [packet :as packet]])
+            [jepsen.fiber.faults [chain-partition :as chain-partition]
+                                 [lnd-disconnect :as lnd-disconnect]
+                                 [packet :as packet]
+                                 [partition :as partition]
+                                 [process :as process]])
   (:gen-class))
 
 (def supported-faults
@@ -73,8 +79,17 @@
          (gen/time-limit (:availability-window opts))
          gen/clients)))
 
+(defn client-ops
+  "The clients' operations during the fault window: the payments and, with
+  --channel-ops, the channel workload (jepsen.fiber.channels)."
+  [opts streams]
+  (let [pays (payments opts streams)]
+    (if-let [chans (channels/generator streams opts)]
+      (gen/any pays chans)
+      pays)))
+
 (defn fault-window
-  "The payments and the faults, each for :time-limit seconds.
+  "The client operations and the faults, each for :time-limit seconds.
 
   Each gets a time limit of its own. A single gen/time-limit around both ends the
   window early: while every client is busy, the next operation is the nemesis's,
@@ -84,7 +99,7 @@
   [opts streams]
   (let [limit #(some->> % (gen/time-limit (:time-limit opts)))]
     (gen/nemesis (limit (faults/generator streams opts))
-                 (limit (payments opts streams)))))
+                 (limit (client-ops opts streams)))))
 
 (defn nemesis-package
   "The nemesis package for the requested faults (jepsen.fiber.faults/package).
@@ -123,14 +138,19 @@
             :swap-env             (atom nil)
             :nonserializable-keys [:pubkeys :payments :initial-channels :swaps :swap-env]
             :checker              (checker/compose
-                                    (cond-> {:stats      (checker/stats)
-                                             :exceptions (checker/unhandled-exceptions)
-                                             :perf       (checker/perf {:nemeses (:perf pkg)})
-                                             :timeline   (timeline/html)}
-                                      (not (:close opts)) (assoc :fiber (fiber-checker/checker))
+                                    (cond-> (merge (faults/checkers opts)
+                                                   {:stats      (checker/stats)
+                                                    :exceptions (checker/unhandled-exceptions)
+                                                    :perf       (checker/perf {:nemeses (:perf pkg)})
+                                                    :timeline   (timeline/html)})
+                                      (not (:close opts)) (assoc :fiber (if (:force-close-ok opts)
+                                                                          (closes/checker)
+                                                                          (fiber-checker/checker)))
                                       (:close opts)       (assoc :close (fiber-checker/close-checker))
                                       (:nonce-check opts) (assoc :nonce (nonce/checker))
                                       (:ledger opts)      (assoc :ledger (ledger/checker))
+                                      (:onchain opts)     (assoc :onchain (onchain/checker))
+                                      (seq (:channel-ops opts)) (assoc :channels (channels/checker))
                                       (:cch opts)         (assoc :swap (swap/checker))
                                       (availability? opts)
                                       (assoc :availability (fiber-checker/availability-checker
@@ -138,16 +158,22 @@
             ; With --availability-window, a baseline window of payments before the
             ; faults and a recovery window after the network has converged.
             :generator            (gen/phases
+                                    (when (:onchain opts) (gen/clients (gen/once {:f :chain-baseline})))
                                     (availability-window opts streams :pay-baseline :baseline)
                                     (fault-window opts streams)
                                     (gen/log "Healing all faults")
                                     (gen/nemesis (:final-generator pkg))
                                     (gen/log "Waiting for the network to converge")
                                     (gen/sleep (:quiesce opts))
+                                    (when (seq (:channel-ops opts))
+                                      (gen/clients (gen/once {:f :settle-channels})))
                                     (availability-window opts streams :pay-recovery :recovery)
                                     (swap/final-generator opts)
                                     (when-not (:close opts) (gen/clients (gen/once {:f :probe})))
-                                    (gen/clients (gen/once {:f :read})))})))
+                                    (gen/clients (gen/once {:f :read}))
+                                    (when (:onchain opts)
+                                      (gen/phases (gen/log "Closing every channel and waiting for it to settle on chain")
+                                                  (gen/clients (gen/once {:f :settle})))))})))
 
 (defn- keywords
   [s]
@@ -197,9 +223,20 @@
     :validate [#(and % (<= 0 % 100)) "Must be 0 to 100"]]
    [nil "--log-level FILTER" "RUST_LOG filter for fnn."
     :default  "info"]
-   [nil "--kill-targets TARGETS" "Comma-separated kill targets: one, all."
+   [nil "--kill-targets TARGETS" (str "Comma-separated kill targets: one, all, middle (a node on more"
+                                      " than one channel, which forwards payments: n2 in line).")
     :default  [:one :all]
     :parse-fn keywords]
+   [nil "--kill-signal SIGNAL" (str "How a kill stops fnn: kill (SIGKILL, a crash) or term (SIGTERM, a"
+                                    " graceful shutdown, checked to finish within --term-grace).")
+    :default  :kill
+    :parse-fn keyword
+    :validate [process/kill-signals (str "Must be one of " process/kill-signals)]]
+   [nil "--term-grace SECONDS" (str "With --kill-signal term, seconds fnn has to exit after SIGTERM"
+                                    " before it gets SIGKILL and the run fails.")
+    :default  30
+    :parse-fn parse-long
+    :validate [#(and % (pos? %)) "Must be positive"]]
    [nil "--packet-targets TARGETS" (str "With --faults packet, comma-separated target specs to choose"
                                         " from: one, all, chain (the CKB node).")
     :default  [:one :all]
@@ -213,6 +250,56 @@
     :default  0
     :parse-fn parse-long
     :validate [#(and % (<= 0 % 100)) "Must be 0 to 100"]]
+   [nil "--partition-targets TARGETS" (str "With --faults partition, comma-separated target specs to"
+                                           " choose from: one (one node), half (a random half of the"
+                                           " nodes).")
+    :default  [:one]
+    :parse-fn keywords
+    :validate [#(every? partition/target-specs %) (str "Must be a subset of " partition/target-specs)]]
+   [nil "--partition-duration SECONDS" (str "With --faults partition, how long each partition lasts,"
+                                            " or a range MIN-MAX drawn per partition. Default: until"
+                                            " the next fault op, like other faults (at most 100 s).")
+    :parse-fn partition/parse-duration
+    :validate [(fn [[lo hi]] (and lo hi (< 0 lo) (<= lo hi))) "Must be S or MIN-MAX, 0 < MIN <= MAX"]]
+   [nil "--chain-partition-targets TARGETS" (str "With --faults chain-partition, comma-separated"
+                                                 " target specs to choose from: one (a random fnn"
+                                                 " node), all.")
+    :default  [:one :all]
+    :parse-fn keywords
+    :validate [#(every? chain-partition/target-specs %)
+               (str "Must be a subset of " chain-partition/target-specs)]]
+   [nil "--chain-partition-mode MODE" (str "With --faults chain-partition: drop (requests to the CKB"
+                                           " node time out) or reject (TCP reset, they fail at once).")
+    :default  :drop
+    :parse-fn keyword
+    :validate [chain-partition/modes (str "Must be one of " chain-partition/modes)]]
+   [nil "--channel-ops OPS" (str "Comma-separated channel operations to run with the payments: open,"
+                                 " close (cooperative) and force-close, on the topology's edges"
+                                 " (jepsen.fiber.channels). Also checks that every channel ends ready"
+                                 " or closed.")
+    :default  []
+    :parse-fn keywords
+    :validate [#(every? channels/kinds %) (str "Must be a subset of " (keys channels/kinds))]]
+   [nil "--channel-interval SECONDS" "With --channel-ops, mean seconds between channel operations."
+    :default  20
+    :parse-fn parse-double]
+   [nil "--channel-funding CKB" "With --channel-ops, CKB the opener puts into each new channel."
+    :default  500
+    :parse-fn parse-long]
+   [nil "--channel-keep N" "With --channel-ops, closes leave at least this many ready channels on each edge."
+    :default  1
+    :parse-fn parse-long]
+   [nil "--channel-settle-timeout SECONDS" (str "With --channel-ops, how long to wait after the quiet period"
+                                                " for every channel to be ready or closed on both ends. Fiber"
+                                                " checks for a counterparty's force close every 300 s.")
+    :default  360
+    :parse-fn parse-long]
+   [nil "--disconnect-flash MS" (str "With --faults disconnect, make each fault a flash: disconnect a pair"
+                                     " and connect it again after MS milliseconds, or after a time drawn"
+                                     " from MIN-MAX (C-05: 100-5000). Without it, a pair stays"
+                                     " disconnected until the next fault op.")
+    :parse-fn packet/parse-delay
+    :validate [(fn [[lo hi]] (and lo hi (<= 0 lo hi))) "Must be MS or MIN-MAX, 0 <= MIN <= MAX"]]
    [nil "--nonce-check" (str "Check MuSig2 nonce use. Needs an fnn built with the nonce-oracle"
                              " feature (scripts/build-fnn-nonce-oracle.sh).")]
    [nil "--close" (str "Halfway through the faults, ask every channel to close cooperatively, and"
@@ -220,6 +307,17 @@
    [nil "--ledger" (str "Check each node's balance change against the payments it sent, received"
                         " and forwarded. Tags every payment with its attempt id and lists every"
                         " node's payments in the final read.")]
+   [nil "--probe-routes" (str "After healing, also pay from every node to every node it has no"
+                              " channel with, so that the probe tests multi-hop routing.")]
+   [nil "--force-close-ok" (str "Don't fail the run for channels that ended closed, nor for what"
+                                " they explain (open question 1 on the chaos-test plan: a pause or"
+                                " partition over 30 s force-closes channels). They are reported.")]
+   [nil "--onchain" (str "After the final read, close every channel and check on chain that each"
+                         " party received its last balance plus its reserve, less fees, and that"
+                         " every node's wallet changed by what its channels' transactions explain.")]
+   [nil "--settle-timeout SECONDS" "With --onchain, how long to wait for the closes to settle on chain."
+    :default  300
+    :parse-fn parse-long]
    ; Cross-chain swaps (jepsen.fiber.swap, jepsen.fiber.cch; C-15).
    [nil "--cch" (str "Also run cross-chain swaps through a standalone cross-chain hub (CCH) and two"
                      " LNDs, and check that every order ends completed or refunded. Needs the hosts"

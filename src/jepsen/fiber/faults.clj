@@ -8,12 +8,18 @@
     :package  (fn [opts]) -> a nemesis package in jepsen.nemesis.combined's shape,
               of which the test uses :nemesis, :final-generator and :perf;
     :ops      (fn [r opts]) -> its endless fault operations, drawn from the
-              SplittableRandom `r` alone, so that the seed fixes them.
+              SplittableRandom `r` alone, so that the seed fixes them;
+    :gaps     optional, (fn [streams opts]) -> the gaps in ns between its ops,
+              for a fault that sets how long each fault lasts. Without it, gaps
+              average :nemesis-interval seconds, from the fault's gap stream.
+    :checker  optional, (fn [opts]) -> nil or {name checker}: checks of its own
+              that the test adds to its checker when the fault is in use.
   Adding a fault is a new namespace and a line in `registry`."
   (:require [jepsen.generator :as gen]
             [jepsen.nemesis.combined :as nc]
             [jepsen.fiber.schedule :as schedule]
             [jepsen.fiber.faults [cch-kill :as cch-kill]
+                                 [chain-partition :as chain-partition]
                                  [disconnect :as disconnect]
                                  [lnd-disconnect :as lnd-disconnect]
                                  [packet :as packet]
@@ -26,6 +32,7 @@
    process/fault
    disconnect/fault
    packet/fault
+   chain-partition/fault
    cch-kill/fault
    lnd-disconnect/fault])
 
@@ -58,14 +65,23 @@
   (let [popts (package-opts db opts)]
     (nc/compose-packages (mapv #((:package %) popts) (in-use opts)))))
 
+(defn checkers
+  "{name checker} of the checks the faults in use add (their :checker)."
+  [opts]
+  (into {} (for [{:keys [checker]} (in-use opts)
+                 :when checker]
+             (checker opts))))
+
 (defn generator
   "The faults in use, each a stream of operations drawn from the seed and paced
-  by gaps averaging :nemesis-interval seconds, combined as nc/compose-packages
-  combines generators. Nil without faults."
+  by gaps averaging :nemesis-interval seconds (or the fault's own :gaps),
+  combined as nc/compose-packages combines generators. Nil without faults."
   [streams opts]
-  (let [gens (for [{:keys [stream ops]} (in-use opts)]
-               (schedule/paced (schedule/gaps (schedule/gaps-stream streams stream)
-                                              (:nemesis-interval opts))
+  (let [gens (for [{:keys [stream ops gaps]} (in-use opts)]
+               (schedule/paced (if gaps
+                                 (gaps streams opts)
+                                 (schedule/gaps (schedule/gaps-stream streams stream)
+                                                (:nemesis-interval opts)))
                                (ops (schedule/stream streams stream) opts)))]
     (when (seq gens)
       (apply gen/any gens))))

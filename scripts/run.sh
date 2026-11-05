@@ -2,27 +2,42 @@
 # Runs one Jepsen test from a fresh devnet. Arguments go to `lein run test`, e.g.
 #   scripts/run.sh --time-limit 60 --faults kill
 #   scripts/run.sh --time-limit 300 --faults kill,pause,partition --rate 10
-# except --compose NAME, which adds docker/docker-compose.NAME.yml to the cluster
-# (COMPOSE_FILE, if set, is the list it adds to), e.g. for cross-chain swaps:
+#   scripts/run.sh --nodes n1,n2,n3,n4,n5,n6 --topology mesh --time-limit 60 --faults kill
+# The test runs on n1-n3 unless the arguments name other nodes with --nodes
+# (the last --nodes wins, so a scenario's or the caller's replaces the default).
+# Except --compose NAME, which adds docker/docker-compose.NAME.yml and its
+# services to the cluster (COMPOSE_FILE, if set, is the list it adds to), e.g.
+# for cross-chain swaps:
 #   scripts/run.sh --compose cch --scenario c-15
 set -euo pipefail
 cd "$(dirname "$0")/../docker"
 
 args=()
+extra=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --compose)   COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml}:docker-compose.$2.yml"; shift 2 ;;
-    --compose=*) COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml}:docker-compose.${1#--compose=}.yml"; shift ;;
+    --compose)   extra+=("$2"); shift 2 ;;
+    --compose=*) extra+=("${1#--compose=}"); shift ;;
     *)           args+=("$1"); shift ;;
   esac
 done
-[ -z "${COMPOSE_FILE:-}" ] || export COMPOSE_FILE
+added=()
+if [ ${#extra[@]} -gt 0 ]; then
+  base="${COMPOSE_FILE:-docker-compose.yml}"
+  COMPOSE_FILE="$base"
+  for name in "${extra[@]}"; do COMPOSE_FILE="$COMPOSE_FILE:docker-compose.$name.yml"; done
+  export COMPOSE_FILE
+  # The services the added files define, which start with the cluster.
+  mapfile -t added < <(comm -13 <(COMPOSE_FILE="$base" docker compose config --services | sort) \
+                                <(docker compose config --services | sort))
+fi
 
 docker compose build
 # Recreating the containers resets the chain to the snapshot and clears any
-# leftover iptables rules or paused processes from an earlier run. Every
-# service of the compose files starts.
-docker compose up -d --force-recreate
+# leftover iptables rules or paused processes from an earlier run. Every node
+# container starts; the ones the test doesn't use only run sshd.
+mapfile -t nodes < <(docker compose config --services | grep -E '^n[0-9]+$')
+docker compose up -d --force-recreate chain "${nodes[@]}" control "${added[@]}"
 
 docker compose exec -T control lein run test \
   --nodes n1,n2,n3 \

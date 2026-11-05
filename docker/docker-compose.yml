@@ -1,5 +1,7 @@
-# A CKB devnet, three fnn nodes and a Jepsen control node on one private network.
+# A CKB devnet, six fnn nodes and a Jepsen control node on one private network.
 # Build the artefacts first with scripts/make-snapshot.sh, then use scripts/run.sh.
+# A test uses n1-n3 unless --nodes names more; nN is at 10.77.0.(10 + N)
+# (jepsen.fiber.topology/node-ip), and its node directory comes from the snapshot.
 name: fiber-jepsen
 
 x-fnn-node: &fnn-node
@@ -39,6 +41,25 @@ services:
     hostname: n3
     networks:
       fibernet: {ipv4_address: 10.77.0.13}
+
+  # For multi-node topologies (--nodes n1,...,n6 --topology ring or mesh).
+  n4:
+    <<: *fnn-node
+    hostname: n4
+    networks:
+      fibernet: {ipv4_address: 10.77.0.14}
+
+  n5:
+    <<: *fnn-node
+    hostname: n5
+    networks:
+      fibernet: {ipv4_address: 10.77.0.15}
+
+  n6:
+    <<: *fnn-node
+    hostname: n6
+    networks:
+      fibernet: {ipv4_address: 10.77.0.16}
 
   control:
     build:
