@@ -20,6 +20,10 @@
         "Failed to send message to peer 0x02aa11bb: timeout after 3000 ms")
    "  2026-11-05T03:40:03.5Z ERROR fnn::fiber::network: Failed to send message to peer 0x03cc: timeout after 5000 ms"
    "  2026-11-05T03:40:04.0Z ERROR fnn::store: write failed"
+   (str "  2026-11-05T03:40:04.1Z ERROR ractor::actor: Actor unexpectedly panicked (id: Actor { name: "
+        "Some(\"Channel-Hash256(0x1b)\"), id: Local(7) }): \"commit should be OK\"")
+   "  2026-11-05T03:40:04.2Z ERROR ractor::actor: Actor unexpectedly panicked (id: Actor { name: Some(\"Payment-1\"), id: Local(8) }): \"x\""
+   "  2026-11-05T03:40:04.3Z ERROR ractor::actor: Actor unexpectedly panicked (id: Actor { name: Some(\"Payment-2\"), id: Local(9) }): \"x\""
    ""
    "thread 'tokio-runtime-worker' panicked at crates/fiber-store/src/native.rs:52:30:"
    "put should be ok: Error { message: \"IO error: No space left on device\" }"
@@ -39,9 +43,9 @@
       (is (= [{:thread  "tokio-runtime-worker"
                :at      "crates/fiber-store/src/native.rs:52:30"
                :message "put should be ok: Error { message: \"IO error: No space left on device\" }"
-               :after   "2026-11-05T03:40:04.0Z"
+               :after   "2026-11-05T03:40:04.3Z"
                :shutdown? false}
-              {:thread "main", :at "'old style', src/main.rs:2:5", :after "2026-11-05T03:40:04.0Z"
+              {:thread "main", :at "'old style', src/main.rs:2:5", :after "2026-11-05T03:40:04.3Z"
                :shutdown? false}]
              (take 2 (:panics r)))))
     (testing "a panic with the thread's id after its name (newer Rust)"
@@ -52,13 +56,16 @@
     (testing "a panic after SIGTERM is in the shutdown, until fnn starts again"
       (is (= [true false] (map :shutdown? (drop 2 (:panics r))))))
     (testing "ERROR lines group by their message without numbers or hashes"
-      (is (= 3 (:errors r)))
-      (is (= [["Failed to send message to peer 0x..: timeout after N ms" 2] ["write failed" 1]]
-             (:top-errors r))))
+      (is (= 6 (:errors r)))
+      (is (= ["Failed to send message to peer 0x..: timeout after N ms" 2]
+             (first (:top-errors r)))))
+    (testing "actors that ractor reported as panicked, by kind"
+      (is (= {"Channel" 1, "Payment" 2} (:actor-panics r))))
     (testing "each start of fnn"
       (is (= 3 (:starts r))))
     (testing "an empty log"
-      (is (= {:panics [], :errors 0, :top-errors [], :starts 0} (health/parse-log []))))))
+      (is (= {:panics [], :actor-panics {}, :errors 0, :top-errors [], :starts 0}
+             (health/parse-log []))))))
 
 (def healthy
   {:process     {:pid "42", :state "Ssl"}
@@ -127,6 +134,11 @@
         (is (= [{:node "n2", :at "a.rs:1:2", :count 2, :message "m", :first-after nil}]
                (:panic-sites r)))
         (is (= 0 (:shutdown-panics r)))))
+    (testing "panicked actors, per node and kind"
+      (let [r (health/check (assoc-in logs ["n2" :actor-panics] {"Payment" 3, "Channel" 1})
+                            final [])]
+        (is (= {"n2" {"Channel" 1, "Payment" 3}} (:panicked-actors r)))
+        (is (= {} (:panicked-actors (health/check logs final []))))))
     (testing "a panic in the graceful shutdown fails it too, and is marked"
       (let [r (health/check (assoc-in logs ["n1" :panics] [{:thread "t", :at "c.rs:5:6", :message "m"
                                                            :shutdown? true}])
