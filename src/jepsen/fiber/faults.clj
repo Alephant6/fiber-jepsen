@@ -12,6 +12,8 @@
     :gaps     optional, (fn [streams opts]) -> the gaps in ns between its ops,
               for a fault that sets how long each fault lasts. Without it, gaps
               average :nemesis-interval seconds, from the fault's gap stream.
+    :checker  optional, (fn [opts]) -> nil or {name checker}: checks of its own
+              that the test adds to its checker when the fault is in use.
   Adding a fault is a new namespace and a line in `registry`."
   (:require [jepsen.generator :as gen]
             [jepsen.nemesis.combined :as nc]
@@ -56,6 +58,13 @@
   [db opts]
   (let [popts (package-opts db opts)]
     (nc/compose-packages (mapv #((:package %) popts) (in-use opts)))))
+
+(defn checkers
+  "{name checker} of the checks the faults in use add (their :checker)."
+  [opts]
+  (into {} (for [{:keys [checker]} (in-use opts)
+                 :when checker]
+             (checker opts))))
 
 (defn generator
   "The faults in use, each a stream of operations drawn from the seed and paced

@@ -16,13 +16,15 @@
                           [closes :as closes]
                           [db :as db]
                           [faults :as faults]
+                          [invoice]
                           [ledger :as ledger]
                           [nonce :as nonce]
                           [scenarios :as scenarios]
                           [schedule :as schedule]
                           [topology :as topology]]
             [jepsen.fiber.faults [packet :as packet]
-                                 [partition :as partition]])
+                                 [partition :as partition]
+                                 [process :as process]])
   (:gen-class))
 
 (def supported-faults
@@ -33,11 +35,13 @@
 
 (defn payments
   "Payments for the whole fault window, drawn from the run's seed (see
-  jepsen.fiber.schedule): 0.01-0.2 CKB each, about :rate a second. With --close,
+  jepsen.fiber.schedule): 0.01-0.2 CKB each, about :rate a second, of the kinds
+  in --pay-kinds (keysend, invoice: jepsen.fiber.invoice). With --close,
   every channel is asked to close cooperatively halfway through, and payments go on
   against the closing channels, from a stream of their own."
   [opts streams]
-  (let [pays (fn [k] (schedule/paced-payments streams k (:rate opts) (count (:nodes opts))))]
+  (let [pays (fn [k] (schedule/paced-payments streams k (:rate opts) (count (:nodes opts))
+                                              (:pay-kinds opts [:keysend])))]
     (if (:close opts)
       (gen/phases (gen/time-limit (/ (:time-limit opts) 2) (pays :pay))
                   (gen/once {:f :close})
@@ -53,13 +57,14 @@
 
 (defn availability-window
   "With --availability-window, payments without faults for that many seconds,
-  at --rate, from a stream of their own (`k`), each op marked with :window
-  `window` for jepsen.fiber.checker/availability-checker. Nil without the
-  option. The streams are new, so the fault window's payments for a seed don't
-  change."
+  at --rate and of the --pay-kinds, from a stream of their own (`k`), each op
+  marked with :window `window` for jepsen.fiber.checker/availability-checker.
+  Nil without the option. The streams are new, so the fault window's payments
+  for a seed don't change."
   [opts streams k window]
   (when (availability? opts)
-    (->> (schedule/paced-payments streams k (:rate opts) (count (:nodes opts)))
+    (->> (schedule/paced-payments streams k (:rate opts) (count (:nodes opts))
+                                  (:pay-kinds opts [:keysend]))
          (gen/map #(assoc % :window window))
          (gen/time-limit (:availability-window opts))
          gen/clients)))
@@ -109,10 +114,11 @@
             :initial-channels     (atom nil)
             :nonserializable-keys [:pubkeys :payments :initial-channels]
             :checker              (checker/compose
-                                    (cond-> {:stats      (checker/stats)
-                                             :exceptions (checker/unhandled-exceptions)
-                                             :perf       (checker/perf {:nemeses (:perf pkg)})
-                                             :timeline   (timeline/html)}
+                                    (cond-> (merge (faults/checkers opts)
+                                                   {:stats      (checker/stats)
+                                                    :exceptions (checker/unhandled-exceptions)
+                                                    :perf       (checker/perf {:nemeses (:perf pkg)})
+                                                    :timeline   (timeline/html)})
                                       (not (:close opts)) (assoc :fiber (if (:force-close-ok opts)
                                                                           (closes/checker)
                                                                           (fiber-checker/checker)))
@@ -156,6 +162,12 @@
    [nil "--rate HZ" "Approximate number of payments per second."
     :default  5
     :parse-fn parse-double]
+   [nil "--pay-kinds KINDS" (str "Comma-separated payment kinds, each payment's drawn uniformly from"
+                                 " them (list one twice to draw it twice as often): keysend, invoice.")
+    :default  [:keysend]
+    :parse-fn keywords
+    :validate [#(every? (methods client/send-payment!) %)
+               (str "Each must be a payment kind: " (str/join ", " (map name (keys (methods client/send-payment!)))))]]
    [nil "--nemesis-interval SECONDS" "Seconds between fault operations."
     :default  15
     :parse-fn parse-long]
@@ -177,9 +189,20 @@
     :validate [#(and % (<= 0 % 100)) "Must be 0 to 100"]]
    [nil "--log-level FILTER" "RUST_LOG filter for fnn."
     :default  "info"]
-   [nil "--kill-targets TARGETS" "Comma-separated kill targets: one, all."
+   [nil "--kill-targets TARGETS" (str "Comma-separated kill targets: one, all, middle (a node on more"
+                                      " than one channel, which forwards payments: n2 in line).")
     :default  [:one :all]
     :parse-fn keywords]
+   [nil "--kill-signal SIGNAL" (str "How a kill stops fnn: kill (SIGKILL, a crash) or term (SIGTERM, a"
+                                    " graceful shutdown, checked to finish within --term-grace).")
+    :default  :kill
+    :parse-fn keyword
+    :validate [process/kill-signals (str "Must be one of " process/kill-signals)]]
+   [nil "--term-grace SECONDS" (str "With --kill-signal term, seconds fnn has to exit after SIGTERM"
+                                    " before it gets SIGKILL and the run fails.")
+    :default  30
+    :parse-fn parse-long
+    :validate [#(and % (pos? %)) "Must be positive"]]
    [nil "--packet-targets TARGETS" (str "With --faults packet, comma-separated target specs to choose"
                                         " from: one, all, chain (the CKB node).")
     :default  [:one :all]
@@ -204,6 +227,12 @@
                                             " the next fault op, like other faults (at most 100 s).")
     :parse-fn partition/parse-duration
     :validate [(fn [[lo hi]] (and lo hi (< 0 lo) (<= lo hi))) "Must be S or MIN-MAX, 0 < MIN <= MAX"]]
+   [nil "--disconnect-flash MS" (str "With --faults disconnect, make each fault a flash: disconnect a pair"
+                                     " and connect it again after MS milliseconds, or after a time drawn"
+                                     " from MIN-MAX (C-05: 100-5000). Without it, a pair stays"
+                                     " disconnected until the next fault op.")
+    :parse-fn packet/parse-delay
+    :validate [(fn [[lo hi]] (and lo hi (<= 0 lo hi))) "Must be MS or MIN-MAX, 0 <= MIN <= MAX"]]
    [nil "--nonce-check" (str "Check MuSig2 nonce use. Needs an fnn built with the nonce-oracle"
                              " feature (scripts/build-fnn-nonce-oracle.sh).")]
    [nil "--close" (str "Halfway through the faults, ask every channel to close cooperatively, and"
