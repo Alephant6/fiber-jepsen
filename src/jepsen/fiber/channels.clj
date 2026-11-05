@@ -116,8 +116,10 @@
 
 (defn close!
   "Closes one of the edge's ready channels, as `actor` sees them, cooperatively
-  or by force. Fails without a call when the edge has --channel-keep ready
-  channels or fewer."
+  or by force. When the edge has --channel-keep ready channels or fewer, does
+  nothing: the op is :ok with :skipped :keeping-last, since keeping them is the
+  workload's choice, not a failure (and Jepsen's stats checker would fail a run
+  in which every close of a kind was a :fail)."
   [test op force?]
   (let [[a b] (edge-ends test (:value op))
         value (assoc (:value op) :by a, :peer b)]
@@ -125,7 +127,7 @@
       (let [ready (ready-channels test a b)
             keep  (:channel-keep test 1)]
         (if (<= (count ready) keep)
-          (assoc op :type :fail, :value (assoc value :ready (count ready)), :error :keeping-last)
+          (assoc op :type :ok, :value (assoc value :ready (count ready), :skipped :keeping-last))
           (let [ch    (nth ready (mod (:pick value 0) (count ready)))
                 value (assoc value :channel ch, :ready (count ready))]
             (attempt op value
@@ -210,7 +212,7 @@
         ops      (->> history
                       (filter #(and (#{:open-channel :close-channel :force-close} (:f %))
                                     (#{:ok :fail :info} (:type %))))
-                      (map (juxt :f :type))
+                      (map (fn [op] [(:f op) (if (get-in op [:value :skipped]) :skipped (:type op))]))
                       frequencies)]
     {:valid?             (and (empty? between) (empty? disagree))
      :ops                (into (sorted-map) (for [[[f t] n] ops] [(str (name f) " " (name t)) n]))

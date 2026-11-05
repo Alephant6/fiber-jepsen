@@ -80,16 +80,18 @@
         (is (true? (:valid? r)))
         (is (= settle (:settle-wait r)))))
     (testing "operation counts"
-      (is (= {"force-close ok" 1, "open-channel fail" 1}
+      (is (= {"force-close ok" 1, "force-close skipped" 1, "open-channel fail" 1}
              (:ops (channels/analyze (read {})
                                      [{:type :fail, :f :open-channel}
                                       {:type :ok, :f :force-close, :value {:channel "b"}}
+                                      {:type :ok, :f :force-close, :value {:skipped :keeping-last}}
                                       {:type :invoke, :f :force-close}])))))))
 
 (deftest channel-checker
   (let [history [{:type :ok, :f :force-close, :value {:channel "b"}}
                  {:type :info, :f :close-channel, :value {:channel "c"}}
-                 {:type :fail, :f :close-channel, :value {:channel "d"}, :error :keeping-last}]]
+                 {:type :fail, :f :close-channel, :value {:channel "d"}, :error :node-down}
+                 {:type :ok, :f :close-channel, :value {:edge 0, :skipped :keeping-last}}]]
     (is (= #{"b" "c"} (fc/closed-on-purpose history)))
     (testing "TLCs pending on a channel closed on purpose settle on chain"
       (let [final {"n1" [(ch "b" "Closed" :tlcs [{:payment_hash "h1"}])
