@@ -28,7 +28,7 @@ With `--ledger`, it also checks that money adds up at every node, not only on ev
 | Fault | How |
 |---|---|
 | `kill` | `SIGKILL` on one node or all nodes, then restart. A crash can land in the middle of a write. |
-| `pause` | `SIGSTOP` / `SIGCONT` on one node. The peer stays connected but gets no replies. |
+| `pause` | `SIGSTOP` / `SIGCONT` on one node, by the pid in fnn's pidfile. The peer stays connected but gets no replies. The nemesis op records each node's process state afterwards (`T` = stopped). Before 2026-11-05 this fault stopped nothing on the node images (see [FINDINGS.md](FINDINGS.md#reproducibility)). |
 | `partition` | iptables drops traffic between one node and the others. |
 | `disconnect` | `disconnect_peer` over RPC closes the connection between two neighbours; a later `connect_peer` reconnects them. Channels reestablish while both processes keep running, which a partition rarely causes (TCP keeps the connection and retransmits). |
 | `packet` | tc netem delays traffic, and with `--packet-loss` drops some of it: to and from one node, between all nodes, or from the nodes to the CKB node (`--packet-targets one,all,chain`). Each fault draws its delay from `--packet-delay MIN-MAX` (ms; default 500-3000), with a jitter of a tenth of it. One shaping is active at a time. |

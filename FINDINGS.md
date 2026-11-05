@@ -74,6 +74,8 @@ All runs lasted 60 s on fnn `develop @ ae6f7d34`. A run "fails" when, after heal
 | `pause` (SIGSTOP), one node | ~10/s | 8 s | 0 of 2 |
 | `partition` (iptables), one node isolated | ~10/s | 8 s | 1 of 6, a different failure (see the correction below) |
 
+**Caveat on the `pause` row (2026-11-05):** until then, the pause fault stopped nothing on this suite's node images. In CI runs on both the Debian 12 and the Ubuntu 24.04 image (2026-11-03 and 11-05), payments from and through the "paused" node kept succeeding while it was paused, and the nemesis reported no error, because Jepsen's `grepkill!` pipeline exits 0 even when it signals nothing. Whether the pauses in the runs above took effect was not checked, so treat that row as unverified. The fault now signals the pid in fnn's pidfile and records the process state.
+
 How the failing runs were confirmed:
 
 - **Nonce state checked directly: one run** (`kill`, all nodes, debug logs, nodes left running for inspection; the case described above).
