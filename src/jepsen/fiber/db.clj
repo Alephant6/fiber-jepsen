@@ -9,6 +9,7 @@
                     [db :as db]
                     [util :refer [await-fn]]]
             [jepsen.control.util :as cu]
+            [jepsen.lazyfs :as lazyfs]
             [jepsen.fiber [rpc :as rpc]
                           [topology :as topology]]
             [slingshot.slingshot :refer [try+]]))
@@ -43,6 +44,21 @@
   [test]
   (boolean (some #{:disk} (:faults test))))
 
+(defn lazyfs-store?
+  "Whether the test puts fnn's store on LazyFS (--faults power)."
+  [test]
+  (boolean (some #{:power} (:faults test))))
+
+(defn store-lazyfs
+  "The jepsen.lazyfs map of `node`'s store: the store directory is a FUSE mount
+  that keeps written data in LazyFS's own page cache until it is fsynced, backed
+  by /fiber/lazyfs/data. LazyFS is in the node image only when built for it
+  (scripts/run.sh does with --faults power)."
+  [node]
+  (lazyfs/lazyfs {:dir        (store-dir node)
+                  :lazyfs-dir "/fiber/lazyfs"
+                  :cache-size "0.5GB"}))
+
 (defn start-fnn!
   [test node]
   (c/su
@@ -52,11 +68,14 @@
        :chdir   (node-dir node)
        ; :fnn-env holds what faults add (jepsen.fiber.faults/fnn-env): libfaketime
        ; for the clock fault, say.
-       :env     (merge {:FIBER_SECRET_KEY_PASSWORD (str "password" (node-id node))
-                        :RUST_LOG                  (:log-level test "info")
-                        :RUST_BACKTRACE            "1"
-                        :FIBER_NONCE_ORACLE_FILE   nonce-file}
-                       (:fnn-env test))}
+       :env     (cond-> (merge {:FIBER_SECRET_KEY_PASSWORD (str "password" (node-id node))
+                                :RUST_LOG                  (:log-level test "info")
+                                :RUST_BACKTRACE            "1"
+                                :FIBER_NONCE_ORACLE_FILE   nonce-file}
+                               (:fnn-env test))
+                  ; Fiber #1703; builds before it ignore the variable.
+                  (some? (:store-sync-writes test))
+                  (assoc :FIBER_STORE_SYNC_WRITES (str (:store-sync-writes test))))}
       binary
       :-d (node-dir node))))
 
@@ -170,18 +189,25 @@
 (defrecord FiberDB []
   db/DB
   (setup! [_ test node]
+    (when (and (small-store? test) (lazyfs-store? test))
+      (throw (ex-info "--faults disk and power each put fnn's store on a filesystem of their own; use one"
+                      {:type :disk-and-power})))
     (c/su (c/exec :rm :-rf (store-dir node) logfile pidfile nonce-file)
           (when (small-store? test)
             ; The store directory becomes a link into small-fs.
             (c/exec :rm :-rf (str small-fs "/store") (str small-fs "/fill"))
             (c/exec :mkdir :-p (str small-fs "/store") (str (node-dir node) "/fiber"))
             (c/exec :ln :-s (str small-fs "/store") (store-dir node))))
+    (when (lazyfs-store? test)
+      (lazyfs/mount! (store-lazyfs node)))
     (start-fnn! test node)
     (await-rpc! node))
 
-  (teardown! [_ _test node]
-    (c/su (cu/stop-daemon! binary pidfile)
-          (c/exec :rm :-rf (store-dir node))))
+  (teardown! [_ test node]
+    (c/su (cu/stop-daemon! binary pidfile))
+    (when (lazyfs-store? test)
+      (lazyfs/umount! (store-lazyfs node)))
+    (c/su (c/exec :rm :-rf (store-dir node))))
 
   db/Primary
   (primaries [_ test]
@@ -207,10 +233,11 @@
     (signal! "CONT"))
 
   db/LogFiles
-  (log-files [_ _test _node]
+  (log-files [_ test node]
     ; Jepsen skips files that don't exist, e.g. the nonce records of an uninstrumented fnn.
-    {logfile    "fnn.log"
-     nonce-file "nonce-oracle.log"}))
+    (cond-> {logfile    "fnn.log"
+             nonce-file "nonce-oracle.log"}
+      (lazyfs-store? test) (assoc (:log-file (store-lazyfs node)) "lazyfs.log"))))
 
 (defn db
   []

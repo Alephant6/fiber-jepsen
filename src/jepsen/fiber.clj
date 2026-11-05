@@ -31,6 +31,7 @@
                                  [outage :as outage]
                                  [packet :as packet]
                                  [partition :as partition]
+                                 [power :as power]
                                  [process :as process]
                                  [resources :as resources]])
   (:gen-class))
@@ -374,6 +375,17 @@
     :default  [128 256]
     :parse-fn resources/parse-range
     :validate [(fn [[lo hi]] (and lo hi (<= 16 lo hi))) "Must be MIB or MIN-MAX, 16 <= MIN <= MAX"]]
+   [nil "--power-targets TARGETS" (str "With --faults power, comma-separated target specs to choose"
+                                       " from: one (a node), all (every node at once).")
+    :default  [:one :all]
+    :parse-fn keywords
+    :validate [#(every? power/target-specs %) (str "Must be a subset of " power/target-specs)]]
+   [nil "--store-sync-writes BOOL" (str "Sets fnn's fiber.store_sync_writes (Fiber #1703; earlier builds"
+                                        " ignore it): true, every store write waits for the disk;"
+                                        " false, it returns once in the page cache. Unset, fnn's"
+                                        " default (false).")
+    :parse-fn #(case % "true" true "false" false nil)
+    :validate [boolean? "Must be true or false"]]
    [nil "--nonce-check" (str "Check MuSig2 nonce use. Needs an fnn built with the nonce-oracle"
                              " feature (scripts/build-fnn-nonce-oracle.sh).")]
    [nil "--close" (str "Halfway through the faults, ask every channel to close cooperatively, and"

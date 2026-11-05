@@ -27,6 +27,7 @@
                                  [outage :as outage]
                                  [packet :as packet]
                                  [partition :as partition]
+                                 [power :as power]
                                  [process :as process]
                                  [resources :as resources]]))
 
@@ -40,7 +41,8 @@
    clock/fault
    outage/fault
    resources/fault
-   disk/fault])
+   disk/fault
+   power/fault])
 
 (def supported
   "Every name --faults accepts."
