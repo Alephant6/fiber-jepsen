@@ -83,7 +83,19 @@
              :args     ["--faults" "pause" "--nemesis-interval" "30" "--time-limit" "300"]
              :differs  (str "Three nodes in a line rather than A-B. A pause lasts an exponential"
                             " 30 s on average, capped at 100 s, so some cross V2's 30 s"
-                            " peer-response deadline.")}))
+                            " peer-response deadline.")}
+    "c-14"  {:priority :p2
+             :plan     "A-B, payments and invoices; a node's clock jumps forward or back"
+             :args     ["--faults" "clock" "--clock-targets" "one,all" "--clock-jump" "60-1800"
+                        "--pay-kinds" "keysend,invoice" "--nemesis-interval" "30" "--time-limit" "300"]
+             :differs  (str "Three nodes in a line rather than A-B; half the payments keysend, half"
+                            " invoices. Only fnn's clock moves, with libfaketime; the CKB devnet"
+                            " keeps real time. One node's clock, or every node's by the same offset,"
+                            " jumps 1-30 minutes forward or back and returns after an exponential"
+                            " 30 s on average, capped at 100 s: well short of a TLC's expiry (hours)"
+                            " and of an invoice's (1 h, so one made on a node 30 minutes ahead is"
+                            " still unexpired on a node 30 minutes behind), so a force close or a"
+                            " stuck payment is a failure.")}))
 
 (defn scenario-args
   "The arguments of scenario `name`. Throws for an unknown name."
