@@ -29,7 +29,7 @@ With `--availability-window`, it also checks that the payment success rate after
 
 | Fault | How |
 |---|---|
-| `kill` | `SIGKILL` on one node or all nodes, then restart. A crash can land in the middle of a write. |
+| `kill` | `SIGKILL` on one node, all nodes, or the middle node (`--kill-targets one,all,middle`; middle is a node on more than one channel, n2 in `line`), then restart. A crash can land in the middle of a write. With `--kill-signal term`, `SIGTERM` instead: fnn stops its RPC server, cancels its tasks and waits for them, a path `SIGKILL` never reaches. The nemesis waits up to `--term-grace` seconds (default 30, the grace period fnn's signal handler assumes) for fnn to exit and records how long it took; past that it sends `SIGKILL`, and the `:term-exits` check fails. `SIGCONT` follows each `SIGTERM`, as systemd sends it, so a paused fnn handles it. |
 | `pause` | `SIGSTOP` / `SIGCONT` on one node, by the pid in fnn's pidfile. The peer stays connected but gets no replies. The nemesis op records each node's process state afterwards (`T` = stopped). Before 2026-11-05 this fault stopped nothing on the node images, so earlier pause results are runs without a fault (see [FINDINGS.md](FINDINGS.md#reproducibility)). |
 | `partition` | iptables drops traffic between one node and the others. |
 | `disconnect` | `disconnect_peer` over RPC closes the connection between two neighbours; a later `connect_peer` reconnects them. Channels reestablish while both processes keep running, which a partition rarely causes (TCP keeps the connection and retransmits). |
