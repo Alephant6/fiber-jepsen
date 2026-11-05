@@ -6,7 +6,11 @@
 
   With this fault, jepsen.fiber.db puts each node's store on a small tmpfs
   (db/small-fs, 256 MiB; docker/docker-compose.yml). A :fill-disk op fills it
-  with one file; a :free-disk op, before deleting the file, records what the
+  with one file. RocksDB preallocates its write-ahead log, so a running fnn
+  can go on writing into that space for a while on a full disk; half the fills,
+  at random, therefore also crash fnn (SIGKILL) and start it again on the full
+  disk, so that RocksDB must open the store and start a new log with no space.
+  A :free-disk op, before deleting the file, records what the
   node was doing while full (a health sample: does node_info answer, does a
   store write fail?) and what fnn logged since the fill (space errors, panics).
   It then frees the space and samples again after `recovery-ms`, to see whether
@@ -28,9 +32,11 @@
             [jepsen [checker :as checker]
                     [control :as c]
                     [db :as db]
-                    [nemesis :as n]]
+                    [nemesis :as n]
+                    [util :refer [await-fn]]]
             [jepsen.fiber [db :as fdb]
                           [health :as health]
+                          [rpc :as rpc]
                           [schedule :as schedule]]
             [slingshot.slingshot :refer [try+]])
   (:import (java.util SplittableRandom)))
@@ -75,9 +81,20 @@
       (throw (ex-info (str "fnn's store on " node " isn't on " fdb/small-fs ": " (pr-str link))
                       {:type :store-not-on-small-fs, :node node})))))
 
+(defn store-bytes
+  "The current node's store on small-fs: {:apparent bytes, :allocated bytes}.
+  RocksDB preallocates its write-ahead log (fallocate), so the store holds more
+  than it has written, and writes into that space succeed on a full disk."
+  []
+  (let [du (fn [& flags]
+             (some-> (apply exec-or-nil :du (concat flags [(str fdb/small-fs "/store")]))
+                     (str/split #"\s+") first parse-long))]
+    {:apparent (du :-sb), :allocated (du :-s :-B1)}))
+
 (defn fill!
   "Fills the current node's small-fs: one file with every free byte, then any
-  last bytes a page at a time. Returns the space before and after."
+  last bytes a page at a time. Returns the space before and after, and the
+  store's size."
   []
   (c/su
     (let [before (space)]
@@ -85,7 +102,7 @@
           (do (exec-or-nil :dd "if=/dev/zero" (str "of=" fill-file) "bs=1M" "status=none")
               (exec-or-nil :dd "if=/dev/zero" (str "of=" fill-file) "bs=4k" "oflag=append"
                            "conv=notrunc" "status=none")))
-      {:avail-before (:avail before), :avail-after (:avail (space))})))
+      {:avail-before (:avail before), :avail-after (:avail (space)), :store (store-bytes)})))
 
 (defn log-lines
   "How many lines fnn's log has on the current node."
@@ -119,6 +136,24 @@
   (try (fdb/await-rpc! node) :ok
        (catch Exception e (str "RPC didn't come back: " (.getMessage e)))))
 
+(def restart-full-ms
+  "How long a restart on a full disk waits for fnn's RPC."
+  20000)
+
+(defn restart-full!
+  "Crashes fnn (SIGKILL) on a full disk and starts it again, as a crash or an
+  operator's restart would: RocksDB must then open the store, replay its log and
+  start a new one, with no space. :rpc-up when fnn answered within
+  restart-full-ms, or how it didn't."
+  [db test node]
+  (db/kill! db test node)
+  (db/start! db test node)
+  (try (await-fn #(rpc/call node "node_info") {:timeout restart-full-ms, :retry-interval 500, :log-interval 60000})
+       :rpc-up
+       (catch Exception _
+         (let [state (:state (health/process))]
+           (if (or (= "gone" state) (str/starts-with? state "Z")) :exited :no-rpc)))))
+
 (defn disk-nemesis
   [db]
   (let [filled (atom {})]   ; node -> {:log-from n}
@@ -137,11 +172,13 @@
           (assoc op :value
                  (into (sorted-map)
                        (c/on-nodes test (:nodes (:value op))
-                                   (fn [_ node]
+                                   (fn [test node]
                                      (let [from (log-lines)
                                            r    (fill!)]
                                        (swap! filled assoc node {:log-from from})
-                                       r)))))
+                                       (cond-> r
+                                         (:restart (:value op))
+                                         (assoc :restart (restart-full! db test node))))))))
 
           :free-disk
           (let [nodes (vec (keys @filled))]
@@ -182,13 +219,15 @@
                        :color "#A0E9C4"}}})
 
 (defn ops
-  "Endless pairs of a :fill-disk of one node drawn from `r` and a :free-disk."
+  "Endless pairs of a :fill-disk of one node drawn from `r` and a :free-disk.
+  Half the fills, at random, also restart fnn on the full disk (:restart)."
   [^SplittableRandom r opts]
   (let [nodes (vec (:nodes opts))]
-    (mapcat (fn [node]
-              [{:type :info, :f :fill-disk, :value {:nodes [node]}}
+    (mapcat (fn [fill]
+              [{:type :info, :f :fill-disk, :value fill}
                {:type :info, :f :free-disk, :value nil}])
-            (repeatedly #(schedule/pick r nodes)))))
+            (repeatedly #(let [node (schedule/pick r nodes)]
+                           {:nodes [node], :restart (.nextBoolean r)})))))
 
 (defn while-full
   "How a node behaved while its disk was full, from a :free-disk record:
@@ -237,12 +276,16 @@
   (let [fills   (atom {})
         windows (vec (for [op    history
                            :let  [_ (when (= :fill-disk (:f op))
-                                      (doseq [n (keys (per-node op))] (swap! fills assoc n (:time op))))]
+                                      (doseq [[n r] (per-node op)]
+                                        (swap! fills assoc n (assoc r :time (:time op)))))]
                            :when (= :free-disk (:f op))
-                           [node rec] (per-node op)]
+                           [node rec] (per-node op)
+                           :let  [fill (get @fills node)]]
                        (merge {:node node, :time (:time op)
                                :while-full (while-full rec), :after-free (after-free rec)
-                               :payments (pays-of history node (get @fills node 0) (:time op))}
+                               :payments (pays-of history node (:time fill 0) (:time op))}
+                              (when (:restart fill) {:restarted-full (:restart fill)})
+                              (when-let [b (get-in fill [:store :allocated])] {:store-allocated-bytes b})
                               (select-keys rec [:space-errors :first-space-error :panics]))))
         bad     (vec (filter #(or (#{:unresponsive :hung} (:while-full %))
                                   (#{:not-working :not-recovered} (:after-free %)))

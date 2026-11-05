@@ -16,6 +16,8 @@
   (let [ops (take 40 (disk/ops (schedule/stream (schedule/streams 7) :disk) opts))]
     (testing "a fill of one node, then a free, in turn"
       (is (= (take 40 (cycle [:fill-disk :free-disk])) (map :f ops)))
+      (is (= #{true false} (set (map #(get-in % [:value :restart]) (filter #(= :fill-disk (:f %)) ops))))
+          "some fills restart fnn on the full disk")
       (is (every? #(= 1 (count (get-in % [:value :nodes]))) (filter #(= :fill-disk (:f %)) ops)))
       (is (= #{"n1" "n2" "n3"} (set (mapcat #(get-in % [:value :nodes]) ops)))))
     (testing "the seed fixes them"
@@ -61,7 +63,8 @@
 
 (deftest check
   (testing "a node that stopped and came back after a restart, and one that errored and came back by itself"
-    (let [h [(op :fill-disk {"n2" {:avail-before 1, :avail-after 0}} 10)
+    (let [h [(op :fill-disk {"n2" {:avail-before 1, :avail-after 0, :restart :exited
+                                   :store {:apparent 3000000, :allocated 70000000}}} 10)
              (pay :invoke "n1" "n2" 11) (pay :fail "n1" "n2" 12) (pay :ok "n1" "n3" 13)
              (pay :info "n2" "n3" 14) (pay :ok "n1" "n2" 30)
              (op :free-disk {"n2" (assoc (rec exited exited ok) :space-errors 3, :panics 1)} 20)
@@ -74,7 +77,11 @@
       (is (= {:fail 1, :info 1} (:payments (first (:windows r))))
           "the payments from or to n2 between its fill and its free")
       (is (= 3 (:space-errors (first (:windows r)))))
-      (is (= 1 (:panics (first (:windows r)))))))
+      (is (= 1 (:panics (first (:windows r)))))
+      (testing "with what the fill recorded"
+        (is (= :exited (:restarted-full (first (:windows r)))))
+        (is (= 70000000 (:store-allocated-bytes (first (:windows r)))))
+        (is (not (contains? (second (:windows r)) :restarted-full))))))
   (testing "alive but doing nothing while full"
     (let [r (disk/check [(op :fill-disk {"n1" {}} 1)
                          (op :free-disk {"n1" (rec {:status :not-working, :store-write-error "SocketTimeoutException"} ok)} 2)])]
