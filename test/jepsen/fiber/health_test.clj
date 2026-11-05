@@ -27,7 +27,7 @@
    "thread 'main' panicked at 'old style', src/main.rs:2:5"
    "  2026-11-05T03:41:00Z  INFO fnn: Starting node with git version 0.6.1 (ae6f7d3)"
    "  2026-11-05T03:42:00Z  INFO fnn: SIGTERM received, shutting down"
-   "thread 'tokio-runtime-worker' panicked at crates/fiber-lib/src/fiber/channel.rs:5833:14:"
+   "thread 'tokio-rt-worker' (64) panicked at crates/fiber-lib/src/fiber/channel.rs:5833:14:"
    "network actor must be alive: SendErr"
    "  2026-11-05T03:43:00Z  INFO fnn: Starting node with git version 0.6.1 (ae6f7d3)"
    "thread 'x' panicked at a.rs:1:1:"
@@ -44,6 +44,11 @@
               {:thread "main", :at "'old style', src/main.rs:2:5", :after "2026-11-05T03:40:04.0Z"
                :shutdown? false}]
              (take 2 (:panics r)))))
+    (testing "a panic with the thread's id after its name (newer Rust)"
+      (is (= {:thread "tokio-rt-worker", :at "crates/fiber-lib/src/fiber/channel.rs:5833:14"
+              :message "network actor must be alive: SendErr"}
+             (select-keys (nth (:panics r) 2) [:thread :at :message])))
+      (is (= 4 (count (:panics r)))))
     (testing "a panic after SIGTERM is in the shutdown, until fnn starts again"
       (is (= [true false] (map :shutdown? (drop 2 (:panics r))))))
     (testing "ERROR lines group by their message without numbers or hashes"
