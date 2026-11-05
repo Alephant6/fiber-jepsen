@@ -21,6 +21,19 @@
              :differs  (str "Three nodes in a line rather than A-B. The gap between a kill and"
                             " the restart, and between restarts and kills, is exponential with a"
                             " 75 s mean, capped at 100 s, rather than uniform over 30-120 s.")}
+    "c-12"  {:priority :p1
+             :plan     (str "A-B-C under high load; limit a node's CPU or memory with cgroups;"
+                            " no OOM, no disconnect loop, recovers once the limit is lifted")
+             :args     ["--faults" "cpu,memory" "--resource-targets" "one,all" "--rate" "20"
+                        "--nemesis-interval" "30" "--time-limit" "300"
+                        "--log-level" "info,fnn::fiber::network=debug"]
+             :differs  (str "Limits are Docker's (docker update), on the node's whole container:"
+                            " fnn and sshd. Each limit draws CPU (0.1-0.5 CPUs) or memory"
+                            " (64-256 MiB, no swap) and one node or all of them, and lasts an"
+                            " exponential 30 s on average, capped at 100 s. Lifting sets the limits"
+                            " to the host's size, since Docker can't remove one. A disconnect loop"
+                            " is a pair of nodes disconnecting 3 times or more within a limit and"
+                            " the minute after it, from fnn's debug log.")}
     "c-08"  {:priority :p1
              :plan     "SIGSTOP a node for tens of seconds, then resume"
              :args     ["--faults" "pause" "--nemesis-interval" "30" "--time-limit" "300"]

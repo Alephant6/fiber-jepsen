@@ -8,7 +8,9 @@
     :package  (fn [opts]) -> a nemesis package in jepsen.nemesis.combined's shape,
               of which the test uses :nemesis, :final-generator and :perf;
     :ops      (fn [r opts]) -> its endless fault operations, drawn from the
-              SplittableRandom `r` alone, so that the seed fixes them.
+              SplittableRandom `r` alone, so that the seed fixes them;
+    :checker  optional, (fn [opts]) -> nil or {name checker}: checks of its own
+              that the test adds to its checker when the fault is in use.
   Adding a fault is a new namespace and a line in `registry`."
   (:require [jepsen.generator :as gen]
             [jepsen.nemesis.combined :as nc]
@@ -16,14 +18,16 @@
             [jepsen.fiber.faults [disconnect :as disconnect]
                                  [packet :as packet]
                                  [partition :as partition]
-                                 [process :as process]]))
+                                 [process :as process]
+                                 [resources :as resources]]))
 
 (def registry
   "Every fault, in the order their generators and final generators combine."
   [partition/fault
    process/fault
    disconnect/fault
-   packet/fault])
+   packet/fault
+   resources/fault])
 
 (def supported
   "Every name --faults accepts."
@@ -53,6 +57,13 @@
   [db opts]
   (let [popts (package-opts db opts)]
     (nc/compose-packages (mapv #((:package %) popts) (in-use opts)))))
+
+(defn checkers
+  "{name checker} of the checks the faults in use add (their :checker)."
+  [opts]
+  (into {} (for [{:keys [checker]} (in-use opts)
+                 :when checker]
+             (checker opts))))
 
 (defn generator
   "The faults in use, each a stream of operations drawn from the seed and paced

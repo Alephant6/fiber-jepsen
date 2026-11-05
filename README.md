@@ -33,6 +33,7 @@ With `--ledger`, it also checks that money adds up at every node, not only on ev
 | `partition` | iptables drops traffic between one node and the others. |
 | `disconnect` | `disconnect_peer` over RPC closes the connection between two neighbours; a later `connect_peer` reconnects them. Channels reestablish while both processes keep running, which a partition rarely causes (TCP keeps the connection and retransmits). |
 | `packet` | tc netem delays traffic, and with `--packet-loss` drops some of it: to and from one node, between all nodes, or from the nodes to the CKB node (`--packet-targets one,all,chain`). Each fault draws its delay from `--packet-delay MIN-MAX` (ms; default 500-3000), with a jitter of a tenth of it. One shaping is active at a time. |
+| `cpu`, `memory` | `docker update` limits one node's container, or all of them (`--resource-targets one,all`), to `--cpu-limit MIN-MAX` CPUs (default 0.1-0.5) or `--memory-limit MIN-MAX` MiB without swap (default 64-256), then lifts the limit. The control container calls Docker's API through the host's Docker socket, which `docker/docker-compose.yml` mounts into it: that gives it control of the host's Docker daemon, fine on a CI runner, a trade-off on a workstation. Docker can't remove a limit, so lifting sets it to the host's size. Each op records the limit the node's cgroup has; a lift records the window's CPU throttling, memory events and a health sample taken under the limit. With fnn's network debug log (`--log-level 'info,fnn::fiber::network=debug'`), a pair of nodes that disconnects three times or more within a limit and the minute after it fails the run (`:disconnect-loops`). |
 
 Each fault is a namespace under `src/jepsen/fiber/faults/` that defines `fault`: the `--faults` names it handles, its nemesis package, and its operations, drawn from a random stream of its own so that the seed fixes them. `faults.clj` lists them; adding a fault is a new namespace and a line there, and changes no other fault's operations for a given seed (`test/jepsen/fiber/faults_test.clj` checks this).
 
@@ -50,7 +51,7 @@ Planned: **clock skew**. Fiber expires TLCs by wall-clock timestamp (off-chain c
   - `health.clj` (process health: panics, and a sample of every node after healing)
   - `ledger.clj` (per-node money check, with `--ledger`)
   - `nonce.clj` (MuSig2 nonce reuse, with `--nonce-check`)
-  - `faults.clj` and `faults/` (one namespace per fault: `process` for kill and pause, `partition`, `disconnect`, `packet`)
+  - `faults.clj` and `faults/` (one namespace per fault: `process` for kill and pause, `partition`, `disconnect`, `packet`, `resources` for cpu and memory)
   - `scenarios.clj` (named scenarios of the chaos-test plan, `--scenario`)
   - `schedule.clj` (payments, and the random streams faults draw from, fixed in advance by the run's seed)
 - `instrument/`: the logging-only fnn instrumentation the nonce check needs.

@@ -49,6 +49,10 @@ services:
     volumes:
       - ..:/jepsen
       - m2:/root/.m2
+      # Docker's API, for the cpu and memory faults (docker update on the node
+      # containers). It gives the control container control of the host's Docker
+      # daemon: fine on a CI runner, a trade-off on a workstation.
+      - /var/run/docker.sock:/var/run/docker.sock
     networks:
       fibernet: {ipv4_address: 10.77.0.5}
 
