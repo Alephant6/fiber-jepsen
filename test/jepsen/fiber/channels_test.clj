@@ -114,3 +114,28 @@
                                      (ch "b" "Closed" :flags "UNCOOPERATIVE_LOCAL")]})]
     (is (= ["a"] (map :channel (:disagree u))))
     (is (= [["b" "n1"]] (map (juxt :channel :node) (:between u))))))
+
+(deftest held-upstream
+  (let [final {"n1" [(ch "up" "ChannelReady" :tlcs [{:payment_hash "h1"}])]
+               "n2" [(ch "up" "ChannelReady" :tlcs [{:payment_hash "h1"}])
+                     (ch "down" "Closed" :tlcs [{:payment_hash "h1"}])
+                     (ch "other" "ChannelReady" :tlcs [{:payment_hash "h1"} {:payment_hash "h2"}])]}
+        probs [{:channel "up", :node "n1", :problems [[:pending-tlcs 1]]}
+               {:channel "up", :node "n2", :problems [[:pending-tlcs 1] [:mirror {}]]}
+               {:channel "other", :node "n2", :problems [[:pending-tlcs 2]]}]]
+    (testing "TLCs whose payments are held on a closed channel are excused, others aren't"
+      (is (= [{:channel "up", :node "n2", :problems [[:mirror {}]]}
+              {:channel "other", :node "n2", :problems [[:pending-tlcs 2]]}]
+             (fc/excuse-held probs final (fc/held-on-chain final #{"down"})))))
+    (testing "nothing closed on purpose: nothing excused"
+      (is (= probs (fc/excuse-held probs final #{}))))))
+
+(deftest sender-balance
+  (let [final {"n1" [(assoc (ch "a" "Closed") :local_balance "0x64")
+                     (assoc (ch "b" "ChannelReady") :local_balance "0xa")
+                     (assoc (ch "c" "ChannelReady") :local_balance "0x14")]
+               "n2" [(ch "a" "Closed") (ch "b" "ChannelReady") (ch "c" "ChannelReady")]}]
+    (is (= 20 (fc/sender-balance final "n1" "n2")))
+    (is (nil? (fc/sender-balance {"n1" [(assoc (ch "a" "Closed") :local_balance "0x64")]
+                                  "n2" [(ch "a" "Closed")]}
+                                 "n1" "n2")))))

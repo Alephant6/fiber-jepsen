@@ -4,7 +4,9 @@
 
   - every channel opened during setup is still ChannelReady, unless a workload
     (--channel-ops) closed it on purpose;
-  - no channel still holds pending TLCs;
+  - no channel still holds pending TLCs, except TLCs for payments still
+    pending on a channel a workload closed: the forwarder resolves the upstream
+    TLC only once the downstream one resolves on chain;
   - both ends of a channel agree on its balances (A's local = B's remote);
   - each channel's total (local + remote) equals its total at the start of the
     test: payments move money within a channel, they never create or destroy it;
@@ -15,7 +17,7 @@
   - a fresh payment each way over every channel (the probe) succeeds: the
     network can still move money once faults are gone. A direction is excused
     only if the final read shows its sender's balance on that channel below the
-    probe amount."
+    probe amount on every ready channel to the receiver."
   (:require [clojure.string :as str]
             [jepsen.checker :as checker]
             [jepsen.fiber.rpc :as rpc]))
@@ -29,11 +31,15 @@
   (or (rpc/hex->int (get channel k)) 0))
 
 (defn sender-balance
-  "The sender's local balance on its channel with `to` in the final read, or nil."
+  "The sender's largest local balance on a ChannelReady channel with `to` in the
+  final read (a probe can use any one of them), or nil when it has none."
   [channels-by-node from to]
-  (let [peer-channel? (set (map :channel_id (get channels-by-node to)))]
-    (some-> (first (filter #(peer-channel? (:channel_id %)) (get channels-by-node from)))
-            (amount :local_balance))))
+  (let [peer-channel? (set (map :channel_id (get channels-by-node to)))
+        balances      (for [ch    (get channels-by-node from)
+                            :when (and (peer-channel? (:channel_id ch))
+                                       (= "channelready" (state-name ch)))]
+                        (amount ch :local_balance))]
+    (when (seq balances) (reduce max balances))))
 
 (defn total
   "Fiber only moves an in-flight TLC's amount out of local_balance when the TLC
@@ -71,6 +77,23 @@
              [_ ch]     views
              tlc        (:pending_tlcs ch)]
          (:payment_hash tlc))))
+
+(defn excuse-held
+  "Drops a channel's :pending-tlcs problem when every TLC pending on it is for
+  a payment in `held` (pending on a channel a workload closed): a forwarder
+  can't settle or fail the upstream TLC until the downstream one resolves on
+  chain. Entries left without problems go."
+  [problems channels-by-node held]
+  (let [pending (into {} (for [[node chs] channels-by-node, ch chs]
+                           [[node (:channel_id ch)] (map :payment_hash (:pending_tlcs ch))]))]
+    (vec (for [p     problems
+               :let  [hashes (get pending [(:node p) (:channel p)])
+                      excuse (and (seq hashes) (every? held hashes))
+                      ps     (if excuse
+                               (vec (remove #(= :pending-tlcs (first %)) (:problems p)))
+                               (:problems p))]
+               :when (seq ps)]
+           (assoc p :problems ps)))))
 
 (defn channel-problems
   "Problems with the channels opened during setup, except those in `skip`
@@ -130,9 +153,10 @@
         (if-not read
           {:valid? :unknown, :error "no final read"}
           (let [closed     (closed-on-purpose history)
-                channels   (channel-problems @(:initial-channels test) (:channels read) closed)
-                statuses   (into {} (map (juxt :hash :status)) (:payments read))
                 held       (held-on-chain (:channels read) closed)
+                channels   (-> (channel-problems @(:initial-channels test) (:channels read) closed)
+                               (excuse-held (:channels read) held))
+                statuses   (into {} (map (juxt :hash :status)) (:payments read))
                 unfinished (vec (remove #(or (#{"Success" "Failed"} (:status %)) (held (:hash %)))
                                         (:payments read)))
                 client-ok  (->> history
