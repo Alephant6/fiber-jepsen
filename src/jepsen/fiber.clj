@@ -17,6 +17,7 @@
                           [faults :as faults]
                           [ledger :as ledger]
                           [nonce :as nonce]
+                          [onchain :as onchain]
                           [scenarios :as scenarios]
                           [schedule :as schedule]
                           [topology :as topology]]
@@ -94,15 +95,20 @@
                                       (not (:close opts)) (assoc :fiber (fiber-checker/checker))
                                       (:close opts)       (assoc :close (fiber-checker/close-checker))
                                       (:nonce-check opts) (assoc :nonce (nonce/checker))
-                                      (:ledger opts)      (assoc :ledger (ledger/checker))))
+                                      (:ledger opts)      (assoc :ledger (ledger/checker))
+                                      (:onchain opts)     (assoc :onchain (onchain/checker))))
             :generator            (gen/phases
+                                    (when (:onchain opts) (gen/clients (gen/once {:f :chain-baseline})))
                                     (fault-window opts streams)
                                     (gen/log "Healing all faults")
                                     (gen/nemesis (:final-generator pkg))
                                     (gen/log "Waiting for the network to converge")
                                     (gen/sleep (:quiesce opts))
                                     (when-not (:close opts) (gen/clients (gen/once {:f :probe})))
-                                    (gen/clients (gen/once {:f :read})))})))
+                                    (gen/clients (gen/once {:f :read}))
+                                    (when (:onchain opts)
+                                      (gen/phases (gen/log "Closing every channel and waiting for it to settle on chain")
+                                                  (gen/clients (gen/once {:f :settle})))))})))
 
 (defn- keywords
   [s]
@@ -155,7 +161,13 @@
                        " check that all of them end Closed instead of the usual invariants.")]
    [nil "--ledger" (str "Check each node's balance change against the payments it sent, received"
                         " and forwarded. Tags every payment with its attempt id and lists every"
-                        " node's payments in the final read.")]])
+                        " node's payments in the final read.")]
+   [nil "--onchain" (str "After the final read, close every channel and check on chain that each"
+                         " party received its last balance plus its reserve, less fees, and that"
+                         " every node's wallet changed by what its channels' transactions explain.")]
+   [nil "--settle-timeout SECONDS" "With --onchain, how long to wait for the closes to settle on chain."
+    :default  300
+    :parse-fn parse-long]])
 
 (defn -main
   [& args]
