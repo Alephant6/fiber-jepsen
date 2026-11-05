@@ -24,6 +24,8 @@ With `--close`, every channel is asked to close cooperatively halfway through th
 
 With `--ledger`, it also checks that money adds up at every node, not only on every channel (see [below](#per-node-ledger---ledger)).
 
+With `--availability-window`, it also checks that the payment success rate after healing is back to what it was before the first fault (see [below](#availability-after-healing---availability-window)).
+
 ## Faults
 
 | Fault | How |
@@ -141,6 +143,16 @@ With `--ledger`, the checker compares each node's balance change, summed over th
 The result is invalid when a node's change differs from the expected one, when the status the client saw when a payment finished differs from the sender's final status (or the client was told no payment was created and one succeeded), or when one attempt produced two payments. A difference is `:unknown` rather than invalid when the final records can't show every settlement: a channel that is closed, missing or still holds TLCs, a payment that hasn't finished, or a payment the sender no longer lists. The check doesn't read the chain, so settlement after a force close is not covered. `repeat.sh` prints the outcome (`balanced`, `unbalanced`, `client-mismatch` or `incomplete`); `test/jepsen/fiber/ledger_test.clj` covers the rules.
 
 The option is off by default, so runs without it send the same requests to the nodes and run the same checks as before.
+
+### Availability after healing (`--availability-window`)
+
+Assertion 5 of the chaos-test plan says that once the faults are gone, payments succeed as often as before. With `--availability-window SECONDS`, the test sends payments for that many seconds before the fault window, with no faults (the baseline), and again after healing and `--quiesce` (the recovery), at `--rate`. The `:availability` checker compares the two windows' success rates: the share of payments that ended `Success`, where a payment the node failed, refused or didn't answer in time counts against it. It is valid when the recovery's rate is at most `--availability-tolerance` percentage points (default 5) below the baseline's, and `:unknown` when either window has fewer than 10 payments.
+
+```bash
+scripts/run.sh --time-limit 120 --faults kill --kill-targets one --availability-window 30
+```
+
+The verdict uses only the success rate. Each window also reports successful payments per second and their latency (median, 95th percentile, maximum), which depend on the machine, so they are only reported, and the unsuccessful payments by sender and by error (numbers taken out, so errors of one kind count together). Not every failure is a fault: on `line` the acceptor of each channel starts with nothing on it, so n3 can't pay anyone until it has been paid, and in a run without faults most failures are n3's payments with "no path found" or "Insufficient balance". Such failures fall on both windows, and the tolerance has to absorb how they differ. The recovery starts after `--quiesce` rather than right after healing, so that restarted nodes are up and channels have reestablished: the check asks whether the network recovered, not how long that took. Both windows draw their payments from streams of their own, so the fault window's payments and faults for a seed are the same with or without the option, and their payments go through every other check (`--ledger` included). The option does nothing with `--close`, after which every channel is closed. `repeat.sh` and the CI summary print the two rates, baseline first.
 
 ### In another repository's CI
 
