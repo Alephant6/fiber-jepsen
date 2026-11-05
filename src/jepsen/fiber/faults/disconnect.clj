@@ -1,5 +1,5 @@
-(ns jepsen.fiber.nemesis
-  "The :disconnect fault. It closes the p2p connection between two neighbouring nodes
+(ns jepsen.fiber.faults.disconnect
+  "The disconnect fault. It closes the p2p connection between two neighbouring nodes
   with fnn's disconnect_peer RPC, and a later :reconnect op connects every pair again
   with connect_peer, so channels reestablish while both processes keep running.
   Partitions rarely get there: TCP keeps the connection open through an iptables drop
@@ -9,6 +9,7 @@
                     [nemesis :as n]
                     [random :as rand]]
             [jepsen.fiber [rpc :as rpc]
+                          [schedule :as schedule]
                           [topology :as topology]]))
 
 (defn- try-call
@@ -30,7 +31,7 @@
     (setup! [this _test] this)
 
     (invoke! [_ test op]
-      (let [edges   (topology/edges (:nodes test))
+      (let [edges   (topology/edges test)
             pubkeys @(:pubkeys test)]
         (case (:f op)
           :disconnect
@@ -48,11 +49,11 @@
 
     (teardown! [_ _test])))
 
-(defn disconnect-package
+(defn package
   "A nemesis package for :disconnect, in the shape jepsen.nemesis.combined uses.
   A :disconnect op's :value names the pair [a b] to disconnect; this package's
   generator leaves it out, so the nemesis picks a random pair. fiber-test takes its
-  :disconnect ops from jepsen.fiber.schedule instead, which names the pair."
+  :disconnect ops from `ops` instead, which names the pair."
   [opts]
   (let [needed? ((:faults opts) :disconnect)
         start   {:type :info, :f :disconnect}
@@ -66,3 +67,18 @@
                          :start #{:disconnect}
                          :stop  #{:reconnect}
                          :color "#A0C4E9"}}}))
+
+(defn ops
+  "Endless pairs of a :disconnect of one random channel's peers and a :reconnect."
+  [r opts]
+  (let [edges (vec (topology/edges opts))]
+    (mapcat (fn [edge]
+              [{:type :info, :f :disconnect, :value edge}
+               {:type :info, :f :reconnect}])
+            (repeatedly #(schedule/pick r edges)))))
+
+(def fault
+  {:faults  #{:disconnect}
+   :stream  :disconnect
+   :package package
+   :ops     ops})

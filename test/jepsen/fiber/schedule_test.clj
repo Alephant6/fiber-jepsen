@@ -4,13 +4,17 @@
             [jepsen.generator.test :as gt]
             [jepsen.fiber :as fiber]
             [jepsen.fiber [client :as client]
-                          [schedule :as schedule]]))
+                          [faults :as faults]
+                          [schedule :as schedule]]
+            [jepsen.fiber.faults [disconnect :as disconnect]
+                                 [partition :as partition]
+                                 [process :as process]]))
 
 (def nodes ["n1" "n2" "n3"])
 
 (def opts
   {:nodes nodes, :rate 5, :time-limit 60, :nemesis-interval 15
-   :kill-targets [:one :all], :faults [:kill :pause :partition :disconnect]})
+   :kill-targets [:one :all], :faults [:kill :pause :partition :disconnect :packet]})
 
 (defn simulate
   "Runs `g` in Jepsen's generator simulator with three clients and a nemesis,
@@ -39,7 +43,8 @@
   [#{:pay}
    #{:start-partition :stop-partition}
    #{:kill :start :pause :resume}
-   #{:disconnect :reconnect}])
+   #{:disconnect :reconnect}
+   #{:start-packet :stop-packet}])
 
 (defn common-prefix
   "The number of leading elements xs and ys share, and the shorter length."
@@ -51,7 +56,7 @@
   [seed]
   (let [streams (schedule/streams seed)
         opts    (assoc opts :nemesis-interval 2)]
-    (gen/limit 400 (gen/nemesis (schedule/faults streams opts)
+    (gen/limit 400 (gen/nemesis (faults/generator streams opts)
                                 (fiber/payments opts streams)))))
 
 (deftest same-seed-same-operations
@@ -91,10 +96,10 @@
 (deftest faults
   (let [streams (schedule/streams 3)]
     (testing "kills and pauses each alternate with their recovery, on named nodes"
-      (let [ops (take 200 (schedule/db-faults (:db streams) nodes
-                                              {:kill? true, :pause? true
-                                               :kill-targets [:one :all]
-                                               :pause-targets [:one]}))]
+      (let [ops (take 200 (process/ops (:db streams) nodes
+                                       {:kill? true, :pause? true
+                                        :kill-targets [:one :all]
+                                        :pause-targets [:one]}))]
         (doseq [[fault recovery] [[:kill :start] [:pause :resume]]]
           (let [fs (map :f (filter (comp #{fault recovery} :f) ops))]
             (is (= (take (count fs) (cycle [fault recovery])) fs))))
@@ -102,7 +107,7 @@
                     (map :value (filter (comp #{:kill :pause} :f) ops))))))
 
     (testing "a partition isolates one node"
-      (let [grudges (->> (schedule/partitions (:partition streams) nodes)
+      (let [grudges (->> (partition/ops (:partition streams) nodes)
                          (take 20)
                          (filter (comp #{:start-partition} :f))
                          (map :value))]
@@ -114,13 +119,13 @@
 
     (testing "a disconnect names one channel's peers"
       (is (every? #{["n1" "n2"] ["n2" "n3"]}
-                  (->> (schedule/disconnects (:disconnect streams) nodes)
+                  (->> (disconnect/ops (:disconnect streams) {:nodes nodes})
                        (take 20)
                        (filter (comp #{:disconnect} :f))
                        (map :value)))))
 
     (testing "no faults, no generator"
-      (is (nil? (schedule/faults streams (assoc opts :faults [])))))))
+      (is (nil? (faults/generator streams (assoc opts :faults [])))))))
 
 (deftest seed
   (is (= 42 (:seed (fiber/fiber-test (assoc opts :seed 42)))))

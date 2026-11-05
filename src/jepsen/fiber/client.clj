@@ -90,12 +90,21 @@
           to-index                (nth others (mod to-index (count others)))
           :else                   (rand/nth others))))
 
+(defmulti send-payment!
+  "Sends the payment in `op` from `node` to `to`, and returns as send-keysend!
+  does. Dispatches on the payment's :kind, keysend when it has none, so that a
+  workload can add a kind (invoice, MPP) with a method in its own namespace."
+  (fn [_test _node _to op] (get-in op [:value :kind] :keysend)))
+
+(defmethod send-payment! :keysend
+  [test node to op]
+  (send-keysend! test node to (get-in op [:value :amount]) (get-in op [:value :id])))
+
 (defn pay!
   [test node op]
   (let [to     (destination test node op)
-        amount (get-in op [:value :amount])
         value  (-> (:value op) (dissoc :to-index) (assoc :from node :to to))
-        res    (send-keysend! test node to amount (get-in op [:value :id]))]
+        res    (send-payment! test node to op)]
     (cond
       (::definite res)
       (assoc op :type :fail, :value value, :error (::definite res))
@@ -119,7 +128,7 @@
   Status is Rejected when the node certainly created no payment, and Unknown when
   the call got no reply."
   [test]
-  (vec (for [[a b]     (topology/edges (:nodes test))
+  (vec (for [[a b]     (topology/edges test)
              [from to] [[a b] [b a]]
              :let      [amount 1000000
                         id     (attempt-id)]]
@@ -152,7 +161,7 @@
   "Asks every channel to close cooperatively (--close). Faults keep running, so it
   retries for about 20 s, alternating between the two ends while one is down."
   [test]
-  (vec (for [[a b] (topology/edges (:nodes test))]
+  (vec (for [[a b] (topology/edges test)]
          (let [ch      (channel-between test a b)
                attempt (fn [node]
                          (try (rpc/call node "shutdown_channel"
@@ -233,6 +242,12 @@
     ; got a hash for.
     (:ledger test) (assoc :listed (into {} (for [n (:nodes test)] [n (read-payments n)])))))
 
+(defmulti invoke-op
+  "Performs a client operation this namespace doesn't know, by its :f. A workload
+  with operations of its own (opening channels, swaps) adds methods in its own
+  namespace, which the test must load."
+  (fn [_test _node op] (:f op)))
+
 (defrecord Client [node]
   client/Client
   (open! [this _test node]
@@ -245,7 +260,8 @@
       :pay   (pay! test node op)
       :close (assoc op :type :info, :value (close! test))
       :probe (assoc op :type :ok, :value (probe! test))
-      :read  (assoc op :type :ok, :value (read-all test))))
+      :read  (assoc op :type :ok, :value (read-all test))
+      (invoke-op test node op)))
 
   (teardown! [_ _test])
 
