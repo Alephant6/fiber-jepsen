@@ -212,6 +212,12 @@
     :default  0
     :parse-fn parse-long
     :validate [#(and % (<= 0 % 100)) "Must be 0 to 100"]]
+   [nil "--disconnect-flash MS" (str "With --faults disconnect, make each fault a flash: disconnect a pair"
+                                     " and connect it again after MS milliseconds, or after a time drawn"
+                                     " from MIN-MAX (C-05: 100-5000). Without it, a pair stays"
+                                     " disconnected until the next fault op.")
+    :parse-fn packet/parse-delay
+    :validate [(fn [[lo hi]] (and lo hi (<= 0 lo hi))) "Must be MS or MIN-MAX, 0 <= MIN <= MAX"]]
    [nil "--nonce-check" (str "Check MuSig2 nonce use. Needs an fnn built with the nonce-oracle"
                              " feature (scripts/build-fnn-nonce-oracle.sh).")]
    [nil "--close" (str "Halfway through the faults, ask every channel to close cooperatively, and"
