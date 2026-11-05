@@ -36,15 +36,17 @@
   "Asks `node` for an invoice of `amount` shannons. Returns new_invoice's result,
   or {:error e} when it made none (the receiver is down or refused). With
   `final-delta` (ms, --final-tlc-expiry-delta) the invoice asks for that final
-  TLC expiry delta; without it Fiber's default applies."
-  [node amount id final-delta]
+  TLC expiry delta; without it Fiber's default applies. `extra` adds parameters
+  (the MPP kind's allow_mpp)."
+  [node amount id final-delta & [extra]]
   (try
     (rpc/call node "new_invoice"
-              (cond-> {:amount           (rpc/int->hex amount)
-                       :currency         currency
-                       :description      (str "fiber-jepsen " id)
-                       :expiry           (rpc/int->hex expiry-s)
-                       :payment_preimage (preimage id)}
+              (cond-> (merge {:amount           (rpc/int->hex amount)
+                              :currency         currency
+                              :description      (str "fiber-jepsen " id)
+                              :expiry           (rpc/int->hex expiry-s)
+                              :payment_preimage (preimage id)}
+                             extra)
                 final-delta (assoc :final_expiry_delta (rpc/int->hex final-delta))))
     (catch ConnectException _ {:error :receiver-down})
     (catch ConnectTimeoutException _ {:error :receiver-unreachable})

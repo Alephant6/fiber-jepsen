@@ -135,12 +135,41 @@
   ^SplittableRandom [streams k]
   (stream streams (keyword (str (name k) "-kind"))))
 
+(def amount-steps
+  "payments draws one of this many amounts, 0.01 to 0.2 CKB in steps of 0.01."
+  20)
+
+(defn scale-amount
+  "The amount in [lo, hi] (shannons) at the same step as `amount`, one of the
+  amounts payments draws: 0.01 CKB maps to lo, 0.2 CKB to hi, the rest evenly
+  between. A kind with amounts of its own (MPP) takes them this way, so no other
+  value is drawn and payments keep their ids, destinations and kinds."
+  [[lo hi] amount]
+  (let [step (dec (quot amount 1000000))]
+    (+ lo (quot (* (- hi lo) step) (dec amount-steps)))))
+
+(defn with-amounts
+  "Payment ops `ps`, with the amount of each whose :kind is a key of `ranges`
+  ({kind [lo hi]}, shannons) scaled into that range (see scale-amount)."
+  [ranges ps]
+  (if (empty? ranges)
+    ps
+    (map (fn [op]
+           (if-let [range (get ranges (get-in op [:value :kind]))]
+             (update-in op [:value :amount] #(scale-amount range %))
+             op))
+         ps)))
+
 (defn paced-payments
   "Payments from stream `k`, with gaps averaging 1/rate seconds, each of a kind
-  drawn from `kinds` (default keysend; see with-kinds)."
+  drawn from `kinds` (default keysend; see with-kinds), with the amounts of the
+  kinds in `ranges` scaled into their own range (see with-amounts)."
   ([streams k rate node-count]
    (paced-payments streams k rate node-count [:keysend]))
   ([streams k rate node-count kinds]
+   (paced-payments streams k rate node-count kinds nil))
+  ([streams k rate node-count kinds ranges]
    (paced (gaps (gaps-stream streams k) (/ 1.0 rate))
-          (with-kinds (kinds-stream streams k) kinds
-                      (payments (stream streams k) node-count)))))
+          (with-amounts ranges
+                        (with-kinds (kinds-stream streams k) kinds
+                                    (payments (stream streams k) node-count))))))

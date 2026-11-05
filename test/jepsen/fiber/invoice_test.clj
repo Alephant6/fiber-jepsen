@@ -150,4 +150,5 @@
     (is (nil? (:final-tlc-expiry-delta (:options (parse [])))))
     (is (= [:keysend] (:pay-kinds (:options (parse [])))))
     (is (= [:keysend :invoice] (:pay-kinds (:options (parse ["--pay-kinds" "keysend,invoice"])))))
-    (is (seq (:errors (parse ["--pay-kinds" "keysend,mpp"]))))))
+    (is (= [:keysend :mpp] (:pay-kinds (:options (parse ["--pay-kinds" "keysend,mpp"])))))
+    (is (seq (:errors (parse ["--pay-kinds" "keysend,amp"]))))))
