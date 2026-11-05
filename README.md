@@ -27,13 +27,15 @@ With `--force-close-ok`, a channel that ended closed (every end `Closed`) doesn'
 
 With `--onchain`, after the final read it closes every channel and checks on chain that each party got its last balance (see [below](#on-chain-settlement---onchain)).
 
+With `--expiry-check` as well (C-03, on a debug build of fnn), it checks that a node whose next hop stayed down past a TLC's expiry got the TLC back on chain, and that every payment ended `Success` or `Failed` (see [below](#tlc-expiry-c-03---expiry-check)).
+
 With `--availability-window`, it also checks that the payment success rate after healing is back to what it was before the first fault (see [below](#availability-after-healing---availability-window)).
 
 ## Faults
 
 | Fault | How |
 |---|---|
-| `kill` | `SIGKILL` on one node, all nodes, or the middle node (`--kill-targets one,all,middle`; middle is a node on more than one channel, n2 in `line`), then restart. A crash can land in the middle of a write. With `--kill-signal term`, `SIGTERM` instead: fnn stops its RPC server, cancels its tasks and waits for them, a path `SIGKILL` never reaches. The nemesis waits up to `--term-grace` seconds (default 30, the grace period fnn's signal handler assumes) for fnn to exit and records how long it took; past that it sends `SIGKILL`, and the `:term-exits` check fails. `SIGCONT` follows each `SIGTERM`, as systemd sends it, so a paused fnn handles it. |
+| `kill` | `SIGKILL` on one node, all nodes, or the middle node (`--kill-targets one,all,middle`; middle is a node on more than one channel, n2 in `line`), then restart. A crash can land in the middle of a write. With `--kill-signal term`, `SIGTERM` instead: fnn stops its RPC server, cancels its tasks and waits for them, a path `SIGKILL` never reaches. The nemesis waits up to `--term-grace` seconds (default 30, the grace period fnn's signal handler assumes) for fnn to exit and records how long it took; past that it sends `SIGKILL`, and the `:term-exits` check fails. `SIGCONT` follows each `SIGTERM`, as systemd sends it, so a paused fnn handles it. A kill lasts until the next fault op, or with `--kill-duration MIN-MAX` (kills only) a number of seconds drawn per kill; the first kill then comes a gap into the fault window, so that payments are in flight when it lands. |
 | `pause` | `SIGSTOP` / `SIGCONT` on one node, by the pid in fnn's pidfile. The peer stays connected but gets no replies. The nemesis op records each node's process state afterwards (`T` = stopped). Before 2026-11-05 this fault stopped nothing on the node images, so earlier pause results are runs without a fault (see [FINDINGS.md](FINDINGS.md#reproducibility)). |
 | `partition` | iptables drops traffic between one node and the others, or with `--partition-targets half` (or `one,half`) between a random half of the nodes and the other half. A partition lasts until the next fault op, or with `--partition-duration MIN-MAX` a number of seconds drawn per partition, minutes if need be. |
 | `disconnect` | `disconnect_peer` over RPC closes the connection between two neighbours; a later `connect_peer` reconnects them. Channels reestablish while both processes keep running, which a partition rarely causes (TCP keeps the connection and retransmits). With `--disconnect-flash MIN-MAX`, each fault is a flash instead: one op disconnects a pair, waits a time drawn from MIN-MAX ms and reconnects it (C-05 uses 100-5000), and records whether the pair was already connected again before the reconnect. |
@@ -57,6 +59,7 @@ Planned: **clock skew**. Fiber expires TLCs by wall-clock timestamp (off-chain c
   - `closes.clj` (what `--force-close-ok` excuses)
   - `nonce.clj` (MuSig2 nonce reuse, with `--nonce-check`)
   - `onchain.clj` and `chain.clj` (on-chain settlement, with `--onchain`; reading the CKB node)
+  - `expiry.clj` (C-03: TLCs taken back on chain after they expire, with `--expiry-check`)
   - `faults.clj` and `faults/` (one namespace per fault: `process` for kill and pause, `partition`, `disconnect`, `packet`)
   - `scenarios.clj` (named scenarios of the chaos-test plan, `--scenario`)
   - `schedule.clj` (payments, and the random streams faults draw from, fixed in advance by the run's seed)
@@ -105,7 +108,7 @@ scripts/run.sh --scenario c-01b                  # as listed: SIGKILL one node, 
 scripts/run.sh --scenario c-08 --time-limit 60   # a shorter run of the same faults
 ```
 
-A scenario is added to the list once the suite covers it; `test/jepsen/fiber/scenarios_test.clj` checks that every listed scenario's arguments parse.
+A scenario is added to the list once the suite covers it; `test/jepsen/fiber/scenarios_test.clj` checks that every listed scenario's arguments parse. One marked `:build :debug` (c-03) needs a debug build of fnn: in CI, run it with the workflow's `fnn-profile: debug`.
 
 ### Running a run again (`--seed`)
 
@@ -171,6 +174,22 @@ A party's receipt is what its wallet gained from those transactions: outputs to 
 
 A pending TLC goes to one side or the other: to the receiver with the preimage, back to the offerer once it expires. The result is invalid when a receipt is outside its range, when another node's wallet got something from the channel, when a channel is still open, or when its cells are still unspent after the wait; that last one is `:unknown` instead while one of the channel's TLCs hasn't expired, which in a release build takes hours. It is also invalid when a wallet's change since the start differs from what the channels' funding and closing transactions explain. Per channel the result shows each party's balance, reserve, receipt and the difference; `test/jepsen/fiber/onchain_test.clj` covers the rules.
 
+### TLC expiry (C-03, `--expiry-check`)
+
+C-03 of the chaos-test plan: A-B-C with multi-hop payments, and B down for longer than the TLC expiry. A must get its money back and the payment must end `Failed`. A node force-closes a channel once a TLC it offered is within two thirds of the commitment delay of its expiry, and after the delay its watchtower takes the TLC back by the timeout path; Fiber then fails the payment.
+
+A release build of fnn makes TLCs last hours: the forwarding delta defaults to 4 hours and may not go below 160 minutes, because an epoch counts as 4 hours. A debug build (`debug_assertions`) counts an epoch as 2 seconds, so deltas of seconds are allowed, and checks its channels' TLCs every 3 s instead of every 60. This suite therefore runs C-03 on a debug build (open question 2 of the plan asked: debug build or clock jump). In CI, the workflow's `fnn-profile: debug` input builds one (with a cache key of its own); locally, build it with `cargo build -p fiber-bin` and give it to `make-snapshot.sh` as `FNN_BIN=~/fiber/target/debug/fnn`. Then:
+
+- `--tlc-expiry-delta MS` sets every channel's forwarding delta after setup (`update_channel` at both ends), and the test waits until every node's graph shows it. A release build refuses anything under 160 minutes, and setup says so.
+- `--final-tlc-expiry-delta MS` makes payments ask for that final delta (`send_payment`'s `final_tlc_expiry_delta`; invoices are made with `final_expiry_delta`).
+- `--kill-targets middle --kill-duration MIN-MAX` keeps the forwarding node down longer than the TLCs last.
+
+With `--expiry-check` (and `--onchain`), after the closes have settled the test reads every payment's status again. For every TLC that a node's record of a closed channel still lists, offered by that node for a payment of its own, it wants the payment `Success` or `Failed`, and the node's receipt from the channel to hold the TLC if the payment `Failed`:
+
+    receipt  ≥  balance + reserve − the channel's fees − the TLCs it offered that aren't its own Failed payments
+
+A TLC still counted in the balance goes to the peer only when the peer claims it with the preimage, which settles the payment, so a `Failed` payment whose TLC went to the peer means the payer lost it. Every payment amount is a whole multiple of 0.01 CKB and fees are a few thousand shannons, so a TLC that went the wrong way shows. The result is invalid when a payment is still in flight after settling, or when a payer is short; it is `:unknown` when no payer TLC was left on a closed channel (the kills caught no payment in flight, so the run tested nothing of C-03) or a channel hasn't settled. `test/jepsen/fiber/expiry_test.clj` covers the rules.
+
 ### Availability after healing (`--availability-window`)
 
 Assertion 5 of the chaos-test plan says that once the faults are gone, payments succeed as often as before. With `--availability-window SECONDS`, the test sends payments for that many seconds before the fault window, with no faults (the baseline), and again after healing and `--quiesce` (the recovery), at `--rate`. The `:availability` checker compares the two windows' success rates: the share of payments that ended `Success`, where a payment the node failed, refused or didn't answer in time counts against it. It is valid when the recovery's rate is at most `--availability-tolerance` percentage points (default 5) below the baseline's, and `:unknown` when either window has fewer than 10 payments.
@@ -197,7 +216,7 @@ jobs:
       runs: 1
 ```
 
-Inputs: `fiber-repository` and `fiber-ref` (default: the caller's repository and commit), `args` for `run.sh`, `runs`, `ckb-version` and `label`. The job summary has one row per run; the job fails if any run's verdict isn't valid, after all runs have finished, and then uploads the store.
+Inputs: `fiber-repository` and `fiber-ref` (default: the caller's repository and commit), `args` for `run.sh`, `runs`, `ckb-version`, `label`, and `fnn-profile` (`release`, the default, or `debug`). The job summary has one row per run; the job fails if any run's verdict isn't valid, after all runs have finished, and then uploads the store.
 
 ### A note on failed runs (Copilot)
 

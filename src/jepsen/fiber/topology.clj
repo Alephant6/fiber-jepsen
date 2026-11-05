@@ -135,8 +135,14 @@
   [test delta]
   (doseq [n  (:nodes test)
           ch (:channels (rpc/call n "list_channels" {}))]
-    (rpc/call n "update_channel" {:channel_id       (:channel_id ch)
-                                  :tlc_expiry_delta (rpc/int->hex delta)}))
+    (try (rpc/call n "update_channel" {:channel_id       (:channel_id ch)
+                                       :tlc_expiry_delta (rpc/int->hex delta)})
+         (catch clojure.lang.ExceptionInfo e
+           (throw (ex-info (str "--tlc-expiry-delta " delta ": " n " refused it (" (ex-message e)
+                                "); under 160 minutes it needs a debug build of fnn"
+                                " (the workflow's fnn-profile: debug)")
+                           {:type :tlc-expiry-delta, :node n, :delta delta}
+                           e)))))
   (doseq [n (:nodes test)]
     (await-condition! (str "Waiting for " n " to see TLC expiry delta " delta " ms on every channel")
                       180000

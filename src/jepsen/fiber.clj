@@ -15,6 +15,7 @@
                           [client :as client]
                           [closes :as closes]
                           [db :as db]
+                          [expiry :as expiry]
                           [faults :as faults]
                           [invoice]
                           [ledger :as ledger]
@@ -127,6 +128,7 @@
                                       (:nonce-check opts) (assoc :nonce (nonce/checker))
                                       (:ledger opts)      (assoc :ledger (ledger/checker))
                                       (:onchain opts)     (assoc :onchain (onchain/checker))
+                                      (:expiry-check opts) (assoc :expiry (expiry/checker))
                                       (availability? opts)
                                       (assoc :availability (fiber-checker/availability-checker
                                                              (:availability-tolerance opts 5)))))
@@ -145,7 +147,9 @@
                                     (gen/clients (gen/once {:f :read}))
                                     (when (:onchain opts)
                                       (gen/phases (gen/log "Closing every channel and waiting for it to settle on chain")
-                                                  (gen/clients (gen/once {:f :settle})))))})))
+                                                  (gen/clients (gen/once {:f :settle}))))
+                                    (when (:expiry-check opts)
+                                      (gen/clients (gen/once {:f :final-payments}))))})))
 
 (defn- keywords
   [s]
@@ -273,7 +277,11 @@
                          " every node's wallet changed by what its channels' transactions explain.")]
    [nil "--settle-timeout SECONDS" "With --onchain, how long to wait for the closes to settle on chain."
     :default  300
-    :parse-fn parse-long]])
+    :parse-fn parse-long]
+   [nil "--expiry-check" (str "With --onchain (C-03): after the closes settle, read every payment"
+                              " again and check that each is Success or Failed, and that a node got"
+                              " back on chain every TLC of its own Failed payments that a closed"
+                              " channel still held.")]])
 
 (defn -main
   [& args]

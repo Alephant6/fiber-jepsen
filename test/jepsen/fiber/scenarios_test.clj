@@ -16,6 +16,7 @@
       (is (re-matches #"c-\d\d[ab]?" name))
       (is (#{:p0 :p1 :p2} (:priority s)))
       (is (every? string? (:args s)))
+      (is (contains? #{nil :debug} (:build s)))
       (let [{:keys [options errors]} (parse ["--scenario" name])]
         (is (empty? errors))
         (is (= name (:scenario options)))))))

@@ -238,18 +238,23 @@
             {:log-message (str "Waiting to list payments on " node)
              :timeout     120000}))
 
+(defn payment-statuses
+  "The status of every payment the clients got a hash for, as its sender reports it."
+  [test]
+  (vec (for [{:keys [node hash]} @(:payments test)]
+         (let [res (try (rpc/call node "get_payment" {:payment_hash hash})
+                        (catch Exception e
+                          (warn e "Couldn't read payment" hash "from" node)
+                          nil))]
+           {:node   node
+            :hash   hash
+            :status (:status res)
+            :error  (:failed_error res)}))))
+
 (defn read-all
   [test]
   (cond-> {:channels (into {} (for [n (:nodes test)] [n (read-node n)]))
-           :payments (vec (for [{:keys [node hash]} @(:payments test)]
-                            (let [res (try (rpc/call node "get_payment" {:payment_hash hash})
-                                           (catch Exception e
-                                             (warn e "Couldn't read payment" hash "from" node)
-                                             nil))]
-                              {:node   node
-                               :hash   hash
-                               :status (:status res)
-                               :error  (:failed_error res)})))}
+           :payments (payment-statuses test)}
     ; With --ledger: every payment each node holds, including ones the client never
     ; got a hash for.
     (:ledger test) (assoc :listed (into {} (for [n (:nodes test)] [n (read-payments n)])))))

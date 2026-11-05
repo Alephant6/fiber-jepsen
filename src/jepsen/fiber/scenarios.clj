@@ -11,6 +11,7 @@
   "Name -> {:priority  the plan's priority
             :plan      the plan's fault, abridged
             :args      the arguments that run it here
+            :build     :debug when it needs a debug build of fnn (fnn-profile: debug)
             :differs   where this suite departs from the plan}
   A scenario is listed once the suite covers it. Keep the names in order."
   (sorted-map
@@ -21,6 +22,27 @@
              :differs  (str "Three nodes in a line rather than A-B. The gap between a kill and"
                             " the restart, and between restarts and kills, is exponential with a"
                             " 75 s mean, capped at 100 s, rather than uniform over 30-120 s.")}
+    "c-03"  {:priority :p0
+             :plan     (str "A-B-C, multi-hop payments. B is down longer than the TLC expiry. The"
+                            " upstream node eventually recovers the funds, and the payment is Failed.")
+             :args     ["--faults" "kill" "--kill-targets" "middle" "--kill-duration" "60-90"
+                        "--nemesis-interval" "30" "--time-limit" "300" "--tlc-expiry-delta" "20000"
+                        "--final-tlc-expiry-delta" "20000" "--onchain" "--expiry-check"
+                        "--force-close-ok"]
+             :build    :debug
+             :differs  (str "Needs a debug build of fnn (fnn-profile: debug): a release build makes"
+                            " a TLC last hours (a 160-minute minimum delta), a debug build counts an"
+                            " epoch as 2 s (open question 2: debug build, not a clock jump). Every"
+                            " channel forwards with a 20 s delta and payments ask for a 20 s final"
+                            " delta, so a payment across n2 expires about 40 s after it is sent."
+                            " SIGKILL takes n2 down for 60-90 s at a time, the first time an"
+                            " exponential 30 s into the window, and the next 30 s on average after"
+                            " each restart. Payments go between all three nodes, keysend only. A"
+                            " node force-closes a channel whose offered TLC is about to expire, so"
+                            " closed channels are expected here and --force-close-ok excuses them"
+                            " (this is not open question 1). After settling, --expiry-check wants"
+                            " every payment Success or Failed and every payer's Failed TLC back on"
+                            " chain; :unknown when no kill caught a payment in flight.")}
     "c-04"  {:priority :p0
              :plan     (str "4-6 node mesh, mixed payments. Random nodes restarted again and"
                             " again. Once all recover, the success rate is back to baseline.")
