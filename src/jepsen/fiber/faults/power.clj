@@ -160,36 +160,45 @@
       v)))
 
 (defn check
-  "`modes` is node -> sync-modes of its log (nil when the log is missing)."
-  [history modes]
-  (let [offs     (for [op history, :when (= :power-off (:f op)), [node r] (per-node op)]
-                   (assoc r :node node, :time (:time op)))
-        ons      (for [op history, :when (= :power-on (:f op)), [node r] (per-node op)]
-                   {:node node, :time (:time op), :result r})
-        dropped  (fn [{:keys [store-bytes-before store-bytes-after]}]
-                   (when (and store-bytes-before store-bytes-after)
-                     (- store-bytes-before store-bytes-after)))
-        failed   (vec (remove #(= :started (:result %)) ons))
-        crashed  (vec (for [op history
-                            :when (and (#{:power-off :power-on} (:f op)) (:exception op))]
-                        (select-keys op [:f :time :error])))
-        mode     (into (sorted-map)
-                       (for [[node ms] modes]
-                         [node (cond (nil? ms)   :no-log
-                                     (empty? ms) :not-logged
-                                     (apply = ms) (first ms)
-                                     :else        (vec ms))]))]
-    {:valid?            (cond (seq crashed) false
-                              (seq failed)  false
-                              (empty? offs) :unknown
-                              :else         true)
-     :store-sync-writes mode
-     :power-offs        (into (sorted-map) (frequencies (map :node offs)))
-     :bytes-dropped     (into (sorted-map)
-                              (for [[node os] (group-by :node offs)]
-                                [node (vec (keep dropped os))]))
-     :not-back          failed
-     :nemesis-errors    crashed}))
+  "`modes` is node -> sync-modes of its log (nil when the log is missing).
+  `wanted` is --store-sync-writes (nil when unset): when a node's fnn didn't log
+  that mode at every start, the result is :unknown, since the run didn't test
+  what it asked for (builds before Fiber #1703 ignore the setting)."
+  ([history modes] (check history modes nil))
+  ([history modes wanted]
+   (let [offs     (for [op history, :when (= :power-off (:f op)), [node r] (per-node op)]
+                    (assoc r :node node, :time (:time op)))
+         ons      (for [op history, :when (= :power-on (:f op)), [node r] (per-node op)]
+                    {:node node, :time (:time op), :result r})
+         dropped  (fn [{:keys [store-bytes-before store-bytes-after]}]
+                    (when (and store-bytes-before store-bytes-after)
+                      (- store-bytes-before store-bytes-after)))
+         failed   (vec (remove #(= :started (:result %)) ons))
+         crashed  (vec (for [op history
+                             :when (and (#{:power-off :power-on} (:f op)) (:exception op))]
+                         (select-keys op [:f :time :error])))
+         mode     (into (sorted-map)
+                        (for [[node ms] modes]
+                          [node (cond (nil? ms)   :no-log
+                                      (empty? ms) :not-logged
+                                      (apply = ms) (first ms)
+                                      :else        (vec ms))]))
+         other    (when (some? wanted)
+                    (into (sorted-map) (remove #(= wanted (val %)) mode)))]
+     (cond-> {:valid?            (cond (seq crashed) false
+                                       (seq failed)  false
+                                       (empty? offs) :unknown
+                                       (seq other)   :unknown
+                                       :else         true)
+              :store-sync-writes mode
+              :power-offs        (into (sorted-map) (frequencies (map :node offs)))
+              :bytes-dropped     (into (sorted-map)
+                                       (for [[node os] (group-by :node offs)]
+                                         [node (vec (keep dropped os))]))
+              :not-back          failed
+              :nemesis-errors    crashed}
+       (seq other) (assoc :store-sync-writes-wanted wanted
+                          :other-mode               other)))))
 
 (defn checker
   []
@@ -203,7 +212,8 @@
                                          (sync-modes (line-seq r))))
                                      (catch Exception e
                                        (warn e "Couldn't read" f)
-                                       nil)))]))))))
+                                       nil)))]))
+             (:store-sync-writes test)))))
 
 (def fault
   {:faults  #{:power}

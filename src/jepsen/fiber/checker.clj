@@ -6,7 +6,8 @@
     (--channel-ops) closed it on purpose;
   - no channel still holds pending TLCs, except TLCs for payments still
     pending on a channel a workload closed: the forwarder resolves the upstream
-    TLC only once the downstream one resolves on chain;
+    TLC only once the downstream one resolves on chain. A TLC both ends have
+    removed (settled-tlc?) is not pending, though list_channels still lists it;
   - both ends of a channel agree on its balances (A's local = B's remote);
   - each channel's total (local + remote) equals its total at the start of the
     test: payments move money within a channel, they never create or destroy it;
@@ -52,6 +53,30 @@
   (+ (amount channel :local_balance)
      (amount channel :remote_balance)))
 
+(defn settled-tlc?
+  "Whether a pending_tlcs entry is a TLC already removed on this end: status
+  RemoveAckConfirmed, inbound or outbound. Fiber keeps such a TLC in the
+  channel's TLC state until the channel's next commitment_signed, sent or
+  received, cleans it up (fiber-lib channel.rs clean_up_failed_tlcs), and
+  list_channels lists every TLC in that state (rpc/channel.rs), so on a channel
+  with no later update it stays listed for good. No commitment includes it any more (fiber-types channel.rs
+  commitment_signed_tlcs). Until a removal is done on both ends, the end that
+  offered the TLC still lists it in an earlier status (it gets here on the
+  removal's last revoke_and_ack), so a stuck removal still shows on the
+  channel. Statuses are {:Outbound s} / {:Inbound s}, or a string such as
+  \"Inbound(RemoveAckConfirmed)\" in older builds."
+  [tlc]
+  (let [s (:status tlc)]
+    (= "RemoveAckConfirmed"
+       (if (map? s)
+         (some-> s first val name)
+         (second (re-find #"^(?:Outbound|Inbound)\((\w+)\)$" (str s)))))))
+
+(defn live-tlcs
+  "A channel record's pending_tlcs, less the settled ones (settled-tlc?)."
+  [channel]
+  (remove settled-tlc? (:pending_tlcs channel)))
+
 (defn by-channel
   "{node [channel ...]} -> {channel-id {node channel}}"
   [channels-by-node]
@@ -78,7 +103,7 @@
   (set (for [[id views] (by-channel final)
              :when      (ids id)
              [_ ch]     views
-             tlc        (:pending_tlcs ch)]
+             tlc        (live-tlcs ch)]
          (:payment_hash tlc))))
 
 (defn excuse-held
@@ -88,7 +113,7 @@
   chain. Entries left without problems go."
   [problems channels-by-node held]
   (let [pending (into {} (for [[node chs] channels-by-node, ch chs]
-                           [[node (:channel_id ch)] (map :payment_hash (:pending_tlcs ch))]))]
+                           [[node (:channel_id ch)] (map :payment_hash (live-tlcs ch))]))]
     (vec (for [p     problems
                :let  [hashes (get pending [(:node p) (:channel p)])
                       excuse (and (seq hashes) (every? held hashes))
@@ -119,8 +144,8 @@
                                 (not= "channelready" (state-name ch))
                                 (conj [:not-ready (get-in ch [:state :state_name])])
 
-                                (seq (:pending_tlcs ch))
-                                (conj [:pending-tlcs (count (:pending_tlcs ch))])
+                                (seq (live-tlcs ch))
+                                (conj [:pending-tlcs (count (live-tlcs ch))])
 
                                 (not= (total init) (total ch))
                                 (conj [:conservation {:initial (total init), :final (total ch)}])
@@ -142,7 +167,7 @@
     (for [[_node channels] channels-by-node
           ch               channels]
       (cond (not= "channelready" (state-name ch)) :not-ready
-            (seq (:pending_tlcs ch))              :ready-with-pending-tlcs
+            (seq (live-tlcs ch))                  :ready-with-pending-tlcs
             :else                                 :ready-clean))))
 
 (defn checker
@@ -209,7 +234,7 @@
                          last
                          :value)
             request (->> history
-                         (filter #(and (= :close (:f %)) (= :info (:type %)) (:value %)))
+                         (filter #(and (= :close (:f %)) (#{:ok :info} (:type %)) (:value %)))
                          last
                          :value)]
         (if-not read

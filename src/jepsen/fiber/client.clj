@@ -279,7 +279,13 @@
   (invoke! [_ test op]
     (case (:f op)
       :pay   (pay! test node op)
-      :close (assoc op :type :info, :value (close! test))
+      :close (let [requests (close! test)]
+               ; :ok once every channel accepted the request, so the stats check
+               ; sees a :close succeed; :info if any end kept refusing, since a
+               ; refused request may still have started a close.
+               (assoc op
+                      :type  (if (every? #(= :ok (:result %)) requests) :ok :info)
+                      :value requests))
       :probe (assoc op :type :ok, :value (probe! test))
       :read  (assoc op :type :ok, :value (read-all test))
       (invoke-op test node op)))
