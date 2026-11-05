@@ -249,6 +249,14 @@
     :default  [:one :all]
     :parse-fn keywords
     :validate [#(every? process/target-specs %) (str "Must be a subset of " process/target-specs)]]
+   [nil "--process-duration SECONDS" (str "With --faults kill or pause, how long each kill or pause"
+                                          " lasts: a whole number of seconds, or a range MIN-MAX drawn"
+                                          " per fault. Each is then followed at once by its restart or"
+                                          " resume, and kills and pauses don't overlap. Default: until"
+                                          " the stream's next op of the same kind, two gaps on average"
+                                          " when both run.")
+    :parse-fn partition/parse-duration
+    :validate [(fn [[lo hi]] (and lo hi (< 0 lo) (<= lo hi))) "Must be S or MIN-MAX, 0 < MIN <= MAX"]]
    [nil "--kill-signal SIGNAL" (str "How a kill stops fnn: kill (SIGKILL, a crash) or term (SIGTERM, a"
                                     " graceful shutdown, checked to finish within --term-grace).")
     :default  :kill

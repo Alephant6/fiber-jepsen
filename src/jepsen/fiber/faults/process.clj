@@ -36,29 +36,66 @@
     :middle [(schedule/pick r middles)]
     spec))
 
+(defn- fault-op
+  [r nodes middles mode kill-targets pause-targets]
+  (case mode
+    :kill  {:type  :info
+            :f     :kill
+            :value (targets r nodes middles (schedule/pick r kill-targets))}
+    :pause {:type  :info
+            :f     :pause
+            :value (targets r nodes middles (schedule/pick r pause-targets))}))
+
+(defn- recovery-op
+  [mode]
+  (case mode
+    :kill  {:type :info, :f :start, :value :all}
+    :pause {:type :info, :f :resume, :value :all}))
+
 (defn ops
   "Endless kill, start, pause and resume ops, as jepsen.nemesis.combined's db
   generators make them: each op comes from kill/start or pause/resume, chosen
-  uniformly, and each of those alternates between its fault and its recovery."
-  [r nodes {:keys [kill? pause? kill-targets pause-targets middles]}]
+  uniformly, and each of those alternates between its fault and its recovery.
+  So with both kill and pause, a pause lasts until pause/resume is chosen
+  again, two gaps on average and often more, and kills and pauses overlap.
+
+  With `paired?` (--process-duration), each fault is followed at once by its
+  recovery instead: a kill or a pause, chosen uniformly, then its start or
+  resume, so that `gaps` can set how long each lasts."
+  [r nodes {:keys [kill? pause? kill-targets pause-targets middles paired?]}]
   (let [modes (cond-> [] pause? (conj :pause) kill? (conj :kill))]
-    (when (seq modes)
+    (cond
+      (empty? modes)
+      nil
+
+      paired?
+      (mapcat (fn [mode]
+                [(fault-op r nodes middles mode kill-targets pause-targets)
+                 (recovery-op mode)])
+              (repeatedly #(schedule/pick r modes)))
+
+      :else
       ((fn step [faulted]
          (lazy-seq
            (let [mode (schedule/pick r modes)
                  op   (if (faulted mode)
-                        (case mode
-                          :kill  {:type :info, :f :start, :value :all}
-                          :pause {:type :info, :f :resume, :value :all})
-                        (case mode
-                          :kill  {:type  :info
-                                  :f     :kill
-                                  :value (targets r nodes middles (schedule/pick r kill-targets))}
-                          :pause {:type  :info
-                                  :f     :pause
-                                  :value (targets r nodes middles (schedule/pick r pause-targets))}))]
+                        (recovery-op mode)
+                        (fault-op r nodes middles mode kill-targets pause-targets))]
              (cons op (step (if (faulted mode) (disj faulted mode) (conj faulted mode)))))))
        #{}))))
+
+(defn gaps
+  "The gaps in ns between this fault's ops. Without :process-duration, every
+  fault's gaps. With it ([min max] seconds), the ops pair up (see `ops`), each
+  kill or pause lasts a whole number of seconds drawn from a stream of its own,
+  and the gaps after each recovery come from the usual gap stream."
+  [streams opts]
+  (let [usual (schedule/gaps (schedule/gaps-stream streams :db) (:nemesis-interval opts))]
+    (if-let [[lo hi] (:process-duration opts)]
+      (let [^java.util.SplittableRandom r (schedule/stream streams :process-duration)]
+        (interleave (repeatedly #(* 1000000000 (+ lo (.nextInt r (int (inc (- hi lo)))))))
+                    usual))
+      usual)))
 
 (defn term-exits
   "Every SIGTERM exit in `history` (--kill-signal term): one map per node and
@@ -137,7 +174,9 @@
                       :pause?        (faults :pause)
                       :kill-targets  (:kill-targets opts)
                       :pause-targets [:one]
-                      :middles       middles})))
+                      :middles       middles
+                      :paired?       (some? (:process-duration opts))})))
+   :gaps    gaps
    :checker (fn [opts]
               (when (and (some #{:kill} (:faults opts)) (= :term (:kill-signal opts)))
                 {:term-exits (exit-checker (:term-grace opts 30))}))
