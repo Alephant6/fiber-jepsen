@@ -14,6 +14,7 @@
             [jepsen.fiber [channels :as channels]
                           [checker :as fiber-checker]
                           [client :as client]
+                          [closes :as closes]
                           [db :as db]
                           [faults :as faults]
                           [invoice]
@@ -23,7 +24,9 @@
                           [scenarios :as scenarios]
                           [schedule :as schedule]
                           [topology :as topology]]
-            [jepsen.fiber.faults [packet :as packet]
+            [jepsen.fiber.faults [chain-partition :as chain-partition]
+                                 [packet :as packet]
+                                 [partition :as partition]
                                  [process :as process]])
   (:gen-class))
 
@@ -128,7 +131,9 @@
                                                     :exceptions (checker/unhandled-exceptions)
                                                     :perf       (checker/perf {:nemeses (:perf pkg)})
                                                     :timeline   (timeline/html)})
-                                      (not (:close opts)) (assoc :fiber (fiber-checker/checker))
+                                      (not (:close opts)) (assoc :fiber (if (:force-close-ok opts)
+                                                                          (closes/checker)
+                                                                          (fiber-checker/checker)))
                                       (:close opts)       (assoc :close (fiber-checker/close-checker))
                                       (:nonce-check opts) (assoc :nonce (nonce/checker))
                                       (:ledger opts)      (assoc :ledger (ledger/checker))
@@ -231,6 +236,29 @@
     :default  0
     :parse-fn parse-long
     :validate [#(and % (<= 0 % 100)) "Must be 0 to 100"]]
+   [nil "--partition-targets TARGETS" (str "With --faults partition, comma-separated target specs to"
+                                           " choose from: one (one node), half (a random half of the"
+                                           " nodes).")
+    :default  [:one]
+    :parse-fn keywords
+    :validate [#(every? partition/target-specs %) (str "Must be a subset of " partition/target-specs)]]
+   [nil "--partition-duration SECONDS" (str "With --faults partition, how long each partition lasts,"
+                                            " or a range MIN-MAX drawn per partition. Default: until"
+                                            " the next fault op, like other faults (at most 100 s).")
+    :parse-fn partition/parse-duration
+    :validate [(fn [[lo hi]] (and lo hi (< 0 lo) (<= lo hi))) "Must be S or MIN-MAX, 0 < MIN <= MAX"]]
+   [nil "--chain-partition-targets TARGETS" (str "With --faults chain-partition, comma-separated"
+                                                 " target specs to choose from: one (a random fnn"
+                                                 " node), all.")
+    :default  [:one :all]
+    :parse-fn keywords
+    :validate [#(every? chain-partition/target-specs %)
+               (str "Must be a subset of " chain-partition/target-specs)]]
+   [nil "--chain-partition-mode MODE" (str "With --faults chain-partition: drop (requests to the CKB"
+                                           " node time out) or reject (TCP reset, they fail at once).")
+    :default  :drop
+    :parse-fn keyword
+    :validate [chain-partition/modes (str "Must be one of " chain-partition/modes)]]
    [nil "--channel-ops OPS" (str "Comma-separated channel operations to run with the payments: open,"
                                  " close (cooperative) and force-close, on the topology's edges"
                                  " (jepsen.fiber.channels). Also checks that every channel ends ready"
@@ -265,6 +293,11 @@
    [nil "--ledger" (str "Check each node's balance change against the payments it sent, received"
                         " and forwarded. Tags every payment with its attempt id and lists every"
                         " node's payments in the final read.")]
+   [nil "--probe-routes" (str "After healing, also pay from every node to every node it has no"
+                              " channel with, so that the probe tests multi-hop routing.")]
+   [nil "--force-close-ok" (str "Don't fail the run for channels that ended closed, nor for what"
+                                " they explain (open question 1 on the chaos-test plan: a pause or"
+                                " partition over 30 s force-closes channels). They are reported.")]
    [nil "--onchain" (str "After the final read, close every channel and check on chain that each"
                          " party received its last balance plus its reserve, less fees, and that"
                          " every node's wallet changed by what its channels' transactions explain.")]
