@@ -190,18 +190,21 @@
 
 (defn parse-log
   "Facts from fnn's log, a seq of lines: every panic as {:thread, :at, :message,
-  :after} (:after is the timestamp of the last log line before it), the number
-  of ERROR lines and their most frequent classes, and how many times fnn
-  started (its \"Starting node\" line)."
+  :after, :shutdown?} (:after is the timestamp of the last log line before it;
+  :shutdown? says fnn had logged that it got SIGTERM or SIGINT and was shutting
+  down), the number of ERROR lines and their most frequent classes, and how many
+  times fnn started (its \"Starting node\" line)."
   [lines]
-  (loop [[line & more] lines, last-ts nil, panics [], errors {}, starts 0]
+  (loop [[line & more] lines, last-ts nil, stopping? false, panics [], errors {}, starts 0]
     (if (nil? line)
       {:panics panics
        :errors (reduce + 0 (vals errors))
        :top-errors (->> errors (sort-by (comp - val)) (take 5) vec)
        :starts starts}
-      (let [line (str/replace line ansi "")
-            ts   (or (re-find timestamp line) last-ts)]
+      (let [line   (str/replace line ansi "")
+            ts     (or (re-find timestamp line) last-ts)
+            start? (str/includes? line "Starting node with git version")
+            stop?  (boolean (re-find #"SIG(TERM|INT) received, shutting down" line))]
         (if-let [[_ thread at] (re-find #"thread '([^']*)' panicked at (.*)$" line)]
           ; Since Rust 1.73: "... panicked at src/x.rs:1:2:" and the message on the
           ; next line. Before: "... panicked at 'message', src/x.rs:1:2".
@@ -210,11 +213,12 @@
                              {:thread thread, :at (subs at 0 (dec (count at)))
                               :message (some-> (first more) (str/replace ansi "") str/trim (subs* 0 300))}
                              {:thread thread, :at at})]
-            (recur more ts (conj panics (assoc panic :after last-ts)) errors starts))
+            (recur more ts stopping? (conj panics (assoc panic :after last-ts :shutdown? stopping?))
+                   errors starts))
           (let [[_ msg] (re-find #"\sERROR\s+(?:\w+::)*\w+:\s*(.*)$" line)]
-            (recur more ts panics
+            (recur more ts (cond start? false stop? true :else stopping?) panics
                    (if msg (update errors (error-class msg) (fnil inc 0)) errors)
-                   (cond-> starts (str/includes? line "Starting node with git version") inc))))))))
+                   (cond-> starts start? inc))))))))
 
 (defn read-log
   "parse-log of `node`'s fnn.log in the test's store, or nil without one."
@@ -283,11 +287,15 @@
                                   [n (assoc (select-keys (get final n) [:process :rpc :store-write])
                                             :status st)]))
      :panics              (count panics)
+     ; Panics after fnn logged SIGTERM: its graceful shutdown (S1's --kill-signal
+     ; term, or the TERM before Jepsen collects logs) has panicked before.
+     :shutdown-panics     (count (filter :shutdown? panics))
      :panic-sites         (->> panics
-                               (group-by (juxt :node :at))
-                               (map (fn [[[n at] ps]]
-                                      {:node n, :at at, :count (count ps)
-                                       :message (:message (first ps)), :first-after (:after (first ps))}))
+                               (group-by (juxt :node :at :shutdown?))
+                               (map (fn [[[n at down?] ps]]
+                                      (cond-> {:node n, :at at, :count (count ps)
+                                               :message (:message (first ps)), :first-after (:after (first ps))}
+                                        down? (assoc :during-shutdown true))))
                                (sort-by (juxt :node :at))
                                vec)
      :oom-kills           ooms
