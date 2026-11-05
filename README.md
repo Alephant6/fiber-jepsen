@@ -15,7 +15,8 @@ After all faults are healed and the network has had time to converge:
 - no channel's total (local + remote) changed: payments move money within a channel, they never create or destroy it;
 - every payment reached `Success` or `Failed`;
 - no payment the client saw succeed reports a different status later;
-- a fresh payment each way over every channel (the probe) succeeds, unless the sender's balance on that channel is below the probe amount; with `--probe-routes`, so does one between every two nodes without a channel, which only multi-hop routing can deliver.
+- a fresh payment each way over every channel (the probe) succeeds, unless the sender's balance on that channel is below the probe amount; with `--probe-routes`, so does one between every two nodes without a channel, which only multi-hop routing can deliver;
+- every node is healthy (assertion 7 of the [chaos-test plan](https://gist.github.com/quake/c73bba93b5b1928391063038fc9fe34a)): no fnn panicked (`panicked at` in its log), and after the probe every fnn is running, answers `node_info` and can still write to its store (`new_invoice`, an invoice that is never paid). A node whose `node_info` answers but whose `new_invoice` doesn't is alive but not working. The run also fails if the kernel killed a process in a node's container for memory, or if a restart by the harness found fnn already gone although nothing had stopped it (it exited on its own, and the restart would otherwise hide that). The `:health` result lists each node's ERROR lines by kind, how many times fnn started, and its peak memory.
 
 With `--nonce-check` and an instrumented fnn, it also checks that no MuSig2 nonce signed two different contexts, across restarts (see [below](#musig2-nonce-reuse---nonce-check)).
 
@@ -29,6 +30,8 @@ With `--onchain`, after the final read it closes every channel and checks on cha
 
 With `--expiry-check` as well (C-03, with the `outage` fault's clock jump), it checks that a node whose next hop stayed down past a TLC's expiry got the TLC back on chain, and that every payment ended `Success` or `Failed` (see [below](#tlc-expiry-c-03---expiry-check)).
 
+With `--channel-ops open,close,force-close`, the clients also open, cooperatively close and force-close channels on the topology's edges while payments run (`src/jepsen/fiber/channels.clj`), about every `--channel-interval` seconds, so that faults land in the middle of opening and closing. A close takes one of the edge's channels that both ends report ready, and leaves at least `--channel-keep` of them (default 1), so payments and the probe keep a route. The test then also checks that every end of every channel is `ChannelReady` or `Closed`, never in between, and that both ends agree on which. Fiber notices a counterparty's force close only in a check every 300 s (`CHECK_CHANNELS_SHUTDOWN_INTERVAL`), so after the quiet period the test waits up to `--channel-settle-timeout` seconds (default 360) for that, before the probe, and reports how long it waited. Setup channels the workload closed are left out of the checks above, and a payment whose TLC is still pending on such a channel isn't counted as unfinished, nor are its TLCs upstream on ready channels: it settles on chain, by preimage or once it expires (hours, in a release build). `--ledger` reports `incomplete` once a channel was opened during the run, since it sums only the setup channels.
+
 With `--availability-window`, it also checks that the payment success rate after healing is back to what it was before the first fault (see [below](#availability-after-healing---availability-window)).
 
 ## Faults
@@ -40,6 +43,7 @@ With `--availability-window`, it also checks that the payment success rate after
 | `partition` | iptables drops traffic between one node and the others, or with `--partition-targets half` (or `one,half`) between a random half of the nodes and the other half. A partition lasts until the next fault op, or with `--partition-duration MIN-MAX` a number of seconds drawn per partition, minutes if need be. |
 | `disconnect` | `disconnect_peer` over RPC closes the connection between two neighbours; a later `connect_peer` reconnects them. Channels reestablish while both processes keep running, which a partition rarely causes (TCP keeps the connection and retransmits). With `--disconnect-flash MIN-MAX`, each fault is a flash instead: one op disconnects a pair, waits a time drawn from MIN-MAX ms and reconnects it (C-05 uses 100-5000), and records whether the pair was already connected again before the reconnect. |
 | `packet` | tc netem delays traffic, and with `--packet-loss` drops some of it: to and from one node, between all nodes, or from the nodes to the CKB node (`--packet-targets one,all,chain`). Each fault draws its delay from `--packet-delay MIN-MAX` (ms; default 500-3000), with a jitter of a tenth of it. One shaping is active at a time. |
+| `chain-partition` | iptables on the fnn hosts cuts one node, or all of them, off the CKB node, while they keep talking to each other: `drop` (requests time out) or `reject` (TCP reset, they fail at once), with `--chain-partition-targets one,all` and `--chain-partition-mode drop\|reject`. fnn can't submit or follow funding, closing and settlement transactions until it heals. |
 | `clock` | fnn's wall clock jumps forward or back by `--clock-jump MIN-MAX` seconds (default 60-1800), on one node or on every node by the same offset (`--clock-targets one,all`), then returns to the real time. fnn runs under libfaketime, which reads the offset from a file the fault rewrites; only `CLOCK_REALTIME` moves, as when NTP steps a clock, so fnn's timers and its 30 s peer deadline don't. The CKB devnet keeps real time. After each change the op compares the timestamp of a fresh invoice, from fnn's clock, with the control node's time, and the run fails if fnn's clock didn't move (`:clock`). |
 | `outage` | One node goes down long enough for the TLCs its neighbours offered it to expire (C-03): the first outage comes `--outage-after` seconds into the fault window (default 30), so that payments flow first; an outage waits up to `--outage-await` seconds (default 30) for a neighbour to hold a TLC in flight to the target, kills the target's fnn, keeps it down for `--outage-duration MIN-MAX` seconds (default 120-180) and starts it again. The target is a node that forwards payments, or any node (`--outage-targets middle,one`; default middle). A release build makes a payment's TLC last at least 4 hours, so with `--outage-jump SECONDS` an outage that caught a TLC moves every clock forward by that much while the node is down: every fnn's, with libfaketime as the `clock` fault does, and the CKB node's, through a small wrapper preloaded into ckb (`docker/chain/clockshift.c`) that adds the offset in a file on a volume the chain container shares with the control container. (Not libfaketime there: ckb links jemalloc in place of `malloc`, and a jemalloc program under libfaketime 0.9.10 hangs at start.) The clocks never jump back, since block times can't. The op records the TLCs caught and every clock's offset as measured afterwards, and the run fails if one didn't move (`:outage`). Not with `clock` when it jumps. |
 
@@ -55,14 +59,16 @@ Why a clock fault: Fiber expires TLCs by wall-clock timestamp (off-chain checks 
   - `db.clj` (process lifecycle)
   - `topology.clj` (opens the channels of a named graph, `--topology`, over `--nodes`: `line` is n1 - n2 - n3; `ring` closes the line; `mesh` adds a channel from each node to the one opposite it on the ring, so six nodes get three channels each)
   - `client.clj` (keysend payments, final read; workloads add payment kinds with `send-payment!` and operations with `invoke-op`)
+  - `channels.clj` (opening and closing channels during the run, with `--channel-ops`)
   - `invoice.clj` (invoice payments, with `--pay-kinds invoice`)
   - `checker.clj` (invariants)
+  - `health.clj` (process health: panics, and a sample of every node after healing)
   - `ledger.clj` (per-node money check, with `--ledger`)
   - `closes.clj` (what `--force-close-ok` excuses)
   - `nonce.clj` (MuSig2 nonce reuse, with `--nonce-check`)
   - `onchain.clj` and `chain.clj` (on-chain settlement, with `--onchain`; reading the CKB node)
   - `expiry.clj` (C-03: TLCs taken back on chain after they expire, with `--expiry-check`)
-  - `faults.clj` and `faults/` (one namespace per fault: `process` for kill and pause, `partition`, `disconnect`, `packet`, `clock`, `outage`)
+  - `faults.clj` and `faults/` (one namespace per fault: `process` for kill and pause, `partition`, `disconnect`, `packet`, `chain-partition`, `clock`, `outage`)
   - `scenarios.clj` (named scenarios of the chaos-test plan, `--scenario`)
   - `schedule.clj` (payments, and the random streams faults draw from, fixed in advance by the run's seed)
 - `instrument/`: the logging-only fnn instrumentation the nonce check needs.
@@ -103,7 +109,7 @@ The node image is Ubuntu 24.04 (glibc 2.39), the system of the GitHub `ubuntu-24
 
 ### Scenarios of the chaos-test plan (`--scenario`)
 
-The team's chaos-test plan ([C-01a to C-16](https://gist.github.com/quake/c73bba93b5b1928391063038fc9fe34a)) names each scenario by its topology, workload and fault. `src/jepsen/fiber/scenarios.clj` lists the ones this suite covers, each with the arguments that run it, its priority in the plan, and where it departs from the plan (three nodes in a line instead of A-B, for example). `--scenario NAME` puts those arguments right after the option, so arguments after it override them:
+The team's chaos-test plan ([C-01a to C-16](https://gist.github.com/quake/c73bba93b5b1928391063038fc9fe34a)) names each scenario by its topology, workload and fault. `src/jepsen/fiber/scenarios.clj` lists the ones this suite covers, each with the arguments that run it, its priority in the plan, and where it departs from the plan (three nodes in a line instead of A-B, for example; c-01a and c-05 run A-B with `--nodes n1,n2`, which overrides `run.sh`'s three nodes). `--scenario NAME` puts those arguments right after the option, so arguments after it override them:
 
 ```bash
 scripts/run.sh --scenario c-01b                  # as listed: SIGKILL one node, 300 s

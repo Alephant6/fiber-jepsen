@@ -6,7 +6,8 @@
             [jepsen.fiber [faults :as faults]
                           [schedule :as schedule]
                           [topology :as topology]]
-            [jepsen.fiber.faults [packet :as packet]
+            [jepsen.fiber.faults [chain-partition :as chain-partition]
+                                 [packet :as packet]
                                  [partition :as partition]]))
 
 (def nodes ["n1" "n2" "n3"])
@@ -35,7 +36,7 @@
   (testing "no two faults share a --faults name or a stream"
     (is (apply distinct? (mapcat :faults faults/registry)))
     (is (apply distinct? (map :stream faults/registry))))
-  (is (= #{:kill :pause :partition :disconnect :packet :clock :outage} faults/supported))
+  (is (= #{:kill :pause :partition :disconnect :packet :chain-partition :clock :outage} faults/supported))
   (testing "only the faults asked for"
     (is (= [:partition :db] (map :stream (faults/in-use {:faults [:kill :partition]}))))
     (is (empty? (faults/in-use {:faults []})))))
@@ -189,3 +190,28 @@
                     spans))))
     (is (= [120 300] (partition/parse-duration "120-300")))
     (is (= [180 180] (partition/parse-duration "180")))))
+
+(deftest chain-partition
+  (let [ops    (take 400 (chain-partition/ops (schedule/stream (schedule/streams 5) :chain-partition)
+                                              (assoc opts :chain-partition-mode :reject)))
+        starts (map :value (filter (comp #{:start-chain-partition} :f) ops))]
+    (testing "each cut is followed by its healing"
+      (is (= (take 400 (cycle [:start-chain-partition :stop-chain-partition])) (map :f ops))))
+    (testing "one random node or all of them, in the mode asked for"
+      (is (= #{1 3} (set (map (comp count :nodes) starts))))
+      (is (= #{:reject} (set (map :mode starts))))))
+  (testing "drop cuts both directions, reject resets connections to the CKB node"
+    (is (= [["OUTPUT" "-d" "10.77.0.10" "-m" "comment" "--comment" "fiber-chain-partition" "-j" "DROP"]
+            ["INPUT" "-s" "10.77.0.10" "-m" "comment" "--comment" "fiber-chain-partition" "-j" "DROP"]]
+           (chain-partition/rules "10.77.0.10" :drop)))
+    (is (= [["OUTPUT" "-d" "10.77.0.10" "-p" "tcp" "-m" "comment" "--comment" "fiber-chain-partition"
+             "-j" "REJECT" "--reject-with" "tcp-reset"]]
+           (chain-partition/rules "10.77.0.10" :reject))))
+  (testing "adding it changes no other fault's operations"
+    (let [kill  #{:kill :start}
+          only  (fn [ops] (filter (comp kill first) ops))
+          alone (only (fault-ops 4 [:kill]))
+          mixed (only (fault-ops 4 [:kill :chain-partition]))
+          n     (min (count alone) (count mixed))]
+      (is (< 10 n))
+      (is (= (take n alone) (take n mixed))))))

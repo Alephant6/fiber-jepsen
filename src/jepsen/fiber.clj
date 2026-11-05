@@ -11,12 +11,14 @@
                     [os :as os]
                     [tests :as tests]]
             [jepsen.checker.timeline :as timeline]
-            [jepsen.fiber [checker :as fiber-checker]
+            [jepsen.fiber [channels :as channels]
+                          [checker :as fiber-checker]
                           [client :as client]
                           [closes :as closes]
                           [db :as db]
                           [expiry :as expiry]
                           [faults :as faults]
+                          [health :as health]
                           [invoice]
                           [ledger :as ledger]
                           [nonce :as nonce]
@@ -24,7 +26,8 @@
                           [scenarios :as scenarios]
                           [schedule :as schedule]
                           [topology :as topology]]
-            [jepsen.fiber.faults [clock :as clock]
+            [jepsen.fiber.faults [chain-partition :as chain-partition]
+                                 [clock :as clock]
                                  [outage :as outage]
                                  [packet :as packet]
                                  [partition :as partition]
@@ -73,8 +76,17 @@
          (gen/time-limit (:availability-window opts))
          gen/clients)))
 
+(defn client-ops
+  "The clients' operations during the fault window: the payments and, with
+  --channel-ops, the channel workload (jepsen.fiber.channels)."
+  [opts streams]
+  (let [pays (payments opts streams)]
+    (if-let [chans (channels/generator streams opts)]
+      (gen/any pays chans)
+      pays)))
+
 (defn fault-window
-  "The payments and the faults, each for :time-limit seconds.
+  "The client operations and the faults, each for :time-limit seconds.
 
   Each gets a time limit of its own. A single gen/time-limit around both ends the
   window early: while every client is busy, the next operation is the nemesis's,
@@ -84,7 +96,7 @@
   [opts streams]
   (let [limit #(some->> % (gen/time-limit (:time-limit opts)))]
     (gen/nemesis (limit (faults/generator streams opts))
-                 (limit (payments opts streams)))))
+                 (limit (client-ops opts streams)))))
 
 (defn nemesis-package
   "The nemesis package for the requested faults (jepsen.fiber.faults/package).
@@ -111,7 +123,7 @@
             :os                   os/noop
             :db                   db
             :client               (client/client)
-            :nemesis              (:nemesis pkg)
+            :nemesis              (health/compose (:nemesis pkg))
             ; Shared state between the topology setup, the clients and the checker.
             :pubkeys              (atom {})
             :fnn-env              (faults/fnn-env opts)
@@ -123,7 +135,8 @@
                                                    {:stats      (checker/stats)
                                                     :exceptions (checker/unhandled-exceptions)
                                                     :perf       (checker/perf {:nemeses (:perf pkg)})
-                                                    :timeline   (timeline/html)})
+                                                    :timeline   (timeline/html)
+                                                    :health     (health/checker)})
                                       (not (:close opts)) (assoc :fiber (if (:force-close-ok opts)
                                                                           (closes/checker)
                                                                           (fiber-checker/checker)))
@@ -131,6 +144,7 @@
                                       (:nonce-check opts) (assoc :nonce (nonce/checker))
                                       (:ledger opts)      (assoc :ledger (ledger/checker))
                                       (:onchain opts)     (assoc :onchain (onchain/checker))
+                                      (seq (:channel-ops opts)) (assoc :channels (channels/checker))
                                       (:expiry-check opts) (assoc :expiry (expiry/checker))
                                       (availability? opts)
                                       (assoc :availability (fiber-checker/availability-checker
@@ -145,8 +159,12 @@
                                     (gen/nemesis (:final-generator pkg))
                                     (gen/log "Waiting for the network to converge")
                                     (gen/sleep (:quiesce opts))
+                                    (when (seq (:channel-ops opts))
+                                      (gen/clients (gen/once {:f :settle-channels})))
                                     (availability-window opts streams :pay-recovery :recovery)
                                     (when-not (:close opts) (gen/clients (gen/once {:f :probe})))
+                                    ; Assertion 7 (jepsen.fiber.health): is every fnn there and working?
+                                    (gen/nemesis (gen/once health/final-sample))
                                     (gen/clients (gen/once {:f :read}))
                                     (when (:onchain opts)
                                       (gen/phases (gen/log "Closing every channel and waiting for it to settle on chain")
@@ -258,6 +276,39 @@
                                             " the next fault op, like other faults (at most 100 s).")
     :parse-fn partition/parse-duration
     :validate [(fn [[lo hi]] (and lo hi (< 0 lo) (<= lo hi))) "Must be S or MIN-MAX, 0 < MIN <= MAX"]]
+   [nil "--chain-partition-targets TARGETS" (str "With --faults chain-partition, comma-separated"
+                                                 " target specs to choose from: one (a random fnn"
+                                                 " node), all.")
+    :default  [:one :all]
+    :parse-fn keywords
+    :validate [#(every? chain-partition/target-specs %)
+               (str "Must be a subset of " chain-partition/target-specs)]]
+   [nil "--chain-partition-mode MODE" (str "With --faults chain-partition: drop (requests to the CKB"
+                                           " node time out) or reject (TCP reset, they fail at once).")
+    :default  :drop
+    :parse-fn keyword
+    :validate [chain-partition/modes (str "Must be one of " chain-partition/modes)]]
+   [nil "--channel-ops OPS" (str "Comma-separated channel operations to run with the payments: open,"
+                                 " close (cooperative) and force-close, on the topology's edges"
+                                 " (jepsen.fiber.channels). Also checks that every channel ends ready"
+                                 " or closed.")
+    :default  []
+    :parse-fn keywords
+    :validate [#(every? channels/kinds %) (str "Must be a subset of " (keys channels/kinds))]]
+   [nil "--channel-interval SECONDS" "With --channel-ops, mean seconds between channel operations."
+    :default  20
+    :parse-fn parse-double]
+   [nil "--channel-funding CKB" "With --channel-ops, CKB the opener puts into each new channel."
+    :default  500
+    :parse-fn parse-long]
+   [nil "--channel-keep N" "With --channel-ops, closes leave at least this many ready channels on each edge."
+    :default  1
+    :parse-fn parse-long]
+   [nil "--channel-settle-timeout SECONDS" (str "With --channel-ops, how long to wait after the quiet period"
+                                                " for every channel to be ready or closed on both ends. Fiber"
+                                                " checks for a counterparty's force close every 300 s.")
+    :default  360
+    :parse-fn parse-long]
    [nil "--disconnect-flash MS" (str "With --faults disconnect, make each fault a flash: disconnect a pair"
                                      " and connect it again after MS milliseconds, or after a time drawn"
                                      " from MIN-MAX (C-05: 100-5000). Without it, a pair stays"

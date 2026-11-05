@@ -20,7 +20,8 @@
   (:require [jepsen.generator :as gen]
             [jepsen.nemesis.combined :as nc]
             [jepsen.fiber.schedule :as schedule]
-            [jepsen.fiber.faults [clock :as clock]
+            [jepsen.fiber.faults [chain-partition :as chain-partition]
+                                 [clock :as clock]
                                  [disconnect :as disconnect]
                                  [outage :as outage]
                                  [packet :as packet]
@@ -33,6 +34,7 @@
    process/fault
    disconnect/fault
    packet/fault
+   chain-partition/fault
    clock/fault
    outage/fault])
 
