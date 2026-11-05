@@ -47,6 +47,10 @@ on:
         description: Upload the store also when every run passes.
         type: boolean
         default: false
+      fnn-profile:
+        description: Build fnn as release or debug. A debug build has 2-second epochs, so TLC expiry deltas can be seconds (C-03).
+        type: string
+        default: release
   workflow_dispatch:
     inputs:
       fiber-repository:
@@ -71,6 +75,11 @@ on:
         description: Upload the store also when every run passes
         type: boolean
         default: false
+      fnn-profile:
+        description: Build fnn as release or debug (debug has 2-second epochs, for short TLC expiries)
+        type: choice
+        options: [release, debug]
+        default: release
 
 permissions:
   contents: read
@@ -87,6 +96,7 @@ jobs:
       RUNS: ${{ inputs.runs }}
       CKB_VERSION: ${{ inputs.ckb-version }}
       LABEL: ${{ inputs.label }}
+      FNN_PROFILE: ${{ inputs.fnn-profile || 'release' }}
     steps:
       - name: Check out the harness
         uses: actions/checkout@v6
@@ -101,7 +111,8 @@ jobs:
           path: fiber
 
       # Two caches, both saved before the runs, whatever their outcome:
-      # - fnn, per Fiber commit and the system it is built on;
+      # - fnn, per Fiber commit, build profile and the system it is built on
+      #   (a release build keeps the key it had before debug builds existed);
       # - the devnet snapshot (ckb, the chain, the node directories, the ssh
       #   key), which doesn't use fnn: Fiber's scripts build it from
       #   tests/deploy and tests/nodes only. It is keyed on every file there,
@@ -111,10 +122,15 @@ jobs:
         env:
           SNAPSHOT_VERSION: 1
         run: |
+          case "$FNN_PROFILE" in
+            release) profile= ;;
+            debug)   profile=-debug ;;
+            *) echo "::error::fnn-profile must be release or debug, not $FNN_PROFILE"; exit 1 ;;
+          esac
           sha="$(git -C fiber rev-parse HEAD)"
           echo "fiber-sha=$sha" >>"$GITHUB_OUTPUT"
           echo "harness-sha=$(git rev-parse HEAD)" >>"$GITHUB_OUTPUT"
-          echo "fnn=jepsen-fnn-${sha}-ubuntu-24.04" >>"$GITHUB_OUTPUT"
+          echo "fnn=jepsen-fnn-${sha}${profile}-ubuntu-24.04" >>"$GITHUB_OUTPUT"
           echo "snapshot=jepsen-snapshot-v${SNAPSHOT_VERSION}-ckb${CKB_VERSION}-${{ hashFiles('fiber/tests/deploy/**', 'fiber/tests/nodes/**') }}-${{ hashFiles('scripts/make-snapshot.sh', 'scripts/patch_node_config.py') }}" >>"$GITHUB_OUTPUT"
       - id: fnn
         uses: actions/cache/restore@v5
@@ -162,7 +178,7 @@ jobs:
           workspaces: |
             fiber -> target
             fiber/tests/deploy/udt-init -> target
-          shared-key: fnn-release
+          shared-key: fnn-${{ env.FNN_PROFILE }}
           # The toolchain is Fiber's, which the action's own key doesn't see.
           key: ${{ hashFiles('fiber/rust-toolchain.toml') }}
           cache-on-failure: true
@@ -170,8 +186,13 @@ jobs:
         if: steps.fnn.outputs.cache-hit != 'true'
         working-directory: fiber
         run: |
-          cargo build --release --locked -p fiber-bin
-          install -D target/release/fnn ../fnn-bin/fnn
+          if [ "$FNN_PROFILE" = debug ]; then
+            cargo build --locked -p fiber-bin
+            install -D target/debug/fnn ../fnn-bin/fnn
+          else
+            cargo build --release --locked -p fiber-bin
+            install -D target/release/fnn ../fnn-bin/fnn
+          fi
       - if: steps.fnn.outputs.cache-hit != 'true'
         uses: actions/cache/save@v5
         with:
@@ -230,7 +251,7 @@ jobs:
           fnn="$(sha256sum docker/build/bin/fnn 2>/dev/null | cut -c1-16)"
           {
             echo "### ${LABEL}: \`${ARGS}\`"
-            echo "- Fiber \`${FIBER_REPOSITORY}@${FIBER_SHA:0:10}\`, ckb ${CKB_VERSION}, fnn sha256 \`${fnn:-none}\` (first 16 hex digits)"
+            echo "- Fiber \`${FIBER_REPOSITORY}@${FIBER_SHA:0:10}\`, ckb ${CKB_VERSION}, fnn ${FNN_PROFILE} build, sha256 \`${fnn:-none}\` (first 16 hex digits)"
             echo "- Harness \`${HARNESS_REPOSITORY}@${HARNESS_SHA:0:10}\`"
             echo "- Restored from cache: fnn ${FNN_HIT}${DEPS_HIT:+ (compiled dependencies: exact match ${DEPS_HIT})}, devnet snapshot ${SNAPSHOT_HIT}"
             echo "- To run a run's payments and faults again, add \`--seed <its seed>\` to the arguments, with the same Fiber commit. Timing still differs, so a failure may take several runs to come back."

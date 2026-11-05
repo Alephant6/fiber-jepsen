@@ -118,6 +118,30 @@
   (await-fn (fn [] (or (pred) (throw (ex-info message {}))))
             {:log-message message, :timeout timeout-ms, :retry-interval 2000}))
 
+(defn- graph-delta?
+  "Whether `node`'s graph shows TLC expiry delta `delta` for both directions of
+  every channel it knows."
+  [node delta]
+  (every? (fn [c] (every? #(= delta (some-> (get-in c [% :tlc_expiry_delta]) rpc/hex->int))
+                          [:update_info_of_node1 :update_info_of_node2]))
+          (:channels (rpc/call node "graph_channels" {}))))
+
+(defn set-tlc-expiry-delta!
+  "--tlc-expiry-delta: every node sets `delta` ms as the TLC expiry delta of each
+  of its channels (update_channel), then the test waits until every node's graph
+  shows it for both directions of every channel, so that routes use it. A
+  release fnn refuses anything under 160 minutes; a debug build, whose epochs
+  last 2 s, takes a few seconds."
+  [test delta]
+  (doseq [n  (:nodes test)
+          ch (:channels (rpc/call n "list_channels" {}))]
+    (rpc/call n "update_channel" {:channel_id       (:channel_id ch)
+                                  :tlc_expiry_delta (rpc/int->hex delta)}))
+  (doseq [n (:nodes test)]
+    (await-condition! (str "Waiting for " n " to see TLC expiry delta " delta " ms on every channel")
+                      180000
+                      #(graph-delta? n delta))))
+
 (defn setup!
   [test]
   (let [nodes (:nodes test)
@@ -145,6 +169,8 @@
       (await-condition! (str "Waiting for " n " to learn all channels via gossip") 180000
                         #(<= (count edges)
                              (count (:channels (rpc/call n "graph_channels" {}))))))
+    (when-let [delta (:tlc-expiry-delta test)]
+      (set-tlc-expiry-delta! test delta))
     (reset! (:initial-channels test)
             (into {} (for [n nodes]
                        [n (:channels (rpc/call n "list_channels" {}))])))

@@ -1,11 +1,17 @@
 (ns jepsen.fiber.faults.process
   "The kill and pause faults: SIGKILL (or, with --kill-signal term, SIGTERM) and
   restart, SIGSTOP and SIGCONT, on fnn processes (jepsen.fiber.db), through
-  jepsen.nemesis.combined's db package."
+  jepsen.nemesis.combined's db package.
+
+  With --kill-duration MIN-MAX (kills only), each kill lasts a whole number of
+  seconds drawn from that range, minutes if need be (C-03: longer than the TLC
+  expiry), and the first kill comes a usual gap into the fault window rather than
+  at its start, so that payments are in flight when it comes."
   (:require [jepsen.checker :as checker]
             [jepsen.nemesis.combined :as nc]
             [jepsen.fiber [schedule :as schedule]
-                          [topology :as topology]]))
+                          [topology :as topology]])
+  (:import (java.util SplittableRandom)))
 
 (def kill-signals
   "--kill-signal values: how jepsen.fiber.db stops fnn on a :kill op."
@@ -91,6 +97,25 @@
          :unlogged      (vec (for [e exits :when (false? (:logged? e))]
                                (select-keys e [:node :time])))}))))
 
+(def first-start
+  "With --kill-duration, the first op: every fnn is already running, so it starts
+  nothing (jepsen.control.util/start-daemon! sees the pidfile), and the first
+  kill comes a usual gap after it."
+  {:type :info, :f :start, :value :all})
+
+(defn gaps
+  "The gaps in ns between this fault's ops. Without :kill-duration, every fault's
+  gaps. With it ([min max] seconds), the ops alternate between a start and a
+  kill, so the gaps do too: after a start the usual gap, after a kill a whole
+  number of seconds drawn from a stream of its own."
+  [streams opts]
+  (let [usual (schedule/gaps (schedule/gaps-stream streams :db) (:nemesis-interval opts))]
+    (if-let [[lo hi] (:kill-duration opts)]
+      (let [^SplittableRandom r (schedule/stream streams :kill-duration)]
+        (interleave usual
+                    (repeatedly #(* 1000000000 (+ lo (.nextInt r (int (inc (- hi lo)))))))))
+      usual)))
+
 (def fault
   {:faults  #{:kill :pause}
    :stream  :db
@@ -102,12 +127,17 @@
                   (throw (ex-info (str "--kill-targets middle: no node in topology "
                                        (name (:topology opts :line)) " is on more than one channel")
                                   {:type :no-middle-node, :nodes (:nodes opts)})))
-                (ops r (vec (:nodes opts))
-                     {:kill?         (faults :kill)
-                      :pause?        (faults :pause)
-                      :kill-targets  (:kill-targets opts)
-                      :pause-targets [:one]
-                      :middles       middles})))
+                (when (and (:kill-duration opts) (or (not (faults :kill)) (faults :pause)))
+                  (throw (ex-info "--kill-duration needs --faults with kill and without pause"
+                                  {:type :kill-duration, :faults (:faults opts)})))
+                (cond->> (ops r (vec (:nodes opts))
+                              {:kill?         (faults :kill)
+                               :pause?        (faults :pause)
+                               :kill-targets  (:kill-targets opts)
+                               :pause-targets [:one]
+                               :middles       middles})
+                  (:kill-duration opts) (cons first-start))))
+   :gaps    gaps
    :checker (fn [opts]
               (when (and (some #{:kill} (:faults opts)) (= :term (:kill-signal opts)))
                 {:term-exits (exit-checker (:term-grace opts 30))}))})

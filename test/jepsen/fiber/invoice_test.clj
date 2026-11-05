@@ -112,8 +112,42 @@
             (is (empty? @calls)))))
       (finally (.stop server 0)))))
 
+(deftest final-tlc-expiry-delta
+  (let [calls  (atom [])
+        server (fake-fnn calls (fn [m _]
+                                 (case m
+                                   "new_invoice"  {:invoice_address "fibd1fake"}
+                                   "send_payment" {:payment_hash "0xab", :status "Created"}
+                                   "get_payment"  {:payment_hash "0xab", :status "Success", :fee "0x0"})))
+        port   (.getPort (.getAddress server))
+        test   {:nodes nodes, :pubkeys (atom {"n3" "0x03"}), :payments (atom [])}
+        op     {:type :invoke, :f :pay, :value {:id 7, :amount 2000000, :to "n3"}}
+        params (fn [m] (some (fn [[m' p]] (when (= m m') p)) @calls))]
+    (try
+      (with-redefs [rpc/node-url (fn [_] (str "http://127.0.0.1:" port))]
+        (testing "without the option, neither call names a delta"
+          (client/pay! test "n1" (assoc-in op [:value :kind] :invoice))
+          (is (not (contains? (params "new_invoice") :final_expiry_delta)))
+          (is (not (contains? (params "send_payment") :final_tlc_expiry_delta))))
+        (testing "with it, the invoice asks for it and send_payment passes it"
+          (reset! calls [])
+          (client/pay! (assoc test :final-tlc-expiry-delta 20000) "n1" (assoc-in op [:value :kind] :invoice))
+          (is (= "0x4e20" (:final_expiry_delta (params "new_invoice"))))
+          (is (= "0x4e20" (:final_tlc_expiry_delta (params "send_payment")))))
+        (testing "keysends pass it too"
+          (reset! calls [])
+          (client/pay! (assoc test :final-tlc-expiry-delta 20000) "n1" op)
+          (is (= {:target_pubkey "0x03", :amount "0x1e8480", :keysend true
+                  :final_tlc_expiry_delta "0x4e20"}
+                 (params "send_payment")))))
+      (finally (.stop server 0)))))
+
 (deftest options
   (let [parse #(cli/parse-opts % fiber/cli-opts)]
+    (is (= 20000 (:final-tlc-expiry-delta (:options (parse ["--final-tlc-expiry-delta" "20000"])))))
+    (is (= 20000 (:tlc-expiry-delta (:options (parse ["--tlc-expiry-delta" "20000"])))))
+    (is (seq (:errors (parse ["--tlc-expiry-delta" "0"]))))
+    (is (nil? (:final-tlc-expiry-delta (:options (parse [])))))
     (is (= [:keysend] (:pay-kinds (:options (parse [])))))
     (is (= [:keysend :invoice] (:pay-kinds (:options (parse ["--pay-kinds" "keysend,invoice"])))))
     (is (seq (:errors (parse ["--pay-kinds" "keysend,mpp"]))))))

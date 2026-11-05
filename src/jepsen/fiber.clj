@@ -204,6 +204,23 @@
     :default  :kill
     :parse-fn keyword
     :validate [process/kill-signals (str "Must be one of " process/kill-signals)]]
+   [nil "--kill-duration SECONDS" (str "With --faults kill (and not pause), how long each kill lasts,"
+                                       " or a range MIN-MAX drawn per kill; the first kill then comes a"
+                                       " gap into the fault window. Default: until the next fault op"
+                                       " (at most 100 s).")
+    :parse-fn partition/parse-duration
+    :validate [(fn [[lo hi]] (and lo hi (< 0 lo) (<= lo hi))) "Must be S or MIN-MAX, 0 < MIN <= MAX"]]
+   [nil "--tlc-expiry-delta MS" (str "After opening the channels, set every channel's TLC expiry delta"
+                                     " to MS milliseconds (update_channel) and wait until every node"
+                                     " routes with it. Below 160 minutes it needs a debug build of fnn"
+                                     " (C-03: TLCs that expire within the run).")
+    :parse-fn parse-long
+    :validate [#(and % (pos? %)) "Must be positive"]]
+   [nil "--final-tlc-expiry-delta MS" (str "Payments ask for this final TLC expiry delta, in"
+                                           " milliseconds (send_payment, and new_invoice for"
+                                           " invoices). Below 160 minutes it needs a debug build.")
+    :parse-fn parse-long
+    :validate [#(and % (pos? %)) "Must be positive"]]
    [nil "--term-grace SECONDS" (str "With --kill-signal term, seconds fnn has to exit after SIGTERM"
                                     " before it gets SIGKILL and the run fails.")
     :default  30

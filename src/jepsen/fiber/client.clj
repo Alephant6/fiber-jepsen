@@ -60,14 +60,17 @@
 
 (defn call-send-payment!
   "Calls send_payment on `node` with `params`; with --ledger the payment carries
-  attempt `id`. Returns send_payment's result, or
+  attempt `id`, and with --final-tlc-expiry-delta the last hop's TLC expires that
+  many ms after it is sent. Returns send_payment's result, or
     {::definite error}    the node certainly created no payment;
     {::indefinite error}  it may have: the call timed out or the connection dropped."
   [test node params id]
   (try
     (rpc/call node "send_payment"
               (cond-> params
-                (and (:ledger test) id) (assoc :custom_records (attempt-records id))))
+                (and (:ledger test) id)        (assoc :custom_records (attempt-records id))
+                (:final-tlc-expiry-delta test) (assoc :final_tlc_expiry_delta
+                                                      (rpc/int->hex (:final-tlc-expiry-delta test)))))
     ; Nothing reached the node, so the payment definitely wasn't created.
     (catch ConnectException _ {::definite :node-down})
     (catch ConnectTimeoutException _ {::definite :node-unreachable})
