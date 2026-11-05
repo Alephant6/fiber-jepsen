@@ -48,6 +48,34 @@
                         "--availability-window" "30" "--ledger"]
              :differs  (str "As c-02a: about a third of the payments cross the middle node, and the"
                             " kill and restart gaps are those of c-01a.")}
+    "c-03"  {:priority :p0
+             :plan     (str "A-B-C, multi-hop payments. B is down longer than the TLC expiry. The"
+                            " upstream node eventually recovers the funds, and the payment is Failed.")
+             :args     ["--faults" "outage" "--outage-targets" "middle" "--outage-duration" "120-180"
+                        "--outage-jump" "34200" "--time-limit" "120" "--rate" "10"
+                        "--tlc-expiry-delta" "9600000" "--final-tlc-expiry-delta" "9600000"
+                        "--tlc-expiry-limit" "33660000" "--quiesce" "330" "--onchain"
+                        "--settle-timeout" "900" "--expiry-check" "--force-close-ok"]
+             :differs  (str "Three nodes in a line; payments go between all three, keysend only,"
+                            " about 10 a second. Fiber adds a random privacy delay of 4 hours or"
+                            " more to every hop's TLC expiry (rand_tlc_expiry_delta in graph.rs), so"
+                            " no outage within a run outlasts a TLC; the clocks move instead (open"
+                            " question 2: a clock jump, not a debug build). Every channel forwards"
+                            " with the release minimum delta of 160 minutes, and payments ask for a"
+                            " 160-minute final delta and a TLC expiry limit that pins the random"
+                            " delay at 4 hours, so a payment's TLCs expire 6 h 40 min to 9 h 20 min"
+                            " after it is sent. One outage takes n2 down for 120-180 s, 30 s into"
+                            " the run, as soon as a neighbour holds a TLC in flight to it (it waits"
+                            " up to 30 s more); while"
+                            " n2 is down, every fnn's clock and the CKB node's jump 9.5 hours"
+                            " forward, and n2 restarts with the new time. The"
+                            " neighbours force-close the channels whose TLCs expired, so closed"
+                            " channels are expected and --force-close-ok excuses them (this is not"
+                            " open question 1). A node sees that its counterparty force-closed a"
+                            " channel only in a check every 300 s (CHECK_CHANNELS_SHUTDOWN_INTERVAL),"
+                            " so the quiesce lasts 330 s, for the restarted n2 to see the closes. After settling, --expiry-check wants every payment"
+                            " Success or Failed and every payer's Failed TLC back on chain;"
+                            " :unknown when the outage caught no payment in flight.")}
     "c-04"  {:priority :p0
              :plan     (str "4-6 node mesh, mixed payments. Random nodes restarted again and"
                             " again. Once all recover, the success rate is back to baseline.")
@@ -130,6 +158,32 @@
                             " each wallet. A TLC still pending on a force-closed channel settles"
                             " only once it expires, hours later in a release build, so that"
                             " channel's verdict is unknown rather than valid.")}
+    "c-12"  {:priority :p1
+             :plan     (str "A-B-C under high load; limit a node's CPU or memory with cgroups;"
+                            " no OOM, no disconnect loop, recovers once the limit is lifted")
+             :args     ["--faults" "cpu,memory" "--resource-targets" "one,all" "--rate" "20"
+                        "--nemesis-interval" "30" "--time-limit" "300"
+                        "--log-level" "info,fnn::fiber::network=debug"]
+             :differs  (str "Limits are Docker's (docker update), on the node's whole container:"
+                            " fnn and sshd. Each limit draws CPU (0.1-0.5 CPUs) or memory"
+                            " (128-256 MiB, no swap) and one node or all of them, and lasts an"
+                            " exponential 30 s on average, capped at 100 s. Lifting sets the limits"
+                            " to the host's size, since Docker can't remove one. A disconnect loop"
+                            " is a pair of nodes disconnecting 3 times or more within a limit and"
+                            " the minute after it, from fnn's debug log.")}
+    "c-13"  {:priority :p1
+             :plan     (str "A-B under steady payments; fill the disk, then free it; the node"
+                            " reports an error or stops, recovers once space is freed, loses no state")
+             :args     ["--faults" "disk" "--rate" "20" "--nemesis-interval" "30" "--time-limit" "300"]
+             :differs  (str "Three nodes in a line rather than A-B. Only fnn's store (RocksDB) is"
+                            " on the filled filesystem, a 256 MiB tmpfs per node; its log is not,"
+                            " so the run can read what fnn said. Each fill takes one node at"
+                            " random and lasts an exponential 30 s on average, capped at 100 s."
+                            " RocksDB preallocates its write-ahead log, so a running fnn can go on"
+                            " writing on a full disk; half the fills also crash fnn and start it"
+                            " again on the full disk."
+                            " If fnn isn't healthy 10 s after the space is freed, the harness"
+                            " restarts it, as an operator would, and records that it had to.")}
     "c-14"  {:priority :p2
              :plan     "A-B, payments and invoices; a node's clock jumps forward or back"
              :args     ["--faults" "clock" "--clock-targets" "one,all" "--clock-jump" "60-1800"

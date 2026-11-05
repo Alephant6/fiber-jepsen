@@ -27,6 +27,12 @@
   []
   (long (rpc/hex->int (call "get_tip_block_number"))))
 
+(defn tip-time-ms
+  "The tip block's timestamp, in ms since the epoch: the CKB node's clock when it
+  made the block's template (the miner keeps it)."
+  []
+  (long (rpc/hex->int (:timestamp (call "get_tip_header")))))
+
 (defn transaction
   "get_transaction's result for `hash`: {:transaction {...} :tx_status {...}}, or nil."
   [hash]

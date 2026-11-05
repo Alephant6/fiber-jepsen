@@ -17,6 +17,7 @@
                           [client :as client]
                           [closes :as closes]
                           [db :as db]
+                          [expiry :as expiry]
                           [faults :as faults]
                           [health :as health]
                           [invoice]
@@ -30,9 +31,12 @@
             [jepsen.fiber.faults [chain-partition :as chain-partition]
                                  [clock :as clock]
                                  [lnd-disconnect :as lnd-disconnect]
+                                 [outage :as outage]
                                  [packet :as packet]
                                  [partition :as partition]
-                                 [process :as process]])
+                                 [power :as power]
+                                 [process :as process]
+                                 [resources :as resources]])
   (:gen-class))
 
 (def supported-faults
@@ -155,6 +159,7 @@
                                       (:ledger opts)      (assoc :ledger (ledger/checker))
                                       (:onchain opts)     (assoc :onchain (onchain/checker))
                                       (seq (:channel-ops opts)) (assoc :channels (channels/checker))
+                                      (:expiry-check opts) (assoc :expiry (expiry/checker))
                                       (:cch opts)         (assoc :swap (swap/checker))
                                       (availability? opts)
                                       (assoc :availability (fiber-checker/availability-checker
@@ -179,7 +184,9 @@
                                     (gen/clients (gen/once {:f :read}))
                                     (when (:onchain opts)
                                       (gen/phases (gen/log "Closing every channel and waiting for it to settle on chain")
-                                                  (gen/clients (gen/once {:f :settle})))))})))
+                                                  (gen/clients (gen/once {:f :settle}))))
+                                    (when (:expiry-check opts)
+                                      (gen/clients (gen/once {:f :final-payments}))))})))
 
 (defn- keywords
   [s]
@@ -238,6 +245,24 @@
     :default  :kill
     :parse-fn keyword
     :validate [process/kill-signals (str "Must be one of " process/kill-signals)]]
+   [nil "--tlc-expiry-delta MS" (str "After opening the channels, set every channel's TLC expiry delta"
+                                     " to MS milliseconds (update_channel) and wait until every node"
+                                     " routes with it. A release build's minimum is 160 minutes"
+                                     " (9600000).")
+    :parse-fn parse-long
+    :validate [#(and % (pos? %)) "Must be positive"]]
+   [nil "--final-tlc-expiry-delta MS" (str "Payments ask for this final TLC expiry delta, in"
+                                           " milliseconds (send_payment, and new_invoice for"
+                                           " invoices). A release build's minimum is 160 minutes.")
+    :parse-fn parse-long
+    :validate [#(and % (pos? %)) "Must be positive"]]
+   [nil "--tlc-expiry-limit MS" (str "Payments ask that no TLC expire more than MS milliseconds after"
+                                     " it is sent (send_payment's tlc_expiry_limit). Fiber adds a"
+                                     " random delay of 4 hours or more to every hop, so the limit must"
+                                     " cover 4 hours plus the route's deltas; just over that, it pins"
+                                     " the delay at 4 hours (C-03).")
+    :parse-fn parse-long
+    :validate [#(and % (pos? %)) "Must be positive"]]
    [nil "--term-grace SECONDS" (str "With --kill-signal term, seconds fnn has to exit after SIGTERM"
                                     " before it gets SIGKILL and the run fails.")
     :default  30
@@ -317,6 +342,64 @@
     :default  [60 1800]
     :parse-fn clock/parse-range
     :validate [(fn [[lo hi]] (and lo hi (<= 1 lo hi))) "Must be SECONDS or MIN-MAX, 1 <= MIN <= MAX"]]
+   [nil "--outage-targets TARGETS" (str "With --faults outage, comma-separated target specs to choose"
+                                        " from: middle (a node that forwards payments, n2 in line), one"
+                                        " (any node).")
+    :default  [:middle]
+    :parse-fn keywords
+    :validate [#(every? outage/target-specs %) (str "Must be a subset of " outage/target-specs)]]
+   [nil "--outage-duration SECONDS" (str "With --faults outage, how long each outage keeps its node down,"
+                                         " or a range MIN-MAX drawn per outage.")
+    :default  [120 180]
+    :parse-fn partition/parse-duration
+    :validate [(fn [[lo hi]] (and lo hi (< 0 lo) (<= lo hi))) "Must be S or MIN-MAX, 0 < MIN <= MAX"]]
+   [nil "--outage-after SECONDS" (str "With --faults outage, how long into the fault window the first"
+                                      " outage waits, so that payments flow before it.")
+    :default  30
+    :parse-fn parse-long
+    :validate [#(and % (<= 0 %)) "Must be 0 or more"]]
+   [nil "--outage-await SECONDS" (str "With --faults outage, how long an outage waits for a neighbour"
+                                      " of its node to hold a TLC in flight to it before it kills the"
+                                      " node anyway.")
+    :default  30
+    :parse-fn parse-long
+    :validate [#(and % (<= 0 %)) "Must be 0 or more"]]
+   [nil "--outage-jump SECONDS" (str "With --faults outage, move every fnn's clock and the CKB node's"
+                                     " forward by this much during each outage that caught a TLC in"
+                                     " flight, so that the TLC expires (C-03). The clocks never jump"
+                                     " back. 0: no jump.")
+    :default  0
+    :parse-fn parse-long
+    :validate [#(and % (<= 0 %)) "Must be 0 or more"]]
+   [nil "--resource-targets TARGETS" (str "With --faults cpu or memory, comma-separated target specs to"
+                                          " choose from: one (a random node), all.")
+    :default  [:one]
+    :parse-fn keywords
+    :validate [#(every? resources/target-specs %) (str "Must be a subset of " resources/target-specs)]]
+   [nil "--cpu-limit CPUS" (str "With --faults cpu, the CPUs a limited node's container gets (a CFS"
+                                " quota), or a range MIN-MAX drawn per fault.")
+    :default  [0.1 0.5]
+    :parse-fn resources/parse-range
+    :validate [(fn [[lo hi]] (and lo hi (<= 0.01 lo hi))) "Must be CPUS or MIN-MAX, 0.01 <= MIN <= MAX"]]
+   [nil "--memory-limit MIB" (str "With --faults memory, the memory a limited node's container gets"
+                                  " (MiB, no swap), or a range MIN-MAX drawn per fault. The default"
+                                  " starts above fnn's anonymous memory under c-12's load (at most"
+                                  " 92 MiB on ae6f7d34), so an OOM kill means fnn grew, not that the"
+                                  " limit was below what it always needs.")
+    :default  [128 256]
+    :parse-fn resources/parse-range
+    :validate [(fn [[lo hi]] (and lo hi (<= 16 lo hi))) "Must be MIB or MIN-MAX, 16 <= MIN <= MAX"]]
+   [nil "--power-targets TARGETS" (str "With --faults power, comma-separated target specs to choose"
+                                       " from: one (a node), all (every node at once).")
+    :default  [:one :all]
+    :parse-fn keywords
+    :validate [#(every? power/target-specs %) (str "Must be a subset of " power/target-specs)]]
+   [nil "--store-sync-writes BOOL" (str "Sets fnn's fiber.store_sync_writes (Fiber #1703; earlier builds"
+                                        " ignore it): true, every store write waits for the disk;"
+                                        " false, it returns once in the page cache. Unset, fnn's"
+                                        " default (false).")
+    :parse-fn #(case % "true" true "false" false nil)
+    :validate [boolean? "Must be true or false"]]
    [nil "--nonce-check" (str "Check MuSig2 nonce use. Needs an fnn built with the nonce-oracle"
                              " feature (scripts/build-fnn-nonce-oracle.sh).")]
    [nil "--close" (str "Halfway through the faults, ask every channel to close cooperatively, and"
@@ -335,6 +418,10 @@
    [nil "--settle-timeout SECONDS" "With --onchain, how long to wait for the closes to settle on chain."
     :default  300
     :parse-fn parse-long]
+   [nil "--expiry-check" (str "With --onchain (C-03): after the closes settle, read every payment"
+                              " again and check that each is Success or Failed, and that a node got"
+                              " back on chain every TLC of its own Failed payments that a closed"
+                              " channel still held.")]
    ; Cross-chain swaps (jepsen.fiber.swap, jepsen.fiber.cch; C-15).
    [nil "--cch" (str "Also run cross-chain swaps through a standalone cross-chain hub (CCH) and two"
                      " LNDs, and check that every order ends completed or refunded. Needs the hosts"

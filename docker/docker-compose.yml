@@ -13,6 +13,11 @@ x-fnn-node: &fnn-node
   image: fiber-jepsen-node
   # iptables for partitions
   cap_add: [NET_ADMIN]
+  # With --faults disk, fnn's store goes on this small filesystem, which the
+  # fault fills (jepsen.fiber.db/small-fs). Memory-backed: it uses RAM only as
+  # it fills.
+  tmpfs:
+    - /fiber/small:size=256m
 
 services:
   chain:
@@ -21,6 +26,9 @@ services:
       dockerfile: chain/Dockerfile
     image: fiber-jepsen-chain
     hostname: chain
+    volumes:
+      # The CKB node's clock offset, which the outage fault writes from control.
+      - chain-clock:/chain-clock
     networks:
       fibernet: {ipv4_address: 10.77.0.10}
 
@@ -70,11 +78,17 @@ services:
     volumes:
       - ..:/jepsen
       - m2:/root/.m2
+      - chain-clock:/chain-clock
+      # Docker's API, for the cpu and memory faults (docker update on the node
+      # containers). It gives the control container control of the host's Docker
+      # daemon: fine on a CI runner, a trade-off on a workstation.
+      - /var/run/docker.sock:/var/run/docker.sock
     networks:
       fibernet: {ipv4_address: 10.77.0.5}
 
 volumes:
   m2: {}
+  chain-clock: {}
 
 networks:
   fibernet:

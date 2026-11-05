@@ -21,13 +21,18 @@ while [ $# -gt 0 ]; do
     *)           args+=("$1"); shift ;;
   esac
 done
+base="${COMPOSE_FILE:-docker-compose.yml}"
+# --faults power puts fnn's store on LazyFS, which needs it in the node image and
+# FUSE in the node containers (docker-compose.lazyfs.yml).
+if [[ "${args[*]}" == *power* ]]; then
+  base="$base:docker-compose.lazyfs.yml"
+fi
+COMPOSE_FILE="$base"
+for name in "${extra[@]}"; do COMPOSE_FILE="$COMPOSE_FILE:docker-compose.$name.yml"; done
+export COMPOSE_FILE
+# The services the --compose files add, which start with the cluster.
 added=()
 if [ ${#extra[@]} -gt 0 ]; then
-  base="${COMPOSE_FILE:-docker-compose.yml}"
-  COMPOSE_FILE="$base"
-  for name in "${extra[@]}"; do COMPOSE_FILE="$COMPOSE_FILE:docker-compose.$name.yml"; done
-  export COMPOSE_FILE
-  # The services the added files define, which start with the cluster.
   mapfile -t added < <(comm -13 <(COMPOSE_FILE="$base" docker compose config --services | sort) \
                                 <(docker compose config --services | sort))
 fi
