@@ -2,12 +2,15 @@
   "Invariants checked against the final read, which happens after every fault
   has been healed and the network has had time to converge:
 
-  - every channel opened during setup is still ChannelReady;
+  - every channel opened during setup is still ChannelReady, unless a workload
+    (--channel-ops) closed it on purpose;
   - no channel still holds pending TLCs;
   - both ends of a channel agree on its balances (A's local = B's remote);
   - each channel's total (local + remote) equals its total at the start of the
     test: payments move money within a channel, they never create or destroy it;
-  - every payment reached Success or Failed;
+  - every payment reached Success or Failed, except one whose TLC is still
+    pending on a channel a workload closed: that settles on chain, by preimage
+    or after it expires (hours, in a release build);
   - no payment the client saw succeed later reports a different status;
   - a fresh payment each way over every channel (the probe) succeeds: the
     network can still move money once faults are gone. A direction is excused
@@ -48,35 +51,61 @@
              {}
              channels-by-node))
 
+(defn closed-on-purpose
+  "Ids of the channels a workload (--channel-ops) asked to close, cooperatively
+  or by force, whether or not the reply arrived."
+  [history]
+  (set (for [op    history
+             :when (and (#{:close-channel :force-close} (:f op))
+                        (#{:ok :info} (:type op))
+                        (get-in op [:value :channel]))]
+         (get-in op [:value :channel]))))
+
+(defn held-on-chain
+  "Hashes of the TLCs still pending, on either end's final record, on the
+  channels in `ids`. After a force close such a TLC settles on chain: when its
+  receiver claims it with the preimage, or once it expires."
+  [final ids]
+  (set (for [[id views] (by-channel final)
+             :when      (ids id)
+             [_ ch]     views
+             tlc        (:pending_tlcs ch)]
+         (:payment_hash tlc))))
+
 (defn channel-problems
-  [initial final]
-  (let [initial (by-channel initial)
-        final   (by-channel final)]
-    (vec
-      (for [[id views] initial
-            [node init] views
-            :let [ch       (get-in final [id node])
-                  peer     (first (remove #{node} (keys views)))
-                  peer-ch  (get-in final [id peer])
-                  problems (if (nil? ch)
-                             [[:missing]]
-                             (cond-> []
-                               (not= "channelready" (state-name ch))
-                               (conj [:not-ready (get-in ch [:state :state_name])])
+  "Problems with the channels opened during setup, except those in `skip`
+  (channels a workload closed on purpose)."
+  ([initial final]
+   (channel-problems initial final #{}))
+  ([initial final skip]
+   (let [initial (by-channel initial)
+         final   (by-channel final)]
+     (vec
+       (for [[id views] initial
+             :when (not (skip id))
+             [node init] views
+             :let [ch       (get-in final [id node])
+                   peer     (first (remove #{node} (keys views)))
+                   peer-ch  (get-in final [id peer])
+                   problems (if (nil? ch)
+                              [[:missing]]
+                              (cond-> []
+                                (not= "channelready" (state-name ch))
+                                (conj [:not-ready (get-in ch [:state :state_name])])
 
-                               (seq (:pending_tlcs ch))
-                               (conj [:pending-tlcs (count (:pending_tlcs ch))])
+                                (seq (:pending_tlcs ch))
+                                (conj [:pending-tlcs (count (:pending_tlcs ch))])
 
-                               (not= (total init) (total ch))
-                               (conj [:conservation {:initial (total init), :final (total ch)}])
+                                (not= (total init) (total ch))
+                                (conj [:conservation {:initial (total init), :final (total ch)}])
 
-                               (and peer-ch
-                                    (not= (amount ch :local_balance)
-                                          (amount peer-ch :remote_balance)))
-                               (conj [:mirror {:local       (amount ch :local_balance)
-                                               :peer-remote (amount peer-ch :remote_balance)}])))]
-            :when (seq problems)]
-        {:channel id, :node node, :peer peer, :problems problems}))))
+                                (and peer-ch
+                                     (not= (amount ch :local_balance)
+                                           (amount peer-ch :remote_balance)))
+                                (conj [:mirror {:local       (amount ch :local_balance)
+                                                :peer-remote (amount peer-ch :remote_balance)}])))]
+             :when (seq problems)]
+         {:channel id, :node node, :peer peer, :problems problems})))))
 
 (defn channel-summary
   "Counts channel ends in the final read: ready with nothing pending, ready but still
@@ -100,9 +129,12 @@
                       :value)]
         (if-not read
           {:valid? :unknown, :error "no final read"}
-          (let [channels   (channel-problems @(:initial-channels test) (:channels read))
+          (let [closed     (closed-on-purpose history)
+                channels   (channel-problems @(:initial-channels test) (:channels read) closed)
                 statuses   (into {} (map (juxt :hash :status)) (:payments read))
-                unfinished (vec (remove #(#{"Success" "Failed"} (:status %)) (:payments read)))
+                held       (held-on-chain (:channels read) closed)
+                unfinished (vec (remove #(or (#{"Success" "Failed"} (:status %)) (held (:hash %)))
+                                        (:payments read)))
                 client-ok  (->> history
                                 (filter #(and (= :ok (:type %)) (= :pay (:f %))))
                                 (map #(get-in % [:value :hash])))
@@ -123,15 +155,20 @@
                 no-funds?  #(and (some-> (:error %) (str/includes? "Insufficient balance"))
                                  (some-> (:sender-balance %) (< (or (:amount %) 1000000))))
                 probe-bad  (vec (remove #(or (= "Success" (:status %)) (no-funds? %)) probe))]
-            {:valid?              (and (empty? channels) (empty? unfinished) (empty? flipped)
-                                       (empty? probe-bad))
-             :channel-summary     (channel-summary (:channels read))
-             :payments            (count (:payments read))
-             :payments-ok         (count client-ok)
-             :channel-problems    channels
-             :unfinished-payments unfinished
-             :success-flipped     flipped
-             :probe-failures      probe-bad}))))))
+            (cond->
+              {:valid?              (and (empty? channels) (empty? unfinished) (empty? flipped)
+                                         (empty? probe-bad))
+               :channel-summary     (channel-summary (:channels read))
+               :payments            (count (:payments read))
+               :payments-ok         (count client-ok)
+               :channel-problems    channels
+               :unfinished-payments unfinished
+               :success-flipped     flipped
+               :probe-failures      probe-bad}
+              (seq closed) (assoc :closed-on-purpose (count closed)
+                                  :held-on-chain     (vec (filter #(and (held (:hash %))
+                                                                        (not (#{"Success" "Failed"} (:status %))))
+                                                                  (:payments read)))))))))))
 
 (defn close-checker
   "With --close, every channel is asked to close cooperatively halfway through the
