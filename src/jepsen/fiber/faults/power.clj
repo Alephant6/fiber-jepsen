@@ -61,8 +61,8 @@
 (defn power-off!
   "SIGKILLs fnn on `node`, then drops the store's unsynced writes. Returns the
   store's size before and after."
-  [db test node]
-  (db/kill! db test node)
+  [_db _test node]
+  (fdb/crash!)
   (let [before (store-bytes node)]
     (c/su (lazyfs/lose-unfsynced-writes! (fdb/store-lazyfs node)))
     (Thread/sleep settle-ms)
