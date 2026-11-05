@@ -11,7 +11,8 @@
                     [os :as os]
                     [tests :as tests]]
             [jepsen.checker.timeline :as timeline]
-            [jepsen.fiber [checker :as fiber-checker]
+            [jepsen.fiber [channels :as channels]
+                          [checker :as fiber-checker]
                           [client :as client]
                           [db :as db]
                           [faults :as faults]
@@ -43,8 +44,17 @@
                   (pays :pay-after-close))
       (pays :pay))))
 
+(defn client-ops
+  "The clients' operations during the fault window: the payments and, with
+  --channel-ops, the channel workload (jepsen.fiber.channels)."
+  [opts streams]
+  (let [pays (payments opts streams)]
+    (if-let [chans (channels/generator streams opts)]
+      (gen/any pays chans)
+      pays)))
+
 (defn fault-window
-  "The payments and the faults, each for :time-limit seconds.
+  "The client operations and the faults, each for :time-limit seconds.
 
   Each gets a time limit of its own. A single gen/time-limit around both ends the
   window early: while every client is busy, the next operation is the nemesis's,
@@ -54,7 +64,7 @@
   [opts streams]
   (let [limit #(some->> % (gen/time-limit (:time-limit opts)))]
     (gen/nemesis (limit (faults/generator streams opts))
-                 (limit (payments opts streams)))))
+                 (limit (client-ops opts streams)))))
 
 (defn nemesis-package
   "The nemesis package for the requested faults (jepsen.fiber.faults/package).
@@ -96,7 +106,8 @@
                                       (:close opts)       (assoc :close (fiber-checker/close-checker))
                                       (:nonce-check opts) (assoc :nonce (nonce/checker))
                                       (:ledger opts)      (assoc :ledger (ledger/checker))
-                                      (:onchain opts)     (assoc :onchain (onchain/checker))))
+                                      (:onchain opts)     (assoc :onchain (onchain/checker))
+                                      (seq (:channel-ops opts)) (assoc :channels (channels/checker))))
             :generator            (gen/phases
                                     (when (:onchain opts) (gen/clients (gen/once {:f :chain-baseline})))
                                     (fault-window opts streams)
@@ -155,6 +166,22 @@
     :default  0
     :parse-fn parse-long
     :validate [#(and % (<= 0 % 100)) "Must be 0 to 100"]]
+   [nil "--channel-ops OPS" (str "Comma-separated channel operations to run with the payments: open,"
+                                 " close (cooperative) and force-close, on the topology's edges"
+                                 " (jepsen.fiber.channels). Also checks that every channel ends ready"
+                                 " or closed.")
+    :default  []
+    :parse-fn keywords
+    :validate [#(every? channels/kinds %) (str "Must be a subset of " (keys channels/kinds))]]
+   [nil "--channel-interval SECONDS" "With --channel-ops, mean seconds between channel operations."
+    :default  20
+    :parse-fn parse-double]
+   [nil "--channel-funding CKB" "With --channel-ops, CKB the opener puts into each new channel."
+    :default  500
+    :parse-fn parse-long]
+   [nil "--channel-keep N" "With --channel-ops, closes leave at least this many ready channels on each edge."
+    :default  1
+    :parse-fn parse-long]
    [nil "--nonce-check" (str "Check MuSig2 nonce use. Needs an fnn built with the nonce-oracle"
                              " feature (scripts/build-fnn-nonce-oracle.sh).")]
    [nil "--close" (str "Halfway through the faults, ask every channel to close cooperatively, and"

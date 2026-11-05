@@ -25,6 +25,8 @@ With `--ledger`, it also checks that money adds up at every node, not only on ev
 
 With `--onchain`, after the final read it closes every channel and checks on chain that each party got its last balance (see [below](#on-chain-settlement---onchain)).
 
+With `--channel-ops open,close,force-close`, the clients also open, cooperatively close and force-close channels on the topology's edges while payments run (`src/jepsen/fiber/channels.clj`), about every `--channel-interval` seconds, so that faults land in the middle of opening and closing. A close takes one of the edge's ready channels and leaves at least `--channel-keep` (default 1), so payments and the probe keep a route. The test then also checks that every end of every channel is `ChannelReady` or `Closed`, never in between, and that both ends agree on which. Setup channels the workload closed are left out of the checks above, and a payment whose TLC is still pending on such a channel isn't counted as unfinished: it settles on chain, by preimage or once it expires (hours, in a release build). `--ledger` reports `incomplete` once a channel was opened during the run, since it sums only the setup channels.
+
 ## Faults
 
 | Fault | How |
@@ -47,6 +49,7 @@ Planned: **clock skew**. Fiber expires TLCs by wall-clock timestamp (off-chain c
   - `db.clj` (process lifecycle)
   - `topology.clj` (opens the channels of a named graph, `--topology`; `line` is n1 - n2 - n3)
   - `client.clj` (keysend payments, final read; workloads add payment kinds with `send-payment!` and operations with `invoke-op`)
+  - `channels.clj` (opening and closing channels during the run, with `--channel-ops`)
   - `checker.clj` (invariants)
   - `ledger.clj` (per-node money check, with `--ledger`)
   - `nonce.clj` (MuSig2 nonce reuse, with `--nonce-check`)
