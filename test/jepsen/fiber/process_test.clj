@@ -57,6 +57,10 @@
                                                   :killed-after-ms 30100}})))]
         (is (false? (:valid? r)))
         (is (= [{:node "n2", :time 70000000000, :killed-after-ms 30100}] (:not-graceful r)))))
+    (testing "an exit fnn didn't log is reported"
+      (let [r (check (conj history (kill 70 {"n3" {:signal "TERM", :exit-ms 80, :logged? false}})))]
+        (is (true? (:valid? r)))
+        (is (= [{:node "n3", :time 70000000000}] (:unlogged r)))))
     (testing "no TERM at all"
       (is (= :unknown (:valid? (check [(kill 10 {"n1" nil})])))))))
 

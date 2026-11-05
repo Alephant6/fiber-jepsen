@@ -86,7 +86,10 @@
          :slowest       (vec (take 3 (sort-by (comp - :exit-ms)
                                               (map #(select-keys % [:node :time :exit-ms])
                                                    (filter :exit-ms exits)))))
-         :not-graceful  killed}))))
+         :not-graceful  killed
+         ; fnn exited, or was killed, without logging that it got the SIGTERM.
+         :unlogged      (vec (for [e exits :when (false? (:logged? e))]
+                               (select-keys e [:node :time])))}))))
 
 (def fault
   {:faults  #{:kill :pause}

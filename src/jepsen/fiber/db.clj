@@ -87,6 +87,14 @@
   [state]
   (or (nil? state) (str/starts-with? state "Z")))
 
+(defn- term-log-count
+  "How many times fnn's log says it received SIGTERM (the log is kept across
+  restarts)."
+  []
+  (try+ (or (parse-long (str/trim (c/exec :grep :-c "SIGTERM received" logfile))) 0)
+        ; grep exits 1 when nothing matches, and 2 without a log.
+        (catch [:type :jepsen.control/nonzero-exit] _ 0)))
+
 (defn terminate!
   "Stops fnn as an operator or `docker stop` would: SIGTERM, then up to
   `grace-s` seconds for it to exit, then SIGKILL. fnn handles SIGTERM by stopping
@@ -94,19 +102,23 @@
   never reaches. SIGCONT follows the TERM, as systemd sends it, so that a paused
   fnn handles the TERM instead of sitting out the grace period.
 
-  Returns, for the nemesis op, {:signal \"TERM\", :exit-ms ms} once fnn has exited,
-  {:signal \"TERM\", :exit-ms nil, :killed-after-ms ms} when it was still running
-  after the grace period and got SIGKILL, or :not-running when it wasn't running.
-  Times are measured from the control node, polling every 100 ms."
+  Returns, for the nemesis op, {:signal \"TERM\", :exit-ms ms, :logged? l} once fnn
+  has exited, {:signal \"TERM\", :exit-ms nil, :killed-after-ms ms, :logged? l}
+  when it was still running after the grace period and got SIGKILL, or
+  :not-running when it wasn't running. :logged? says whether fnn logged that it
+  received the SIGTERM. Times are measured from the control node, polling every
+  100 ms."
   [grace-s]
   (c/su
     (let [pid (fnn-pid)]
       (if (or (nil? pid) (exited? (process-state pid)))
         (do (cu/stop-daemon! binary pidfile)
             :not-running)
-        (let [t0      (System/nanoTime)
+        (let [before  (term-log-count)
+              t0      (System/nanoTime)
               elapsed #(long (/ (- (System/nanoTime) t0) 1e6))
-              grace   (* 1000 grace-s)]
+              grace   (* 1000 grace-s)
+              logged? #(< before (term-log-count))]
           (try+ (c/exec :kill :-TERM pid)
                 (c/exec :kill :-CONT pid)
                 (catch [:type :jepsen.control/nonzero-exit] _ nil))
@@ -115,11 +127,12 @@
                   ms    (elapsed)]
               (cond (exited? state)
                     (do (c/exec :rm :-f pidfile)
-                        {:signal "TERM", :exit-ms ms})
+                        {:signal "TERM", :exit-ms ms, :logged? (logged?)})
 
                     (< grace ms)
-                    (do (cu/stop-daemon! binary pidfile)
-                        {:signal "TERM", :exit-ms nil, :killed-after-ms ms})
+                    (let [l (logged?)]
+                      (cu/stop-daemon! binary pidfile)
+                      {:signal "TERM", :exit-ms nil, :killed-after-ms ms, :logged? l})
 
                     :else
                     (do (Thread/sleep 100)
