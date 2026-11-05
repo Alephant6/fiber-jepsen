@@ -40,7 +40,7 @@
                             " after it is sent. One outage takes n2 down for 120-180 s, as soon as"
                             " a neighbour holds a TLC in flight to it (it waits up to 30 s); while"
                             " n2 is down, every fnn's clock and the CKB node's jump 9.5 hours"
-                            " forward (libfaketime), and n2 restarts with the new time. The"
+                            " forward, and n2 restarts with the new time. The"
                             " neighbours force-close the channels whose TLCs expired, so closed"
                             " channels are expected and --force-close-ok excuses them (this is not"
                             " open question 1). After settling, --expiry-check wants every payment"

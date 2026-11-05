@@ -17,7 +17,7 @@
   clock forward by that much once the target is down: each fnn's, through
   libfaketime as the clock fault does (jepsen.fiber.faults.clock), and the CKB
   node's, through the offset file that the chain container's ckb reads
-  (docker/chain/entrypoint.sh, in the chain-clock volume). The chain's clock
+  (docker/chain/clockshift.c, in the chain-clock volume). The chain's clock
   has to move too: a node takes an expired TLC back with a transaction whose
   since is a timestamp, which CKB checks against the median time of the last
   37 blocks. Block times can't go back, so the clocks never jump back; each
@@ -49,10 +49,10 @@
   #{:one :middle})
 
 (def chain-offset-file
-  "The CKB node's libfaketime offset file, as the control node sees it: the
+  "The CKB node's clock offset file, as the control node sees it: the
   chain-clock volume that docker/docker-compose.yml mounts in the chain and
   control containers. docker/chain/entrypoint.sh writes +0 at each start."
-  "/chain-clock/faketime")
+  "/chain-clock/offset")
 
 (defn read-chain-offset
   "The offset in the chain's offset file, in seconds; nil when there is no file."
@@ -62,7 +62,7 @@
       (parse-long (str/trim (slurp f))))))
 
 (defn write-chain-offset!
-  "Writes the chain's offset file atomically, so that libfaketime never reads a
+  "Writes the chain's offset file atomically, so that ckb never reads a
   half-written file."
   [offset-s]
   (let [tmp (io/file (str chain-offset-file ".tmp"))]
@@ -149,7 +149,7 @@
 (defn jump!
   "Moves every clock to `offset-s`: the chain's, then each node's, the down
   target's included, so that it starts with the others' time. Waits for
-  libfaketime to reread the files, and returns the offsets measured on the
+  the clocks to reread the files, and returns the offsets measured on the
   nodes that are up and on the chain."
   [test target offset-s]
   (info "outage: every clock jumps to" (clock/spec offset-s) "s")
