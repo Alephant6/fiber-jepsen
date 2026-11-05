@@ -15,7 +15,7 @@ After all faults are healed and the network has had time to converge:
 - no channel's total (local + remote) changed: payments move money within a channel, they never create or destroy it;
 - every payment reached `Success` or `Failed`;
 - no payment the client saw succeed reports a different status later;
-- a fresh payment each way over every channel (the probe) succeeds, unless the sender's balance on that channel is below the probe amount.
+- a fresh payment each way over every channel (the probe) succeeds, unless the sender's balance on that channel is below the probe amount; with `--probe-routes`, so does one between every two nodes without a channel, which only multi-hop routing can deliver.
 
 With `--nonce-check` and an instrumented fnn, it also checks that no MuSig2 nonce signed two different contexts, across restarts (see [below](#musig2-nonce-reuse---nonce-check)).
 
@@ -23,13 +23,15 @@ With `--close`, every channel is asked to close cooperatively halfway through th
 
 With `--ledger`, it also checks that money adds up at every node, not only on every channel (see [below](#per-node-ledger---ledger)).
 
+With `--force-close-ok`, a channel that ended closed (every end `Closed`) doesn't fail the run, nor do its ends' balances, a payment whose TLC it still holds, a probe over it, or a route probe between nodes it cut apart; the result lists them under `:force-closed`. A node force-closes a channel when its peer hasn't answered an update for 30 s, so a pause or partition longer than that closes channels. Whether that is expected is open question 1 on the [chaos-test plan](https://gist.github.com/quake/c73bba93b5b1928391063038fc9fe34a); until it is answered, the default stays: a closed channel fails the run.
+
 ## Faults
 
 | Fault | How |
 |---|---|
 | `kill` | `SIGKILL` on one node or all nodes, then restart. A crash can land in the middle of a write. |
 | `pause` | `SIGSTOP` / `SIGCONT` on one node, by the pid in fnn's pidfile. The peer stays connected but gets no replies. The nemesis op records each node's process state afterwards (`T` = stopped). Before 2026-11-05 this fault stopped nothing on the node images, so earlier pause results are runs without a fault (see [FINDINGS.md](FINDINGS.md#reproducibility)). |
-| `partition` | iptables drops traffic between one node and the others. |
+| `partition` | iptables drops traffic between one node and the others, or with `--partition-targets half` (or `one,half`) between a random half of the nodes and the other half. A partition lasts until the next fault op, or with `--partition-duration MIN-MAX` a number of seconds drawn per partition, minutes if need be. |
 | `disconnect` | `disconnect_peer` over RPC closes the connection between two neighbours; a later `connect_peer` reconnects them. Channels reestablish while both processes keep running, which a partition rarely causes (TCP keeps the connection and retransmits). |
 | `packet` | tc netem delays traffic, and with `--packet-loss` drops some of it: to and from one node, between all nodes, or from the nodes to the CKB node (`--packet-targets one,all,chain`). Each fault draws its delay from `--packet-delay MIN-MAX` (ms; default 500-3000), with a jitter of a tenth of it. One shaping is active at a time. |
 
@@ -39,14 +41,15 @@ Planned: **clock skew**. Fiber expires TLCs by wall-clock timestamp (off-chain c
 
 ## Layout
 
-- `docker/`: a CKB devnet (`chain`), three fnn nodes (`n1`–`n3`) and the Jepsen control node, on a private network `10.77.0.0/24`.
-- `scripts/make-snapshot.sh`: creates the devnet with Fiber's own `tests/deploy/init-dev-chain.sh` (funded wallets, contracts, UDT), then stages it with the binaries into `docker/build/`. Every test starts from this snapshot. With `FNN_BIN` set empty it leaves out `bin/fnn`, which nothing else depends on; CI adds each commit's fnn afterwards.
+- `docker/`: a CKB devnet (`chain`), six fnn nodes (`n1`–`n6`) and the Jepsen control node, on a private network `10.77.0.0/24`. A test uses `n1`–`n3` unless `--nodes` names others.
+- `scripts/make-snapshot.sh`: creates the devnet with Fiber's own `tests/deploy/init-dev-chain.sh` (funded wallets, contracts, UDT), then stages it with the binaries into `docker/build/`. Fiber's test nodes are 1–3; the script makes keys for nodes 4–6 from their numbers and funds each with 500000 CKB (no UDT). Every test starts from this snapshot. With `FNN_BIN` set empty it leaves out `bin/fnn`, which nothing else depends on; CI adds each commit's fnn afterwards.
 - `src/jepsen/fiber/`:
   - `db.clj` (process lifecycle)
-  - `topology.clj` (opens the channels of a named graph, `--topology`; `line` is n1 - n2 - n3)
+  - `topology.clj` (opens the channels of a named graph, `--topology`, over `--nodes`: `line` is n1 - n2 - n3; `ring` closes the line; `mesh` adds a channel from each node to the one opposite it on the ring, so six nodes get three channels each)
   - `client.clj` (keysend payments, final read; workloads add payment kinds with `send-payment!` and operations with `invoke-op`)
   - `checker.clj` (invariants)
   - `ledger.clj` (per-node money check, with `--ledger`)
+  - `closes.clj` (what `--force-close-ok` excuses)
   - `nonce.clj` (MuSig2 nonce reuse, with `--nonce-check`)
   - `faults.clj` and `faults/` (one namespace per fault: `process` for kill and pause, `partition`, `disconnect`, `packet`)
   - `scenarios.clj` (named scenarios of the chaos-test plan, `--scenario`)
@@ -73,6 +76,10 @@ scripts/repeat.sh 4 --time-limit 60 --faults kill --kill-targets all --rate 20 -
 
 # no faults: checks the harness itself (the cluster comes up, payments flow, every checker passes)
 scripts/run.sh --time-limit 45 --faults none --ledger
+
+# six nodes in a mesh; a random half cut off for 2-5 minutes at a time
+scripts/run.sh --nodes n1,n2,n3,n4,n5,n6 --topology mesh --faults partition \
+  --partition-targets half --partition-duration 120-300 --time-limit 600 --probe-routes
 ```
 
 CI runs that last command on every pull request that touches the harness, and on `main` after a merge, against the Fiber commit pinned in `.github/workflows/smoke.yml`; fnn is built once per Fiber commit and cached, and its compiled dependencies are cached across commits, so a new commit compiles only Fiber's own crates. The devnet snapshot doesn't use fnn, so it is cached by the contents of Fiber's `tests/deploy` and `tests/nodes` (with the ckb version and the snapshot scripts): a commit that changes only Fiber's code reuses it. The smoke run is a check of this suite, not of Fiber, so it never injects faults. To run any arguments against another Fiber commit on a GitHub runner, start the Jepsen workflow (`jepsen.yml`) by hand from the Actions tab.
@@ -135,6 +142,8 @@ scripts/nonce_report.py store/fiber-kill/<run> ...    # per node: restarts, repl
 The per-channel checks can't see a payment that is only half done. Say n1 pays n3 through n2, and n2 settles its TLC with n3 while the TLC from n1 fails. n1 reports `Failed`, both channels still conserve their totals, both ends still agree, and the payment is final, so every check above passes; yet n2 has paid n3 for nothing.
 
 With `--ledger`, the checker compares each node's balance change, summed over the channels opened during setup, with the change its payments imply: the sender loses the amount plus the fee, the receiver gains the amount, and the node in between gains the fee. To count every payment, each one carries its attempt id in a custom record (key `0xf1be`), and the final read lists every node's payment sessions with `list_payments`. Payments whose `send_payment` reply never arrived (a timeout during a pause, say) are counted too. Amounts and destinations come from the history; statuses and fees come from the sending node.
+
+On a graph other than a line (`--topology ring` or `mesh`) a payment can take any route, and fnn reports routes only in debug builds, so the forwarders aren't known. There each node is expected to change by its own payments only, and what remains, its forwarding income, must be between 0 and the fees of the payments it neither sent nor received; the nodes' income must add up to the fees paid. A node that settled a TLC it was never paid for falls below 0.
 
 The result is invalid when a node's change differs from the expected one, when the status the client saw when a payment finished differs from the sender's final status (or the client was told no payment was created and one succeeded), or when one attempt produced two payments. A difference is `:unknown` rather than invalid when the final records can't show every settlement: a channel that is closed, missing or still holds TLCs, a payment that hasn't finished, or a payment the sender no longer lists. The check doesn't read the chain, so settlement after a force close is not covered. `repeat.sh` prints the outcome (`balanced`, `unbalanced`, `client-mismatch` or `incomplete`); `test/jepsen/fiber/ledger_test.clj` covers the rules.
 

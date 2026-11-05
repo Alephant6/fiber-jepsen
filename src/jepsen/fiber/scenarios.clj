@@ -21,6 +21,23 @@
              :differs  (str "Three nodes in a line rather than A-B. The gap between a kill and"
                             " the restart, and between restarts and kills, is exponential with a"
                             " 75 s mean, capped at 100 s, rather than uniform over 30-120 s.")}
+    "c-06"  {:priority :p0
+             :plan     (str "Mesh, multi-hop payments. A partition isolates half the nodes for"
+                            " minutes, then heals. Routing works after healing, payments converge.")
+             :args     ["--nodes" "n1,n2,n3,n4,n5,n6" "--topology" "mesh" "--faults" "partition"
+                        "--partition-targets" "half" "--partition-duration" "120-300"
+                        "--nemesis-interval" "60" "--time-limit" "600" "--quiesce" "60"
+                        "--probe-routes"]
+             :differs  (str "Six nodes, each with channels to three others (the ring and its"
+                            " diameters); 6 of the 15 node pairs are two hops apart, the rest"
+                            " neighbours, and each payment goes to a node drawn uniformly. Each"
+                            " partition cuts a random half from the other half for 120-300 s,"
+                            " then heals for an exponential 60 s on average, capped at 100 s."
+                            " Routing after healing is a payment between every two nodes without"
+                            " a channel, on top of the usual probe of each channel. A partition"
+                            " over 30 s force-closes the channels across it that had an update in"
+                            " flight, which fails the run; add --force-close-ok to excuse closed"
+                            " channels and what they explain (open question 1).")}
     "c-08"  {:priority :p1
              :plan     "SIGSTOP a node for tens of seconds, then resume"
              :args     ["--faults" "pause" "--nemesis-interval" "30" "--time-limit" "300"]

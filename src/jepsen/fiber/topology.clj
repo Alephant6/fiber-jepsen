@@ -74,6 +74,19 @@
           {}
           edges))
 
+(defn probe-pairs
+  "[from to route?] for each payment of the post-heal probe: one each way over
+  every channel, then, with :probe-routes, one from every node to every node it
+  has no channel with (route? true), which only multi-hop routing can deliver."
+  [test]
+  (let [edges (edges test)
+        nb    (neighbours edges)]
+    (concat (for [[a b] edges, [from to] [[a b] [b a]]] [from to false])
+            (when (:probe-routes test)
+              (for [from (:nodes test), to (:nodes test)
+                    :when (and (not= from to) (not (contains? (nb from) to)))]
+                [from to true])))))
+
 (defn node-ip
   "nN's address on the Docker network (docker/docker-compose.yml): 10.77.0.(10 + N)."
   [node]

@@ -13,6 +13,7 @@
             [jepsen.checker.timeline :as timeline]
             [jepsen.fiber [checker :as fiber-checker]
                           [client :as client]
+                          [closes :as closes]
                           [db :as db]
                           [faults :as faults]
                           [ledger :as ledger]
@@ -92,7 +93,9 @@
                                              :exceptions (checker/unhandled-exceptions)
                                              :perf       (checker/perf {:nemeses (:perf pkg)})
                                              :timeline   (timeline/html)}
-                                      (not (:close opts)) (assoc :fiber (fiber-checker/checker))
+                                      (not (:close opts)) (assoc :fiber (if (:force-close-ok opts)
+                                                                          (closes/checker)
+                                                                          (fiber-checker/checker)))
                                       (:close opts)       (assoc :close (fiber-checker/close-checker))
                                       (:nonce-check opts) (assoc :nonce (nonce/checker))
                                       (:ledger opts)      (assoc :ledger (ledger/checker))))
@@ -167,7 +170,12 @@
                        " check that all of them end Closed instead of the usual invariants.")]
    [nil "--ledger" (str "Check each node's balance change against the payments it sent, received"
                         " and forwarded. Tags every payment with its attempt id and lists every"
-                        " node's payments in the final read.")]])
+                        " node's payments in the final read.")]
+   [nil "--probe-routes" (str "After healing, also pay from every node to every node it has no"
+                              " channel with, so that the probe tests multi-hop routing.")]
+   [nil "--force-close-ok" (str "Don't fail the run for channels that ended closed, nor for what"
+                                " they explain (open question 1 on the chaos-test plan: a pause or"
+                                " partition over 30 s force-closes channels). They are reported.")]])
 
 (defn -main
   [& args]
