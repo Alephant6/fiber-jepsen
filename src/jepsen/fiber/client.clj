@@ -58,17 +58,15 @@
           (do (Thread/sleep 200)
               (recur res)))))))
 
-(defn send-keysend!
-  "Asks `node` to pay `amount` shannons to `to` by keysend; with --ledger the payment
-  carries attempt `id`. Returns send_payment's result, or
+(defn call-send-payment!
+  "Calls send_payment on `node` with `params`; with --ledger the payment carries
+  attempt `id`. Returns send_payment's result, or
     {::definite error}    the node certainly created no payment;
     {::indefinite error}  it may have: the call timed out or the connection dropped."
-  [test node to amount id]
+  [test node params id]
   (try
     (rpc/call node "send_payment"
-              (cond-> {:target_pubkey (get @(:pubkeys test) to)
-                       :amount        (rpc/int->hex amount)
-                       :keysend       true}
+              (cond-> params
                 (and (:ledger test) id) (assoc :custom_records (attempt-records id))))
     ; Nothing reached the node, so the payment definitely wasn't created.
     (catch ConnectException _ {::definite :node-down})
@@ -79,6 +77,16 @@
         (throw e)))
     (catch IOException e
       {::indefinite [:no-reply (.getSimpleName (class e))]})))
+
+(defn send-keysend!
+  "Asks `node` to pay `amount` shannons to `to` by keysend, and returns as
+  call-send-payment! does."
+  [test node to amount id]
+  (call-send-payment! test node
+                      {:target_pubkey (get @(:pubkeys test) to)
+                       :amount        (rpc/int->hex amount)
+                       :keysend       true}
+                      id))
 
 (defn destination
   "Where `node` sends the payment in `op`: its :to if that is another node, else
