@@ -41,9 +41,10 @@
              (set (:faults options))))
       (is (= :mesh (:topology options)))
       (is (= 6 (count (:nodes options)))))
-    (testing "kills, pauses and partitions under fnn's 30 s deadline; closes fail the run"
+    (testing "kills, pauses, partitions and clock steps under fnn's 30 s deadline; closes fail the run"
       (is (< (second (:process-duration options)) 30))
       (is (< (second (:partition-duration options)) 30))
+      (is (< (second (:clock-jump options)) 30))
       (is (not (:force-close-ok options)))
       (is (nil? (:force-close-ok-after options))))
     (testing "the narrower rule can be added"
