@@ -1,8 +1,10 @@
 (ns jepsen.fiber.topology
   "Builds the channel graph before the workload starts. The graph is chosen by
-  name (--topology); the default, line, is n1 - n2 - n3 of public channels, so
-  payments between the ends are forwarded by the middle node. Records each
-  node's starting channels for the conservation check."
+  name (--topology) and spans the test's nodes (--nodes, n1 to n6 in
+  docker/docker-compose.yml). The default, line, is n1 - n2 - n3 of public
+  channels, so payments between the ends are forwarded by the middle node; ring
+  and mesh give payments more than one route. Records each node's starting
+  channels for the conservation check."
   (:require [clojure.string :as str]
             [clojure.tools.logging :refer [info]]
             [jepsen.util :refer [await-fn]]
@@ -16,15 +18,48 @@
 
 (def known-peer-ids
   "Peer IDs of the devnet test keys (tests/bruno/environments/test.bru), used if
-  node_info doesn't report a full multiaddr."
+  node_info doesn't report a full multiaddr. The keys of n4 and up are made by
+  scripts/make-snapshot.sh, and their nodes are reached by the address node_info
+  reports."
   {"n1" "QmbvRjJHAQDmj3cgnUBGQ5zVnGxUKwb2qJygwNs2wk41h8"
    "n2" "QmSRcPqUn4aQrKHXyCDjGn2qBVf43tWBDS2Wj9QDUZXtZp"
    "n3" "QmaFDJb9CkMrXy7nhTWBY5y9mvuykre3EzzRsCJUAVXprZ"})
 
+(defn line
+  "n1 - n2 - ... - nk, in the order of `nodes`."
+  [nodes]
+  (map vec (partition 2 1 nodes)))
+
+(defn ring
+  "The line, closed by a channel from the last node to the first: two routes
+  between any two nodes. Three nodes make a triangle; fewer, just the line."
+  [nodes]
+  (cond-> (vec (line nodes))
+    (< 2 (count nodes)) (conj [(last nodes) (first nodes)])))
+
+(defn mesh
+  "The ring, plus a channel from each node in the first half to the node
+  opposite it on the ring (i to i + k/2 for k nodes), where that isn't a ring
+  channel already. Six nodes get nine channels, three per node; a node's
+  neighbours are one hop away and the rest two, by three disjoint routes. Four
+  nodes make a complete graph."
+  [nodes]
+  (let [nodes (vec nodes)
+        k     (count nodes)
+        ring  (ring nodes)
+        has?  (set (mapcat (fn [[a b]] [[a b] [b a]]) ring))]
+    (into ring
+          (for [i     (range (quot k 2))
+                :let  [edge [(nodes i) (nodes (+ i (quot k 2)))]]
+                :when (and (< 3 k) (not (has? edge)))]
+            edge))))
+
 (def topologies
   "Channel graphs by name. Each takes the test's nodes and returns the channels to
-  open, as [opener acceptor] pairs."
-  {:line (fn [nodes] (map vec (partition 2 1 nodes)))})
+  open, as [opener acceptor] pairs. Each pair has one channel, so a pair names it."
+  {:line line
+   :ring ring
+   :mesh mesh})
 
 (defn edges
   "The channels of the test (or test options) `test`: its :topology's graph over
@@ -32,15 +67,27 @@
   [test]
   ((topologies (:topology test :line)) (:nodes test)))
 
+(defn neighbours
+  "{node #{node ...}}: the nodes each node has a channel with, in graph `edges`."
+  [edges]
+  (reduce (fn [m [a b]] (-> m (update a (fnil conj #{}) b) (update b (fnil conj #{}) a)))
+          {}
+          edges))
+
 (defn node-ip
+  "nN's address on the Docker network (docker/docker-compose.yml): 10.77.0.(10 + N)."
   [node]
-  (str "10.77.0.1" (subs (name node) 1)))
+  (str "10.77.0." (+ 10 (parse-long (subs (name node) 1)))))
 
 (defn p2p-address
   [node info]
-  (or (first (filter #(and (str/includes? % (node-ip node)) (str/includes? % "/p2p/"))
-                     (:addresses info)))
-      (str "/ip4/" (node-ip node) "/tcp/8228/p2p/" (known-peer-ids (name node)))))
+  (let [ip (node-ip node)]
+    (or (first (filter #(and (str/includes? % (str "/ip4/" ip "/")) (str/includes? % "/p2p/"))
+                       (:addresses info)))
+        (if-let [id (known-peer-ids (name node))]
+          (str "/ip4/" ip "/tcp/8228/p2p/" id)
+          (throw (ex-info (str "node_info of " node " has no p2p address on " ip)
+                          {:node node, :addresses (:addresses info)}))))))
 
 (defn state-name
   "Normalises ChannelReady / CHANNEL_READY spellings to \"channelready\"."
@@ -63,6 +110,7 @@
   (let [nodes (:nodes test)
         infos (into {} (map (fn [n] [n (rpc/call n "node_info")]) nodes))
         edges (edges test)]
+    (info "Opening" (count edges) "channels for" (name (:topology test :line)) "over" nodes)
     (reset! (:pubkeys test) (update-vals infos :pubkey))
     (doseq [[a b] edges]
       (let [pubkey-b (:pubkey (infos b))]
