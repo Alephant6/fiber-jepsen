@@ -222,7 +222,8 @@
 
 (defn check-channel
   "The verdict for one channel: `ends` {node record}, its `trace`, `locks`
-  {node lock-key} of every node, and the `time` (ms) the trace was read."
+  {node lock-key} of every node, and the chain's `time` (ms) when the trace was
+  read."
   [ends trace locks time]
   (let [summary (fn [m] (assoc m :states (into (sorted-map)
                                                (for [[n ch] ends]
@@ -425,6 +426,16 @@
   [t]
   (or (:funding-status t) (:error t) (empty? (:live t))))
 
+(defn- chain-time-ms
+  "The chain's time: its tip block's timestamp, which on-chain TLC expiry is
+  checked against, and which the outage fault may have moved ahead of the
+  control node's clock. The control node's time if the chain doesn't answer."
+  []
+  (try (chain/tip-time-ms)
+       (catch Exception e
+         (warn "Couldn't read the chain's time:" (ex-message e))
+         (System/currentTimeMillis))))
+
 (defn settle!
   "Closes every open channel, waits up to :settle-timeout seconds for the closes
   to settle on chain, and reads the channels, their transactions and the wallets."
@@ -461,7 +472,7 @@
       {:closes   closes
        :settled? (every? settled-trace? (vals traces))
        :waited-s (quot (- (System/currentTimeMillis) start) 1000)
-       :time     (System/currentTimeMillis)
+       :time     (chain-time-ms)
        :locks    keys*
        :channels (update-vals channels (partial mapv #(select-keys % record-keys)))
        :traces   traces

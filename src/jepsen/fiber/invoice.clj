@@ -34,15 +34,18 @@
 
 (defn new-invoice!
   "Asks `node` for an invoice of `amount` shannons. Returns new_invoice's result,
-  or {:error e} when it made none (the receiver is down or refused)."
-  [node amount id]
+  or {:error e} when it made none (the receiver is down or refused). With
+  `final-delta` (ms, --final-tlc-expiry-delta) the invoice asks for that final
+  TLC expiry delta; without it Fiber's default applies."
+  [node amount id final-delta]
   (try
     (rpc/call node "new_invoice"
-              {:amount           (rpc/int->hex amount)
-               :currency         currency
-               :description      (str "fiber-jepsen " id)
-               :expiry           (rpc/int->hex expiry-s)
-               :payment_preimage (preimage id)})
+              (cond-> {:amount           (rpc/int->hex amount)
+                       :currency         currency
+                       :description      (str "fiber-jepsen " id)
+                       :expiry           (rpc/int->hex expiry-s)
+                       :payment_preimage (preimage id)}
+                final-delta (assoc :final_expiry_delta (rpc/int->hex final-delta))))
     (catch ConnectException _ {:error :receiver-down})
     (catch ConnectTimeoutException _ {:error :receiver-unreachable})
     (catch clojure.lang.ExceptionInfo e
@@ -55,7 +58,7 @@
 (defmethod client/send-payment! :invoice
   [test node to op]
   (let [{:keys [amount id]} (:value op)
-        inv                 (new-invoice! to amount id)]
+        inv                 (new-invoice! to amount id (:final-tlc-expiry-delta test))]
     (if-let [err (:error inv)]
       ; The sender was never asked, so it certainly created no payment.
       {::client/definite [:new-invoice err]}

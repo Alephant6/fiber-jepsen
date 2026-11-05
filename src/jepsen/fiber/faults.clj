@@ -23,6 +23,7 @@
             [jepsen.fiber.faults [chain-partition :as chain-partition]
                                  [clock :as clock]
                                  [disconnect :as disconnect]
+                                 [outage :as outage]
                                  [packet :as packet]
                                  [partition :as partition]
                                  [process :as process]]))
@@ -34,7 +35,8 @@
    disconnect/fault
    packet/fault
    chain-partition/fault
-   clock/fault])
+   clock/fault
+   outage/fault])
 
 (def supported
   "Every name --faults accepts."
