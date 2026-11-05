@@ -62,16 +62,17 @@
     (is (= {:NanoCpus 250000000} (resources/limit-body :cpu 0.25 host)))
     (is (= {:NanoCpus 4000000000} (resources/limit-body :cpu :lift host)))
     (is (= {:Memory 134217728, :MemorySwap 134217728} (resources/limit-body :memory 128 host)))
-    (testing "lifting can't unset the limit, so it gives the host's memory and unlimited swap"
-      (is (= {:Memory 16000000000, :MemorySwap -1} (resources/limit-body :memory :lift host))))))
+    (testing (str "lifting can't unset the limit, so it gives the host's memory and as much swap:"
+                  " a MemorySwap of -1 doesn't reach runc, which then refuses memory above the old swap")
+      (is (= {:Memory 16000000000, :MemorySwap 32000000000} (resources/limit-body :memory :lift host))))))
 
 (deftest window-report
   (is (= {:throttled-ms 1500, :throttled-slices 40, :memory-max-hits 0, :ooms 0, :oom-kills 0
-          :memory-mib 100}
+          :memory-mib 100, :anon-mib 60, :file-mib 38}
          (resources/window-report
            {:throttled-usec 500000, :nr-throttled 10, :memory-max-hits 3, :oom 1, :oom-kills 1}
            {:throttled-usec 2000000, :nr-throttled 50, :memory-max-hits 3, :oom 1, :oom-kills 1
-            :memory.current (* 100 1024 1024)})))
+            :memory.current (* 100 1024 1024), :anon (* 60 1024 1024), :file (* 38 1024 1024)})))
   (testing "counters a cgroup doesn't have are left out"
     (is (= {} (resources/window-report {} {})))))
 
@@ -110,3 +111,22 @@
       (is (true? (:valid? (resources/loop-check ws {"n1" (drop-last 2 (resources/disconnects log))})))))
     (testing "a node without debug lines makes it unknown"
       (is (= :unknown (:valid? (resources/loop-check ws {"n1" nil})))))))
+
+(deftest limits-check
+  (let [limit (fn [t nodes] {:type :info, :process :nemesis, :f :limit-resources, :time t
+                             :value {:limit {:nodes nodes, :cpus 0.2}
+                                     :nodes (into {} (for [n nodes] [n {:cpu.max "20000 100000"}]))}})
+        lift  (fn [t nodes] {:type :info, :process :nemesis, :f :lift-resources, :time t
+                             :value (into {} (for [n nodes]
+                                               [n {:lifted :cpu, :since "2026-11-05T04:00:00Z"
+                                                   :wall "2026-11-05T04:00:30Z"}]))})]
+    (testing "every limit lifted"
+      (is (= {:valid? true, :limits 3, :lifted 3, :nemesis-errors []}
+             (resources/limits-check [(limit 1 ["n1" "n2"]) (lift 2 ["n1" "n2"]) (limit 3 ["n3"]) (lift 4 ["n3"])]))))
+    (testing "a lift that threw, so the limit stayed"
+      (let [r (resources/limits-check [(limit 1 ["n1"])
+                                       {:type :info, :process :nemesis, :f :lift-resources, :time 2
+                                        :exception {:via []}, :error "indeterminate: Docker API 500"}])]
+        (is (false? (:valid? r)))
+        (is (= 0 (:lifted r)))
+        (is (= [{:f :lift-resources, :time 2, :error "indeterminate: Docker API 500"}] (:nemesis-errors r)))))))

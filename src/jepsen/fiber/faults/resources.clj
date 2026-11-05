@@ -102,12 +102,14 @@
 
 (defn limit-body
   "The body of Docker's container update call for one limit, or for lifting it
-  to the host's size."
+  to the host's size (memory: the host's, plus as much swap)."
   [kind amount host]
   (case kind
     :cpu    {:NanoCpus (long (* 1e9 (if (= :lift amount) (:cpus host) amount)))}
     :memory (if (= :lift amount)
-              {:Memory (:memory host), :MemorySwap -1}
+              ; Docker passes MemorySwap on only when positive, so -1 would keep the
+              ; limit's swap (equal to its memory) and runc refuses memory above it.
+              {:Memory (:memory host), :MemorySwap (* 2 (:memory host))}
               (let [bytes (* amount 1024 1024)]
                 {:Memory bytes, :MemorySwap bytes}))))
 
@@ -128,10 +130,15 @@
   and the counters a window's report is computed from."
   []
   (let [cpu (parse-flat-keyed (cat-or-nil "/sys/fs/cgroup/cpu.stat"))
-        mem (parse-flat-keyed (cat-or-nil "/sys/fs/cgroup/memory.events"))]
+        mem (parse-flat-keyed (cat-or-nil "/sys/fs/cgroup/memory.events"))
+        st  (parse-flat-keyed (cat-or-nil "/sys/fs/cgroup/memory.stat"))]
     {:cpu.max         (cat-or-nil "/sys/fs/cgroup/cpu.max")
      :memory.max      (cat-or-nil "/sys/fs/cgroup/memory.max")
      :memory.current  (some-> (cat-or-nil "/sys/fs/cgroup/memory.current") parse-long)
+     ; Of memory.current: anonymous memory (the processes' heaps) and page cache,
+     ; which the kernel reclaims under a limit.
+     :anon            (:anon st)
+     :file            (:file st)
      :throttled-usec  (:throttled_usec cpu)
      :nr-throttled    (:nr_throttled cpu)
      :memory-max-hits (:max mem)
@@ -155,7 +162,9 @@
            :memory-max-hits  (delta after before :memory-max-hits)
            :ooms             (delta after before :oom)
            :oom-kills        (delta after before :oom-kills)
-           :memory-mib       (mib (:memory.current after))})))
+           :memory-mib       (mib (:memory.current after))
+           :anon-mib         (mib (:anon after))
+           :file-mib         (mib (:file after))})))
 
 ;; The nemesis
 
@@ -359,9 +368,33 @@
                                            nil)))]))]
         (loop-check (windows history) logs)))))
 
+(defn limits-check
+  "Every limit took and was lifted. Invalid when a :limit-resources or
+  :lift-resources op threw (a node may have stayed limited for the rest of the
+  run), or when fewer limits were lifted than set."
+  [history]
+  (let [crashed (vec (for [op    history
+                           :when (and (#{:limit-resources :lift-resources} (:f op)) (:exception op))]
+                       (select-keys op [:f :time :error])))
+        set     (reduce + (for [op    history
+                                :when (and (= :limit-resources (:f op)) (map? (get-in op [:value :nodes])))]
+                            (count (get-in op [:value :nodes]))))
+        lifted  (count (windows history))]
+    {:valid?         (and (empty? crashed) (= set lifted))
+     :limits         set
+     :lifted         lifted
+     :nemesis-errors crashed}))
+
+(defn limits-checker
+  []
+  (reify checker/Checker
+    (check [_ _test history _opts]
+      (limits-check history))))
+
 (def fault
   {:faults  #{:cpu :memory}
    :stream  :resources
    :package package
    :ops     ops
-   :checker (fn [_opts] {:disconnect-loops (checker)})})
+   :checker (fn [_opts] {:disconnect-loops (checker)
+                         :resource-limits  (limits-checker)})})
