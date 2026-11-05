@@ -84,7 +84,8 @@
   (let [plain  (simulate opts)
         with   (simulate (assoc opts :availability-window 20))
         pays   (fn [h w] (filter #(and (= :pay (:f %)) (= w (:window %))) h))
-        faults (filter #(= :info (:type %)) with)]
+        ; The nemesis's ops, but the health sample at the very end.
+        faults (filter #(and (= :info (:type %)) (not= :health (:f %))) with)]
     (testing "without the option the generator has no windows"
       (is (empty? (filter :window plain))))
     (testing "the baseline comes before the first fault, the recovery after the healing and --quiesce"

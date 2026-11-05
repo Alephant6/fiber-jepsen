@@ -17,6 +17,7 @@
                           [closes :as closes]
                           [db :as db]
                           [faults :as faults]
+                          [health :as health]
                           [invoice]
                           [ledger :as ledger]
                           [nonce :as nonce]
@@ -119,7 +120,7 @@
             :os                   os/noop
             :db                   db
             :client               (client/client)
-            :nemesis              (:nemesis pkg)
+            :nemesis              (health/compose (:nemesis pkg))
             ; Shared state between the topology setup, the clients and the checker.
             :pubkeys              (atom {})
             :payments             (atom [])
@@ -130,7 +131,8 @@
                                                    {:stats      (checker/stats)
                                                     :exceptions (checker/unhandled-exceptions)
                                                     :perf       (checker/perf {:nemeses (:perf pkg)})
-                                                    :timeline   (timeline/html)})
+                                                    :timeline   (timeline/html)
+                                                    :health     (health/checker)})
                                       (not (:close opts)) (assoc :fiber (if (:force-close-ok opts)
                                                                           (closes/checker)
                                                                           (fiber-checker/checker)))
@@ -156,6 +158,8 @@
                                       (gen/clients (gen/once {:f :settle-channels})))
                                     (availability-window opts streams :pay-recovery :recovery)
                                     (when-not (:close opts) (gen/clients (gen/once {:f :probe})))
+                                    ; Assertion 7 (jepsen.fiber.health): is every fnn there and working?
+                                    (gen/nemesis (gen/once health/final-sample))
                                     (gen/clients (gen/once {:f :read}))
                                     (when (:onchain opts)
                                       (gen/phases (gen/log "Closing every channel and waiting for it to settle on chain")

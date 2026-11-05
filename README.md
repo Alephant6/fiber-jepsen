@@ -15,7 +15,8 @@ After all faults are healed and the network has had time to converge:
 - no channel's total (local + remote) changed: payments move money within a channel, they never create or destroy it;
 - every payment reached `Success` or `Failed`;
 - no payment the client saw succeed reports a different status later;
-- a fresh payment each way over every channel (the probe) succeeds, unless the sender's balance on that channel is below the probe amount; with `--probe-routes`, so does one between every two nodes without a channel, which only multi-hop routing can deliver.
+- a fresh payment each way over every channel (the probe) succeeds, unless the sender's balance on that channel is below the probe amount; with `--probe-routes`, so does one between every two nodes without a channel, which only multi-hop routing can deliver;
+- every node is healthy (assertion 7 of the [chaos-test plan](https://gist.github.com/quake/c73bba93b5b1928391063038fc9fe34a)): no fnn panicked (`panicked at` in its log), and after the probe every fnn is running, answers `node_info` and can still write to its store (`new_invoice`, an invoice that is never paid). A node whose `node_info` answers but whose `new_invoice` doesn't is alive but not working. The run also fails if the kernel killed a process in a node's container for memory, or if a restart by the harness found fnn already gone although nothing had stopped it (it exited on its own, and the restart would otherwise hide that). The `:health` result lists each node's ERROR lines by kind, how many times fnn started, and its peak memory.
 
 With `--nonce-check` and an instrumented fnn, it also checks that no MuSig2 nonce signed two different contexts, across restarts (see [below](#musig2-nonce-reuse---nonce-check)).
 
@@ -57,6 +58,7 @@ Planned: **clock skew**. Fiber expires TLCs by wall-clock timestamp (off-chain c
   - `channels.clj` (opening and closing channels during the run, with `--channel-ops`)
   - `invoice.clj` (invoice payments, with `--pay-kinds invoice`)
   - `checker.clj` (invariants)
+  - `health.clj` (process health: panics, and a sample of every node after healing)
   - `ledger.clj` (per-node money check, with `--ledger`)
   - `closes.clj` (what `--force-close-ok` excuses)
   - `nonce.clj` (MuSig2 nonce reuse, with `--nonce-check`)
