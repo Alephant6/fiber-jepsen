@@ -95,7 +95,7 @@ The node image is Ubuntu 24.04 (glibc 2.39), the system of the GitHub `ubuntu-24
 
 ### Scenarios of the chaos-test plan (`--scenario`)
 
-The team's chaos-test plan ([C-01a to C-16](https://gist.github.com/quake/c73bba93b5b1928391063038fc9fe34a)) names each scenario by its topology, workload and fault. `src/jepsen/fiber/scenarios.clj` lists the ones this suite covers, each with the arguments that run it, its priority in the plan, and where it departs from the plan (three nodes in a line instead of A-B, for example). `--scenario NAME` puts those arguments right after the option, so arguments after it override them:
+The team's chaos-test plan ([C-01a to C-16](https://gist.github.com/quake/c73bba93b5b1928391063038fc9fe34a)) names each scenario by its topology, workload and fault. `src/jepsen/fiber/scenarios.clj` lists the ones this suite covers, each with the arguments that run it, its priority in the plan, and where it departs from the plan (three nodes in a line instead of A-B, for example; c-01a and c-05 run A-B with `--nodes n1,n2`, which overrides `run.sh`'s three nodes). `--scenario NAME` puts those arguments right after the option, so arguments after it override them:
 
 ```bash
 scripts/run.sh --scenario c-01b                  # as listed: SIGKILL one node, 300 s
