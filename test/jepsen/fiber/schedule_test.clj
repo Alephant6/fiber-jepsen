@@ -59,6 +59,18 @@
     (gen/limit 400 (gen/nemesis (faults/generator streams opts)
                                 (fiber/payments opts streams)))))
 
+(deftest the-fault-window-lasts-the-time-limit
+  ; The seed of a CI run of --scenario c-08 --time-limit 90 whose window ended
+  ; after 1.3 s: its first gap between faults is 100 s, so the resume after the
+  ; first pause falls after the limit.
+  (let [opts    (assoc opts :faults [:pause] :nemesis-interval 30 :time-limit 90)
+        streams (schedule/streams 195254960918858)
+        pays    (->> (simulate (fiber/fault-window opts streams)
+                               (constantly 200000000))
+                     (filter #(= :pay (:f %))))]
+    (is (< 89e9 (:time (last pays))))
+    (is (< 400 (count pays)))))
+
 (deftest same-seed-same-operations
   (testing "the same seed draws the same payments and faults"
     (is (= (take 50 (schedule/payments (:pay (schedule/streams 7)) 3))

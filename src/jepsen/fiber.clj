@@ -42,6 +42,19 @@
                   (pays :pay-after-close))
       (pays :pay))))
 
+(defn fault-window
+  "The payments and the faults, each for :time-limit seconds.
+
+  Each gets a time limit of its own. A single gen/time-limit around both ends the
+  window early: while every client is busy, the next operation is the nemesis's,
+  and when that one falls after the limit, gen/time-limit takes the whole window
+  as finished, payments included. A gap between faults can be up to 100 s, so a
+  run with --nemesis-interval 30 and --time-limit 90 could stop after a second."
+  [opts streams]
+  (let [limit #(some->> % (gen/time-limit (:time-limit opts)))]
+    (gen/nemesis (limit (faults/generator streams opts))
+                 (limit (payments opts streams)))))
+
 (defn nemesis-package
   "The nemesis package for the requested faults (jepsen.fiber.faults/package).
   fiber-test uses its nemesis, final generator and perf, but takes the faults
@@ -83,9 +96,7 @@
                                       (:nonce-check opts) (assoc :nonce (nonce/checker))
                                       (:ledger opts)      (assoc :ledger (ledger/checker))))
             :generator            (gen/phases
-                                    (->> (payments opts streams)
-                                         (gen/nemesis (faults/generator streams opts))
-                                         (gen/time-limit (:time-limit opts)))
+                                    (fault-window opts streams)
                                     (gen/log "Healing all faults")
                                     (gen/nemesis (:final-generator pkg))
                                     (gen/log "Waiting for the network to converge")
