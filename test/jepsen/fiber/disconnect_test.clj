@@ -72,3 +72,21 @@
         (let [v (:value (n/invoke! nem test {:type :info, :f :flash-disconnect
                                               :value {:edge ["n3" "n4"], :down-ms 1}}))]
           (is (re-find #"^failed: node_info of n4" (:reconnect v))))))))
+
+(deftest reconnect-in-parallel
+  (testing "a node that doesn't answer holds up the reconnect once, not once per pair"
+    (let [nem  (disconnect/disconnect-nemesis)
+          test {:nodes ["n1" "n2" "n3" "n4" "n5" "n6"], :topology :mesh
+                :pubkeys (atom (into {} (for [i (range 1 7)] [(str "n" i) (str "pk" i)])))}]
+      (with-redefs [rpc/call (fn [node method & [_params]]
+                               (case method
+                                 "node_info" (do (Thread/sleep 300)
+                                                 {:addresses [(str "/ip4/10.77.0.1" (subs node 1) "/tcp/8228/p2p/Qm")]})
+                                 nil))]
+        (let [t0 (System/nanoTime)
+              v  (:value (n/invoke! nem test {:type :info, :f :reconnect}))
+              ms (/ (- (System/nanoTime) t0) 1e6)]
+          (is (= 9 (count v)))
+          (is (every? #{:ok} (vals v)))
+          ; In a row, 9 pairs would take 2.7 s.
+          (is (< ms 1500)))))))

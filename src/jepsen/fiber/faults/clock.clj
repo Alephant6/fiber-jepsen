@@ -21,7 +21,8 @@
             [clojure.tools.logging :refer [warn]]
             [jepsen [checker :as checker]
                     [control :as c]
-                    [nemesis :as n]]
+                    [nemesis :as n]
+                    [util :as util]]
             [jepsen.fiber [rpc :as rpc]
                           [schedule :as schedule]])
   (:import (java.util SplittableRandom)))
@@ -79,6 +80,12 @@
   (when-let [t (some-> (get-in result [:invoice :data :timestamp]) rpc/hex->int long)]
     (if (< t 100000000000) (* 1000 t) t)))
 
+(def check-timeout-ms
+  "How long the clock check waits for fnn's invoice. A paused fnn never answers,
+  and the nemesis does nothing else meanwhile, so with other faults a long wait
+  stretches theirs."
+  5000)
+
 (defn fnn-offset-s
   "fnn's clock offset on `node`, in seconds to a tenth: an invoice's timestamp
   (fnn's clock) minus the control node's time halfway through the call. A
@@ -91,7 +98,7 @@
                          :currency    "Fibd"
                          :description "fiber-jepsen clock check"
                          :expiry      (rpc/int->hex 3600)}
-                        {:timeout 10000})
+                        {:timeout check-timeout-ms})
           t1  (System/currentTimeMillis)
           ts  (invoice-timestamp-ms res)]
       (if ts
@@ -120,7 +127,8 @@
         (Thread/sleep settle-ms)
         (assoc op :value
                {:offset-s offset
-                :fnn-offset-s (into (sorted-map) (for [node nodes] [node (fnn-offset-s node)]))})))
+                ; In parallel: a paused node makes its check wait check-timeout-ms.
+                :fnn-offset-s (into (sorted-map) (util/real-pmap (fn [node] [node (fnn-offset-s node)]) nodes))})))
 
     (teardown! [_ test]
       (c/on-nodes test (fn [_ _] (set-offset! 0))))))

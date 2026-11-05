@@ -13,7 +13,8 @@
             [clojure.tools.logging :refer [warn]]
             [jepsen [generator :as gen]
                     [nemesis :as n]
-                    [random :as rand]]
+                    [random :as rand]
+                    [util :as util]]
             [jepsen.fiber [rpc :as rpc]
                           [schedule :as schedule]
                           [topology :as topology]])
@@ -75,11 +76,15 @@
                               :peer-before-reconnect seen, :reconnect up}))
 
           :reconnect
+          ; Every pair at once: each call to a paused node waits for its timeout,
+          ; and in a row they held up the other faults' ops for tens of seconds.
           (assoc op :value
                  (into (sorted-map)
-                       (for [[a b] edges]
-                         (let [info (try (rpc/call b "node_info") (catch Exception _ nil))]
-                           [(str a "->" b) (connect! a b info)])))))))
+                       (util/real-pmap
+                         (fn [[a b]]
+                           (let [info (try (rpc/call b "node_info") (catch Exception _ nil))]
+                             [(str a "->" b) (connect! a b info)]))
+                         edges))))))
 
     (teardown! [_ _test])))
 
