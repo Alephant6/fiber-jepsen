@@ -19,3 +19,6 @@ services:
   n1: *lazyfs-node
   n2: *lazyfs-node
   n3: *lazyfs-node
+  n4: *lazyfs-node
+  n5: *lazyfs-node
+  n6: *lazyfs-node

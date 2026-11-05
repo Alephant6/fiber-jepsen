@@ -40,6 +40,11 @@ RUN apt-get update \
  && chmod 700 /root/.ssh \
  && sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
 
+# The clock fault (jepsen.fiber.faults.clock) preloads libfaketime into fnn at a
+# fixed path, and starts it with no offset.
+RUN ln -s "$(ls /usr/lib/*/faketime/libfaketimeMT.so.1)" /usr/local/lib/libfaketimeMT.so.1 \
+ && mkdir -p /fiber && echo +0 >/fiber/faketime
+
 COPY --from=lazyfs /opt/jepsen /opt/jepsen
 COPY build/bin/fnn /usr/local/bin/fnn
 COPY build/chain/tests/deploy/contracts /fiber/tests/deploy/contracts

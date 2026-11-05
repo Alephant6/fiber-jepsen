@@ -66,10 +66,13 @@
       {:logfile logfile
        :pidfile pidfile
        :chdir   (node-dir node)
-       :env     (cond-> {:FIBER_SECRET_KEY_PASSWORD (str "password" (node-id node))
-                         :RUST_LOG                  (:log-level test "info")
-                         :RUST_BACKTRACE            "1"
-                         :FIBER_NONCE_ORACLE_FILE   nonce-file}
+       ; :fnn-env holds what faults add (jepsen.fiber.faults/fnn-env): libfaketime
+       ; for the clock fault, say.
+       :env     (cond-> (merge {:FIBER_SECRET_KEY_PASSWORD (str "password" (node-id node))
+                                :RUST_LOG                  (:log-level test "info")
+                                :RUST_BACKTRACE            "1"
+                                :FIBER_NONCE_ORACLE_FILE   nonce-file}
+                               (:fnn-env test))
                   ; Fiber #1703; builds before it ignore the variable.
                   (some? (:store-sync-writes test))
                   (assoc :FIBER_STORE_SYNC_WRITES (str (:store-sync-writes test))))}

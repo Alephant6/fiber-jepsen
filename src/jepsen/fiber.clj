@@ -11,26 +11,35 @@
                     [os :as os]
                     [tests :as tests]]
             [jepsen.checker.timeline :as timeline]
-            [jepsen.fiber [checker :as fiber-checker]
+            [jepsen.fiber [channels :as channels]
+                          [checker :as fiber-checker]
                           [client :as client]
+                          [closes :as closes]
                           [db :as db]
+                          [expiry :as expiry]
                           [faults :as faults]
                           [health :as health]
                           [invoice]
                           [ledger :as ledger]
                           [nonce :as nonce]
+                          [onchain :as onchain]
                           [scenarios :as scenarios]
                           [schedule :as schedule]
                           [topology :as topology]]
-            [jepsen.fiber.faults [packet :as packet]
+            [jepsen.fiber.faults [chain-partition :as chain-partition]
+                                 [clock :as clock]
+                                 [outage :as outage]
+                                 [packet :as packet]
+                                 [partition :as partition]
                                  [power :as power]
-                                 [process :as process]])
+                                 [process :as process]
+                                 [resources :as resources]])
   (:gen-class))
 
 (def supported-faults
   "Faults this suite can inject, one namespace each under jepsen.fiber.faults.
-  Jepsen's :clock fault changes the host clock, which Docker containers share, so
-  clock skew needs a per-process approach (libfaketime) instead."
+  Jepsen's own clock nemesis changes the host clock, which Docker containers
+  share, so :clock here moves fnn's clock alone, with libfaketime."
   faults/supported)
 
 (defn payments
@@ -69,8 +78,17 @@
          (gen/time-limit (:availability-window opts))
          gen/clients)))
 
+(defn client-ops
+  "The clients' operations during the fault window: the payments and, with
+  --channel-ops, the channel workload (jepsen.fiber.channels)."
+  [opts streams]
+  (let [pays (payments opts streams)]
+    (if-let [chans (channels/generator streams opts)]
+      (gen/any pays chans)
+      pays)))
+
 (defn fault-window
-  "The payments and the faults, each for :time-limit seconds.
+  "The client operations and the faults, each for :time-limit seconds.
 
   Each gets a time limit of its own. A single gen/time-limit around both ends the
   window early: while every client is busy, the next operation is the nemesis's,
@@ -80,7 +98,7 @@
   [opts streams]
   (let [limit #(some->> % (gen/time-limit (:time-limit opts)))]
     (gen/nemesis (limit (faults/generator streams opts))
-                 (limit (payments opts streams)))))
+                 (limit (client-ops opts streams)))))
 
 (defn nemesis-package
   "The nemesis package for the requested faults (jepsen.fiber.faults/package).
@@ -110,6 +128,7 @@
             :nemesis              (health/compose (:nemesis pkg))
             ; Shared state between the topology setup, the clients and the checker.
             :pubkeys              (atom {})
+            :fnn-env              (faults/fnn-env opts)
             :payments             (atom [])
             :initial-channels     (atom nil)
             :nonserializable-keys [:pubkeys :payments :initial-channels]
@@ -120,27 +139,40 @@
                                                     :perf       (checker/perf {:nemeses (:perf pkg)})
                                                     :timeline   (timeline/html)
                                                     :health     (health/checker)})
-                                      (not (:close opts)) (assoc :fiber (fiber-checker/checker))
+                                      (not (:close opts)) (assoc :fiber (if (:force-close-ok opts)
+                                                                          (closes/checker)
+                                                                          (fiber-checker/checker)))
                                       (:close opts)       (assoc :close (fiber-checker/close-checker))
                                       (:nonce-check opts) (assoc :nonce (nonce/checker))
                                       (:ledger opts)      (assoc :ledger (ledger/checker))
+                                      (:onchain opts)     (assoc :onchain (onchain/checker))
+                                      (seq (:channel-ops opts)) (assoc :channels (channels/checker))
+                                      (:expiry-check opts) (assoc :expiry (expiry/checker))
                                       (availability? opts)
                                       (assoc :availability (fiber-checker/availability-checker
                                                              (:availability-tolerance opts 5)))))
             ; With --availability-window, a baseline window of payments before the
             ; faults and a recovery window after the network has converged.
             :generator            (gen/phases
+                                    (when (:onchain opts) (gen/clients (gen/once {:f :chain-baseline})))
                                     (availability-window opts streams :pay-baseline :baseline)
                                     (fault-window opts streams)
                                     (gen/log "Healing all faults")
                                     (gen/nemesis (:final-generator pkg))
                                     (gen/log "Waiting for the network to converge")
                                     (gen/sleep (:quiesce opts))
+                                    (when (seq (:channel-ops opts))
+                                      (gen/clients (gen/once {:f :settle-channels})))
                                     (availability-window opts streams :pay-recovery :recovery)
                                     (when-not (:close opts) (gen/clients (gen/once {:f :probe})))
                                     ; Assertion 7 (jepsen.fiber.health): is every fnn there and working?
                                     (gen/nemesis (gen/once health/final-sample))
-                                    (gen/clients (gen/once {:f :read})))})))
+                                    (gen/clients (gen/once {:f :read}))
+                                    (when (:onchain opts)
+                                      (gen/phases (gen/log "Closing every channel and waiting for it to settle on chain")
+                                                  (gen/clients (gen/once {:f :settle}))))
+                                    (when (:expiry-check opts)
+                                      (gen/clients (gen/once {:f :final-payments}))))})))
 
 (defn- keywords
   [s]
@@ -199,6 +231,24 @@
     :default  :kill
     :parse-fn keyword
     :validate [process/kill-signals (str "Must be one of " process/kill-signals)]]
+   [nil "--tlc-expiry-delta MS" (str "After opening the channels, set every channel's TLC expiry delta"
+                                     " to MS milliseconds (update_channel) and wait until every node"
+                                     " routes with it. A release build's minimum is 160 minutes"
+                                     " (9600000).")
+    :parse-fn parse-long
+    :validate [#(and % (pos? %)) "Must be positive"]]
+   [nil "--final-tlc-expiry-delta MS" (str "Payments ask for this final TLC expiry delta, in"
+                                           " milliseconds (send_payment, and new_invoice for"
+                                           " invoices). A release build's minimum is 160 minutes.")
+    :parse-fn parse-long
+    :validate [#(and % (pos? %)) "Must be positive"]]
+   [nil "--tlc-expiry-limit MS" (str "Payments ask that no TLC expire more than MS milliseconds after"
+                                     " it is sent (send_payment's tlc_expiry_limit). Fiber adds a"
+                                     " random delay of 4 hours or more to every hop, so the limit must"
+                                     " cover 4 hours plus the route's deltas; just over that, it pins"
+                                     " the delay at 4 hours (C-03).")
+    :parse-fn parse-long
+    :validate [#(and % (pos? %)) "Must be positive"]]
    [nil "--term-grace SECONDS" (str "With --kill-signal term, seconds fnn has to exit after SIGTERM"
                                     " before it gets SIGKILL and the run fails.")
     :default  30
@@ -217,12 +267,114 @@
     :default  0
     :parse-fn parse-long
     :validate [#(and % (<= 0 % 100)) "Must be 0 to 100"]]
+   [nil "--partition-targets TARGETS" (str "With --faults partition, comma-separated target specs to"
+                                           " choose from: one (one node), half (a random half of the"
+                                           " nodes).")
+    :default  [:one]
+    :parse-fn keywords
+    :validate [#(every? partition/target-specs %) (str "Must be a subset of " partition/target-specs)]]
+   [nil "--partition-duration SECONDS" (str "With --faults partition, how long each partition lasts,"
+                                            " or a range MIN-MAX drawn per partition. Default: until"
+                                            " the next fault op, like other faults (at most 100 s).")
+    :parse-fn partition/parse-duration
+    :validate [(fn [[lo hi]] (and lo hi (< 0 lo) (<= lo hi))) "Must be S or MIN-MAX, 0 < MIN <= MAX"]]
+   [nil "--chain-partition-targets TARGETS" (str "With --faults chain-partition, comma-separated"
+                                                 " target specs to choose from: one (a random fnn"
+                                                 " node), all.")
+    :default  [:one :all]
+    :parse-fn keywords
+    :validate [#(every? chain-partition/target-specs %)
+               (str "Must be a subset of " chain-partition/target-specs)]]
+   [nil "--chain-partition-mode MODE" (str "With --faults chain-partition: drop (requests to the CKB"
+                                           " node time out) or reject (TCP reset, they fail at once).")
+    :default  :drop
+    :parse-fn keyword
+    :validate [chain-partition/modes (str "Must be one of " chain-partition/modes)]]
+   [nil "--channel-ops OPS" (str "Comma-separated channel operations to run with the payments: open,"
+                                 " close (cooperative) and force-close, on the topology's edges"
+                                 " (jepsen.fiber.channels). Also checks that every channel ends ready"
+                                 " or closed.")
+    :default  []
+    :parse-fn keywords
+    :validate [#(every? channels/kinds %) (str "Must be a subset of " (keys channels/kinds))]]
+   [nil "--channel-interval SECONDS" "With --channel-ops, mean seconds between channel operations."
+    :default  20
+    :parse-fn parse-double]
+   [nil "--channel-funding CKB" "With --channel-ops, CKB the opener puts into each new channel."
+    :default  500
+    :parse-fn parse-long]
+   [nil "--channel-keep N" "With --channel-ops, closes leave at least this many ready channels on each edge."
+    :default  1
+    :parse-fn parse-long]
+   [nil "--channel-settle-timeout SECONDS" (str "With --channel-ops, how long to wait after the quiet period"
+                                                " for every channel to be ready or closed on both ends. Fiber"
+                                                " checks for a counterparty's force close every 300 s.")
+    :default  360
+    :parse-fn parse-long]
    [nil "--disconnect-flash MS" (str "With --faults disconnect, make each fault a flash: disconnect a pair"
                                      " and connect it again after MS milliseconds, or after a time drawn"
                                      " from MIN-MAX (C-05: 100-5000). Without it, a pair stays"
                                      " disconnected until the next fault op.")
     :parse-fn packet/parse-delay
     :validate [(fn [[lo hi]] (and lo hi (<= 0 lo hi))) "Must be MS or MIN-MAX, 0 <= MIN <= MAX"]]
+   [nil "--clock-targets TARGETS" (str "With --faults clock, comma-separated target specs to choose"
+                                       " from: one (a random node's clock jumps), all (every node's,"
+                                       " by the same offset).")
+    :default  [:one]
+    :parse-fn keywords
+    :validate [#(every? clock/target-specs %) (str "Must be a subset of " clock/target-specs)]]
+   [nil "--clock-jump SECONDS" (str "With --faults clock, how far fnn's clock jumps, or a range MIN-MAX"
+                                    " drawn per jump; forward or back at random.")
+    :default  [60 1800]
+    :parse-fn clock/parse-range
+    :validate [(fn [[lo hi]] (and lo hi (<= 1 lo hi))) "Must be SECONDS or MIN-MAX, 1 <= MIN <= MAX"]]
+   [nil "--outage-targets TARGETS" (str "With --faults outage, comma-separated target specs to choose"
+                                        " from: middle (a node that forwards payments, n2 in line), one"
+                                        " (any node).")
+    :default  [:middle]
+    :parse-fn keywords
+    :validate [#(every? outage/target-specs %) (str "Must be a subset of " outage/target-specs)]]
+   [nil "--outage-duration SECONDS" (str "With --faults outage, how long each outage keeps its node down,"
+                                         " or a range MIN-MAX drawn per outage.")
+    :default  [120 180]
+    :parse-fn partition/parse-duration
+    :validate [(fn [[lo hi]] (and lo hi (< 0 lo) (<= lo hi))) "Must be S or MIN-MAX, 0 < MIN <= MAX"]]
+   [nil "--outage-after SECONDS" (str "With --faults outage, how long into the fault window the first"
+                                      " outage waits, so that payments flow before it.")
+    :default  30
+    :parse-fn parse-long
+    :validate [#(and % (<= 0 %)) "Must be 0 or more"]]
+   [nil "--outage-await SECONDS" (str "With --faults outage, how long an outage waits for a neighbour"
+                                      " of its node to hold a TLC in flight to it before it kills the"
+                                      " node anyway.")
+    :default  30
+    :parse-fn parse-long
+    :validate [#(and % (<= 0 %)) "Must be 0 or more"]]
+   [nil "--outage-jump SECONDS" (str "With --faults outage, move every fnn's clock and the CKB node's"
+                                     " forward by this much during each outage that caught a TLC in"
+                                     " flight, so that the TLC expires (C-03). The clocks never jump"
+                                     " back. 0: no jump.")
+    :default  0
+    :parse-fn parse-long
+    :validate [#(and % (<= 0 %)) "Must be 0 or more"]]
+   [nil "--resource-targets TARGETS" (str "With --faults cpu or memory, comma-separated target specs to"
+                                          " choose from: one (a random node), all.")
+    :default  [:one]
+    :parse-fn keywords
+    :validate [#(every? resources/target-specs %) (str "Must be a subset of " resources/target-specs)]]
+   [nil "--cpu-limit CPUS" (str "With --faults cpu, the CPUs a limited node's container gets (a CFS"
+                                " quota), or a range MIN-MAX drawn per fault.")
+    :default  [0.1 0.5]
+    :parse-fn resources/parse-range
+    :validate [(fn [[lo hi]] (and lo hi (<= 0.01 lo hi))) "Must be CPUS or MIN-MAX, 0.01 <= MIN <= MAX"]]
+   [nil "--memory-limit MIB" (str "With --faults memory, the memory a limited node's container gets"
+                                  " (MiB, no swap), or a range MIN-MAX drawn per fault. The default"
+                                  " starts above fnn's anonymous memory under c-12's load (at most"
+                                  " 92 MiB on ae6f7d34), so an OOM kill means fnn grew, not that the"
+                                  " limit was below what it always needs.")
+    :default  [128 256]
+    :parse-fn resources/parse-range
+    :validate [(fn [[lo hi]] (and lo hi (<= 16 lo hi))) "Must be MIB or MIN-MAX, 16 <= MIN <= MAX"]]
    [nil "--power-targets TARGETS" (str "With --faults power, comma-separated target specs to choose"
                                        " from: one (a node), all (every node at once).")
     :default  [:one :all]
@@ -240,7 +392,22 @@
                        " check that all of them end Closed instead of the usual invariants.")]
    [nil "--ledger" (str "Check each node's balance change against the payments it sent, received"
                         " and forwarded. Tags every payment with its attempt id and lists every"
-                        " node's payments in the final read.")]])
+                        " node's payments in the final read.")]
+   [nil "--probe-routes" (str "After healing, also pay from every node to every node it has no"
+                              " channel with, so that the probe tests multi-hop routing.")]
+   [nil "--force-close-ok" (str "Don't fail the run for channels that ended closed, nor for what"
+                                " they explain (open question 1 on the chaos-test plan: a pause or"
+                                " partition over 30 s force-closes channels). They are reported.")]
+   [nil "--onchain" (str "After the final read, close every channel and check on chain that each"
+                         " party received its last balance plus its reserve, less fees, and that"
+                         " every node's wallet changed by what its channels' transactions explain.")]
+   [nil "--settle-timeout SECONDS" "With --onchain, how long to wait for the closes to settle on chain."
+    :default  300
+    :parse-fn parse-long]
+   [nil "--expiry-check" (str "With --onchain (C-03): after the closes settle, read every payment"
+                              " again and check that each is Success or Failed, and that a node got"
+                              " back on chain every TLC of its own Failed payments that a closed"
+                              " channel still held.")]])
 
 (defn -main
   [& args]
