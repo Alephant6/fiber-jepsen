@@ -48,6 +48,24 @@
                         "--availability-window" "30" "--ledger"]
              :differs  (str "As c-02a: about a third of the payments cross the middle node, and the"
                             " kill and restart gaps are those of c-01a.")}
+    "c-04"  {:priority :p0
+             :plan     (str "4-6 node mesh, mixed payments. Random nodes restarted again and"
+                            " again. Once all recover, the success rate is back to baseline.")
+             :args     ["--nodes" "n1,n2,n3,n4,n5,n6" "--topology" "mesh" "--faults" "kill"
+                        "--kill-targets" "one" "--nemesis-interval" "30" "--time-limit" "300"
+                        "--pay-kinds" "keysend,invoice" "--availability-window" "60"
+                        "--quiesce" "60" "--probe-routes"]
+             :differs  (str "Six nodes, each with channels to three others (the ring and its"
+                            " diameters), as in c-06. A kill (SIGKILL) takes one node drawn"
+                            " uniformly; the gap between a kill and the restart, and between a"
+                            " restart and the next kill, is exponential with a 30 s mean, capped"
+                            " at 100 s. Baseline and recovery are 60 s of payments each, before"
+                            " the first kill and after healing and --quiesce; the recovery's"
+                            " success rate may be at most --availability-tolerance (5) points"
+                            " below the baseline's. Each payment is a keysend or an invoice"
+                            " payment, drawn uniformly, in all three windows. A channel that ends"
+                            " force-closed fails the run; add --force-close-ok to excuse it (open"
+                            " question 1).")}
     "c-05"  {:priority :p0
              :plan     "flash the network between A and B for 100 ms to 5 s at random, while they pay each other"
              :args     ["--nodes" "n1,n2" "--faults" "disconnect" "--disconnect-flash" "100-5000"
@@ -59,6 +77,23 @@
                             " before the drawn time is up. One flash every 8 s on average. n2"
                             " starts with nothing on the channel, so its payments fail until n1"
                             " has paid it.")}
+    "c-06"  {:priority :p0
+             :plan     (str "Mesh, multi-hop payments. A partition isolates half the nodes for"
+                            " minutes, then heals. Routing works after healing, payments converge.")
+             :args     ["--nodes" "n1,n2,n3,n4,n5,n6" "--topology" "mesh" "--faults" "partition"
+                        "--partition-targets" "half" "--partition-duration" "120-300"
+                        "--nemesis-interval" "60" "--time-limit" "600" "--quiesce" "60"
+                        "--probe-routes"]
+             :differs  (str "Six nodes, each with channels to three others (the ring and its"
+                            " diameters); 6 of the 15 node pairs are two hops apart, the rest"
+                            " neighbours, and each payment goes to a node drawn uniformly. Each"
+                            " partition cuts a random half from the other half for 120-300 s,"
+                            " then heals for an exponential 60 s on average, capped at 100 s."
+                            " Routing after healing is a payment between every two nodes without"
+                            " a channel, on top of the usual probe of each channel. A partition"
+                            " over 30 s force-closes the channels across it that had an update in"
+                            " flight, which fails the run; add --force-close-ok to excuse closed"
+                            " channels and what they explain (open question 1).")}
     "c-08"  {:priority :p1
              :plan     "SIGSTOP a node for tens of seconds, then resume"
              :args     ["--faults" "pause" "--nemesis-interval" "30" "--time-limit" "300"]

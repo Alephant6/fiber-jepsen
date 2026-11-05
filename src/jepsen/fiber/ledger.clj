@@ -12,6 +12,15 @@
     receiver    + amount
     forwarder   + fee        (the node between them on the line)
 
+  On other graphs (--topology ring or mesh) a payment may take any route, and fnn
+  reports the route only in debug builds, so the forwarders aren't known. There
+  the checker expects only the senders' and receivers' changes, and bounds what is
+  left of each node's change, its forwarding income: at least 0, and at most the
+  fees of the payments the node neither sent nor received. Together the nodes must
+  have earned exactly the fees paid. A node that settled a TLC it never got paid
+  for falls below 0, and one that was paid for a payment it didn't pass on rises
+  above its bound, or the totals differ.
+
   It counts the payments the nodes themselves report: the final read lists every
   payment session on every node (list_payments), and each payment carries its
   attempt id in a custom record, so payments whose send_payment reply the client
@@ -91,22 +100,38 @@
             :tlcs    (count (:pending_tlcs f))}))))
 
 (defn expected-changes
-  "{node change} implied by `payments` (successful, each joined to its :attempt)."
+  "{node change} implied by `payments` (successful, each joined to its :attempt).
+  With `line?` (the default) `nodes` is the line of channels, and the one node
+  between sender and receiver gets the fee; otherwise only senders and receivers
+  are counted."
+  ([nodes payments]
+   (expected-changes nodes payments true))
+  ([nodes payments line?]
+   (reduce (fn [m {:keys [fee attempt]}]
+             (let [{:keys [from to amount]} attempt
+                   mids                     (when line? (intermediates nodes from to))]
+               (cond-> (-> m
+                           (update from - (+ amount fee))
+                           (update to + amount))
+                 (= 1 (count mids)) (update (first mids) + fee))))
+           (zipmap nodes (repeat 0))
+           payments)))
+
+(defn forwarding-bounds
+  "{node max}: for each node, the fees of the `payments` it neither sent nor
+  received, the most it can have earned forwarding them."
   [nodes payments]
-  (reduce (fn [m {:keys [fee attempt]}]
-            (let [{:keys [from to amount]} attempt
-                  mids                     (intermediates nodes from to)]
-              (cond-> (-> m
-                          (update from - (+ amount fee))
-                          (update to + amount))
-                (= 1 (count mids)) (update (first mids) + fee))))
-          (zipmap nodes (repeat 0))
-          payments))
+  (into {} (for [n nodes]
+             [n (reduce + 0 (for [{:keys [fee attempt]} payments
+                                  :when (not (#{(:from attempt) (:to attempt)} n))]
+                              fee))])))
 
 (defn analyze
-  "The ledger verdict for `nodes` (in line order), the channels at the end of setup
-  {node [channel ...]}, the final read and the history."
-  [nodes initial read history]
+  "The ledger verdict for `nodes`, the channels at the end of setup
+  {node [channel ...]}, the final read and the history. Options:
+    :line?  the channels form a line through `nodes` in order (the default), so
+            each payment's forwarder is known; false for any other graph."
+  [nodes initial read history & [{:keys [line?] :or {line? true}}]]
   (let [listed (:listed read)
         broken (into {} (filter (comp map? val)) listed)]
     (cond
@@ -135,26 +160,39 @@
                          (and attempt (= node (:from attempt)) (:to attempt) (:amount attempt)
                               (intermediates nodes (:from attempt) (:to attempt))))
             counted    (filter countable? success)
-            ; The fee is attributed only when one node forwarded the payment.
-            fee-split  (filter #(< 1 (count (intermediates nodes (get-in % [:attempt :from])
-                                                           (get-in % [:attempt :to]))))
-                               counted)
+            ; On a line the fee is attributed only when one node forwarded the
+            ; payment; on other graphs forwarding income is bounded instead.
+            fee-split  (when line?
+                         (filter #(< 1 (count (intermediates nodes (get-in % [:attempt :from])
+                                                             (get-in % [:attempt :to]))))
+                                 counted))
+            bounds     (when-not line? (forwarding-bounds nodes counted))
             totals     (into {} (for [[node chs] initial]
                                   (let [ids (set (map :channel_id chs))]
                                     [node [(local-total chs ids)
                                            (local-total (get-in read [:channels node]) ids)]])))
-            expected   (expected-changes nodes counted)
+            expected   (expected-changes nodes counted line?)
             node-rows  (into (sorted-map)
                              (for [n nodes]
                                (let [[before after] (get totals n [0 0])
                                      change         (- after before)
                                      exp            (get expected n 0)]
-                                 [n {:initial  before
-                                     :final    after
-                                     :change   change
-                                     :expected exp
-                                     :diff     (- change exp)}])))
-            unbalanced (vec (for [[n row] node-rows :when (not (zero? (:diff row)))] n))
+                                 [n (cond-> {:initial  before
+                                             :final    after
+                                             :change   change
+                                             :expected exp
+                                             :diff     (- change exp)}
+                                      ; Off the line, :diff is forwarding income.
+                                      bounds (assoc :forwarded-max (get bounds n 0)))])))
+            unbalanced (vec (for [[n row] node-rows
+                                  :when (if bounds
+                                          (not (<= 0 (:diff row) (:forwarded-max row)))
+                                          (not (zero? (:diff row))))]
+                              n))
+            fees       (when bounds
+                         {:paid      (reduce + 0 (map :fee counted))
+                          :forwarded (reduce + 0 (map :diff (vals node-rows)))})
+            fees-off?  (and fees (not= (:paid fees) (:forwarded fees)))
             ; What the client saw versus what the sender reports at the end.
             mismatches (vec (for [[id a] attempts
                                   :let   [ps       (get by-id id)
@@ -192,24 +230,27 @@
                                     :let  [a (:attempt p)]
                                     :when (and a (nil? (:hash a)) (nil? (:client a)))]
                                 p))
+            off?       (or (seq unbalanced) fees-off?)
             [valid? outcome] (cond
                                (or (seq mismatches) (seq duplicates)) [false :client-mismatch]
-                               (and (seq unbalanced) (seq incomplete)) [:unknown :incomplete]
-                               (seq unbalanced)                        [false :unbalanced]
+                               (and off? (seq incomplete))             [:unknown :incomplete]
+                               off?                                    [false :unbalanced]
                                :else                                   [true :balanced])]
-        {:valid?             valid?
-         :outcome            outcome
-         :nodes              node-rows
-         :unbalanced-nodes   unbalanced
-         :payments           {:listed           (count payments)
-                              :success          (count success)
-                              :failed           (count (filter #(= "Failed" (:payment-status %)) payments))
-                              :unfinished       (count unfinished)
-                              ; Payments the client had no hash for, found on their sender.
-                              :found-by-listing found}
-         :status-mismatches  mismatches
-         :duplicate-attempts duplicates
-         :incomplete         incomplete}))))
+        (cond-> {:valid?             valid?
+                 :outcome            outcome
+                 :nodes              node-rows
+                 :unbalanced-nodes   unbalanced
+                 :payments           {:listed           (count payments)
+                                      :success          (count success)
+                                      :failed           (count (filter #(= "Failed" (:payment-status %)) payments))
+                                      :unfinished       (count unfinished)
+                                      ; Payments the client had no hash for, found on their sender.
+                                      :found-by-listing found}
+                 :status-mismatches  mismatches
+                 :duplicate-attempts duplicates
+                 :incomplete         incomplete}
+                ; Off the line: fees paid against forwarding income, summed over the nodes.
+                fees (assoc :fees fees))))))
 
 (defn checker
   []
@@ -219,4 +260,5 @@
                       (filter #(and (= :ok (:type %)) (= :read (:f %))))
                       last
                       :value)]
-        (analyze (:nodes test) @(:initial-channels test) read history)))))
+        (analyze (:nodes test) @(:initial-channels test) read history
+                 {:line? (= :line (:topology test :line))})))))
