@@ -50,10 +50,13 @@
       {:logfile logfile
        :pidfile pidfile
        :chdir   (node-dir node)
-       :env     {:FIBER_SECRET_KEY_PASSWORD (str "password" (node-id node))
-                 :RUST_LOG                  (:log-level test "info")
-                 :RUST_BACKTRACE            "1"
-                 :FIBER_NONCE_ORACLE_FILE   nonce-file}}
+       ; :fnn-env holds what faults add (jepsen.fiber.faults/fnn-env): libfaketime
+       ; for the clock fault, say.
+       :env     (merge {:FIBER_SECRET_KEY_PASSWORD (str "password" (node-id node))
+                        :RUST_LOG                  (:log-level test "info")
+                        :RUST_BACKTRACE            "1"
+                        :FIBER_NONCE_ORACLE_FILE   nonce-file}
+                       (:fnn-env test))}
       binary
       :-d (node-dir node))))
 

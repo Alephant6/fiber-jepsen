@@ -20,6 +20,19 @@
         (is (empty? errors))
         (is (= name (:scenario options)))))))
 
+(deftest s1-scenarios
+  (testing "A-B: a later --nodes overrides run.sh's"
+    (doseq [name ["c-01a" "c-05"]]
+      (is (= ["n1" "n2"] (:nodes (:options (parse ["--nodes" "n1,n2,n3" "--scenario" name])))))))
+  (testing "the middle node with invoices, by SIGTERM and by SIGKILL"
+    (let [a (:options (parse ["--scenario" "c-02a"]))
+          b (:options (parse ["--scenario" "c-02b"]))]
+      (is (= [:middle] (:kill-targets a) (:kill-targets b)))
+      (is (= [:invoice] (:pay-kinds a) (:pay-kinds b)))
+      (is (= [:term :kill] [(:kill-signal a) (:kill-signal b)]))))
+  (testing "flashes of 100 ms to 5 s"
+    (is (= [100 5000] (:disconnect-flash (:options (parse ["--scenario" "c-05"])))))))
+
 (deftest expand
   (testing "a scenario's arguments follow the option, so later ones override them"
     (let [{:keys [options errors]} (parse ["--scenario" "c-08" "--time-limit" "60"])]
