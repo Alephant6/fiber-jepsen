@@ -289,4 +289,9 @@
     (testing "stale nodes come from the nemesis ops that list them"
       (is (= #{"n1"} (oc/stale-nodes [{:process :nemesis, :f :restore-state
                                        :value {:node "n1", :stale-store ["n1"]}}
-                                      {:process 0, :f :pay, :value {:stale-store ["n2"]}}]))))))
+                                      {:process 0, :f :pay, :value {:stale-store ["n2"]}}])))
+      (testing "and from no other op: a sorted map with string keys throws on a keyword lookup"
+        (is (= #{} (oc/stale-nodes [{:process :nemesis, :f :reconnect
+                                     :value (sorted-map "n1->n2" :ok)}
+                                    {:process :nemesis, :f :old-state-heal
+                                     :value (sorted-map "n1" :started)}])))))))

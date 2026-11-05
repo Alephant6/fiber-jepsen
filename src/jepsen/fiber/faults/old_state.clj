@@ -49,6 +49,7 @@
   records (the op lists the node under :stale-store), and `excused` keeps the
   fiber checker from failing the run for what the restore made the node forget."
   (:require [clojure.java.io :as io]
+            [clojure.set :as set]
             [clojure.string :as str]
             [clojure.tools.logging :refer [warn]]
             [jepsen [checker :as checker]
@@ -61,7 +62,8 @@
                           [health :as health]
                           [onchain :as onchain]
                           [rpc :as rpc]
-                          [schedule :as schedule]]
+                          [schedule :as schedule]
+                          [topology :as topology]]
             [jepsen.fiber.faults [process :as process]]
             [slingshot.slingshot :refer [try+]])
   (:import (java.util SplittableRandom)))
@@ -84,9 +86,14 @@
 
 (def reconnect-wait-ms
   "How long a :restore-state op waits after the restarted fnn answers before it
-  reads the peers' views (and, with --old-state-force-close, closes): the peers
-  reconnect and the two ends exchange reestablish messages in that time."
+  checks that fnn reconnected to its channels' peers: they reconnect and the two
+  ends exchange reestablish messages in that time."
   15000)
+
+(def reestablish-wait-ms
+  "How long a :restore-state op waits after connecting a peer itself, before it
+  reads the peers' views (and, with --old-state-force-close, closes)."
+  5000)
 
 (def rest-gap-s
   "The gap between a restore and the next save."
@@ -118,15 +125,18 @@
 
 (defn channel-view
   "`node`'s open channels as list_channels reports them: {channel-id {:state
-  :local :remote :commitment}}, :commitment being the hash of the latest
-  commitment transaction the node holds."
+  :local :remote :commitment :peer}}, :commitment being the hash of the latest
+  commitment transaction the node holds and :peer the remote pubkey. A plain
+  map, not a sorted one: other code looks keys like :error up in op values, and
+  a sorted map with string keys throws on a keyword lookup."
   [node]
-  (into (sorted-map)
+  (into {}
         (for [ch (:channels (rpc/call node "list_channels" {} {:timeout 10000}))]
           [(:channel_id ch) {:state      (get-in ch [:state :state_name])
                              :local      (fc/amount ch :local_balance)
                              :remote     (fc/amount ch :remote_balance)
-                             :commitment (:latest_commitment_transaction_hash ch)}])))
+                             :commitment (:latest_commitment_transaction_hash ch)
+                             :peer       (:pubkey ch)}])))
 
 (defn- try-view
   [node]
@@ -177,6 +187,37 @@
        :ok
        (catch Exception e (or (ex-message e) (str (class e))))))
 
+(defn- connected?
+  [node pubkey]
+  (try (boolean (some #(= pubkey (:pubkey %))
+                      (:peers (rpc/call node "list_peers" {} {:timeout 10000}))))
+       (catch Exception _ false)))
+
+(defn reconnect!
+  "Connects each node in `peers` that fnn on `node` isn't connected to, from the
+  peer's side, as an operator who restored a node would: {peer :by-itself |
+  :connected | the error}. fnn dials its channels' peers when it starts
+  (MaintainConnections, then every 20 min), at the addresses its store holds; a
+  store saved before it learned a peer's address can't, and the peer doesn't
+  dial back on its own."
+  [test node peers]
+  (let [pubkeys @(:pubkeys test)
+        info    (delay (rpc/call node "node_info" {} {:timeout 10000}))]
+    (into {}
+          (for [p peers]
+            [p (if (connected? node (get pubkeys p))
+                 :by-itself
+                 (try (rpc/call p "connect_peer" {:address (topology/p2p-address node @info)}
+                                {:timeout 10000})
+                      :connected
+                      (catch Exception e (str "connect_peer: " (or (ex-message e) (class e))))))]))))
+
+(defn view-peers
+  "The nodes whose pubkeys `view`'s channels have as their peer."
+  [test view]
+  (let [by-key (set/map-invert @(:pubkeys test))]
+    (vec (sort (distinct (keep (fn [[_ ch]] (by-key (:peer ch))) view))))))
+
 (defn moved
   "Ids of the channels whose latest commitment differs between `before` and
   `after` (channel views): the restored node now holds an older one."
@@ -204,6 +245,7 @@
   (let [mode    (:old-state-restore test :raw)
         before  (try-view node)
         _       (swap! down conj node)
+        _       (swap! onchain/restored-nodes conj node)
         _       (fdb/crash!)
         fp-pre  (fingerprint (fdb/store-dir node))
         printed (restore-store! node mode)
@@ -214,8 +256,12 @@
         _       (swap! down disj node)
         after   (try-view node)
         _       (Thread/sleep reconnect-wait-ms)
+        partners (if (:error before) [] (view-peers test before))
+        links   (try (reconnect! test node partners)
+                     (catch Exception e {:error (or (ex-message e) (str (class e)))}))
+        _       (when (some #{:connected} (vals links)) (Thread/sleep reestablish-wait-ms))
         ids     (if (:error after) [] (keys after))
-        peers   (into (sorted-map)
+        peers   (into {}
                       (for [p (:nodes test) :when (not= p node)
                             :let [v (try-view p)
                                   v (if (:error v) v (select-keys v ids))]
@@ -223,7 +269,7 @@
                         [p v]))
         later   (try-view node)
         closes  (when (and (:old-state-force-close test) (not (:error later)))
-                  (into (sorted-map) (for [[id _] later] [id (force-close! node id)])))]
+                  (into {} (for [[id _] later] [id (force-close! node id)])))]
     (cond-> {:node         node
              :mode         mode
              :saved        saved
@@ -231,6 +277,7 @@
              :after        after
              :later        later
              :peers        peers
+             :reconnect    links
              :started      up
              :moved        (if (or (:error before) (:error after)) [] (moved before after))
              :fingerprints {:saved (:fingerprint saved), :before fp-pre, :restored fp-post}
@@ -249,6 +296,7 @@
 
       n/Nemesis
       (setup! [this test]
+        (reset! onchain/restored-nodes #{})
         (c/on-nodes test (fn [_ _] (c/su (c/exec :rm :-rf save-dir))))
         this)
 
@@ -270,7 +318,7 @@
             :old-state-heal
             (let [nodes (vec @down)]
               (assoc op :value
-                     (into (sorted-map)
+                     (into {}
                            (when (seq nodes)
                              (c/on-nodes test nodes
                                          (fn [test node]
@@ -344,12 +392,18 @@
 (def ^:private ansi
   #"\u001b\[[0-9;]*m")
 
+(defn- add-new
+  [v x]
+  (if (or (nil? x) (some #{x} v)) v (conj v x)))
+
 (defn log-findings
   "What fnn logged about old state in `lines`: reestablish handshakes whose
   commitment numbers are more than one apart (the numbers as each end printed
   them: its own local and remote, then the peer's), failed reestablishes and
-  Stale audits, revoked commitments the watchtower found, and the revocation
-  transactions it sent or failed to send."
+  Stale audits, revoked commitments the watchtower found, the revocation
+  transactions it sent or failed to send, and channels whose closing commitment
+  it couldn't settle because none of its settlement data matched the commitment
+  on chain (watchtower/actor.rs, \"Cannot recover settlement snapshot\")."
   [lines]
   (reduce
     (fn [acc raw]
@@ -370,12 +424,20 @@
                                                         :peer  [(parse-long sc) (parse-long sd)]})
               (str/includes? line "Passive audit passed") (update acc :stale-audits-passed inc)
               (str/includes? line "Found an old version commitment tx submitted by remote")
-              (update acc :revoked-found conj (second (re-find #"remote: (0x[0-9a-f]+)" line)))
+              (update acc :revoked-found add-new (second (re-find #"remote: (0x[0-9a-f]+)" line)))
               (re-find #"Revocation tx: .* sent" line) (update acc :revocations-sent inc)
-              (re-find #"Failed to (send|build) revocation tx" line) (update acc :revocations-failed inc)
+              ; The watchtower sends the same revocation every check until it
+              ; confirms; the pool turning down a duplicate isn't a failure.
+              (and (re-find #"Failed to (send|build) revocation tx" line)
+                   (not (str/includes? line "PoolRejectedDuplicatedTransaction")))
+              (update acc :revocations-failed inc)
+              (str/includes? line "Cannot recover settlement snapshot for channel")
+              (update acc :settlement-unrecoverable add-new
+                      (second (re-find #"Hash256\((0x[0-9a-f]+)\)" line)))
               :else acc)))))
     {:reestablish-failed 0, :gaps [], :stale-audits-failed [], :stale-audits-passed 0
-     :revoked-found [], :revocations-sent 0, :revocations-failed 0}
+     :revoked-found [], :revocations-sent 0, :revocations-failed 0
+     :settlement-unrecoverable []}
     lines))
 
 (defn- read-findings
@@ -409,7 +471,10 @@
                         commitment went through
     :wrong-punisher     a revocation that paid the restored node
     :indistinguishable  a settled commitment whose old and latest balances
-                        agree (within the fees), so the payouts can't tell."
+                        agree (within the fees), so the payouts can't tell.
+  `check` turns :unsettled into :restored-share-locked when the restored node
+  logged that it couldn't settle the channel (its settlement data doesn't match
+  the commitment on chain): its share stays in the commitment cell."
   [settle node id old]
   (let [trace   (get-in settle [:traces id])
         ends    (get (fc/by-channel (:channels settle)) id)
@@ -488,13 +553,17 @@
                              :when (map? after)
                              [id old] after
                              :when (not (:error after))]
-                         [id (assoc (if settle
-                                      (chain-outcome settle node id old)
-                                      {:status :unknown, :error "no --onchain settle read"})
-                                    :restored node)]))
+                         [id (let [o (if settle
+                                       (chain-outcome settle node id old)
+                                       {:status :unknown, :error "no --onchain settle read"})]
+                               (cond-> (assoc o :restored node)
+                                 (and (= :unsettled (:status o))
+                                      (some #{id} (get-in findings [node :settlement-unrecoverable])))
+                                 (assoc :status :restored-share-locked)))]))
         by       (group-by (comp :status val) outcomes)
         bad      (select-keys by [:revoked-unpunished :wrong-punisher])
-        pending  (select-keys by [:unknown :open :unsettled :indistinguishable])
+        pending  (select-keys by [:unknown :open :unsettled :indistinguishable
+                                  :restored-share-locked])
         took     (filter #(nil? (effect %)) restores)]
     {:valid?    (cond (seq bad)                        false
                       (or (empty? took) (seq pending)) :unknown
@@ -506,6 +575,7 @@
                                 :time        (:time op)
                                 :took-effect (nil? (effect op))
                                 :moved       (:moved v)
+                                :reconnect   (:reconnect v)
                                 :states      (when (map? (:later v))
                                                (into (sorted-map)
                                                      (for [[id ch] (:later v) :when (map? ch)]
@@ -534,8 +604,11 @@
   (loop [[op & more] (seq history), saves {}, out {}]
     (if (nil? op)
       out
-      (let [node (get-in op [:value :node])]
+      (let [node (when (#{:save-state :restore-state} (:f op)) (get-in op [:value :node]))]
         (cond
+          (nil? node)
+          (recur more saves out)
+
           (and (= :save-state (:f op)) (map? (:value op)) (:fingerprint (:value op)))
           (recur more (assoc saves node (:time op)) out)
 

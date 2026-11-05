@@ -63,12 +63,21 @@
              "  2026-11-05T17:16:47Z ERROR fnn::fiber::channel: Pubkey(02ab) Error while processing channel message: InvalidParameter(\"reestablish channel message with invalid commitment numbers\") with message: x"
              "  2026-11-05T17:16:48Z ERROR fnn::fiber::channel: Audit Failed for Stale channel: Local(L:12, R:13), Peer(L:41, R:40)"
              "  2026-11-05T17:16:50Z  WARN fnn::watchtower::actor: Found an old version commitment tx submitted by remote: 0xabc123"
-             "  2026-11-05T17:16:50Z  INFO fnn::watchtower::actor: Revocation tx: TransactionView { } sent, tx_hash: Byte32(0xdef)"])]
+             "  2026-11-05T17:16:50Z  INFO fnn::watchtower::actor: Revocation tx: TransactionView { } sent, tx_hash: Byte32(0xdef)"
+             "  2026-11-05T17:16:51Z  WARN fnn::watchtower::actor: Found an old version commitment tx submitted by remote: 0xabc123"
+             "  2026-11-05T17:16:51Z ERROR fnn::watchtower::actor: Failed to send revocation tx: TransactionView { }, error: Rpc(Error { code: ServerError(-1107), message: \"PoolRejectedDuplicatedTransaction: Transaction(Byte32(0xdef)) already exists in transaction_pool\" })"
+             "  2026-11-05T17:16:52Z ERROR fnn::watchtower::actor: Failed to send revocation tx: TransactionView { }, error: Rpc(Error { message: \"Not enough capacity\" })"
+             "  2026-11-05T17:16:53Z ERROR fnn::watchtower::actor: Cannot recover settlement snapshot for channel Hash256(0x03d7)"
+             "  2026-11-05T17:16:54Z ERROR fnn::watchtower::actor: Cannot recover settlement snapshot for channel Hash256(0x03d7)"])]
     (is (= 1 (:reestablish-failed f)))
     (is (= [{:local [40 41], :peer [12 13]}] (:gaps f)))
     (is (= [{:local [12 13], :peer [41 40]}] (:stale-audits-failed f)))
-    (is (= ["0xabc123"] (:revoked-found f)))
-    (is (= 1 (:revocations-sent f)))))
+    (testing "the watchtower finds the same commitment every check: listed once"
+      (is (= ["0xabc123"] (:revoked-found f))))
+    (is (= 1 (:revocations-sent f)))
+    (testing "the pool turning down the same revocation again isn't a failure"
+      (is (= 1 (:revocations-failed f))))
+    (is (= ["0x03d7"] (:settlement-unrecoverable f)))))
 
 (def locks {"n1" "L1", "n2" "L2", "n3" "L3"})
 
@@ -145,7 +154,15 @@
     (is (false? (:valid? (os/check [restore cheat] {}))))
     (testing "no settle read (no --onchain), or no restore: unknown"
       (is (= :unknown (:valid? (os/check [restore] {}))))
-      (is (= :unknown (:valid? (os/check [punish] {})))))))
+      (is (= :unknown (:valid? (os/check [punish] {})))))
+    (testing "a share the restored node can't settle: locked, not a cheat"
+      (let [locked {:type :ok, :f :settle
+                    :value (assoc-in (settle [commit (tx "0xs" [["C1" 996]] [["L2" 100] ["C2" 895]])])
+                                     [:traces "0xc1" :live] [{:index 1, :lock "C2", :capacity 895}])}]
+        (is (= {:unsettled 1} (:statuses (os/check [restore locked] {}))))
+        (let [r (os/check [restore locked] {"n1" {:settlement-unrecoverable ["0xc1"]}})]
+          (is (= {:restored-share-locked 1} (:statuses r)))
+          (is (= :unknown (:valid? r))))))))
 
 (deftest excuses
   (let [history [{:process :nemesis, :type :info, :f :save-state, :time 100
@@ -162,6 +179,10 @@
                  :probe-failures      [{:from "n2", :to "n1"} {:from "n2", :to "n3"}]}
         x       (os/excuse r history)]
     (is (= {"n1" 100} (os/restored history)))
+    (testing "other ops' values aren't looked into (sorted maps with string keys throw)"
+      (is (= {"n1" 100} (os/restored (cons {:process :nemesis, :type :info, :f :reconnect
+                                            :value (sorted-map "n1->n2" :ok)}
+                                           history)))))
     (testing "the restored node's channels, its own lost payments, probes to it"
       (is (= ["0xc2"] (map :channel (:channel-problems x))))
       (is (empty? (:unfinished-payments x)))

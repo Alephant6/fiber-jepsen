@@ -368,12 +368,14 @@
 
 (defn stale-nodes
   "Nodes whose store a fault put back to an older copy during the run
-  (jepsen.fiber.faults.old-state): a completed nemesis op lists them under
-  :stale-store in its value. Their records of their channels are older than the
-  chain."
+  (jepsen.fiber.faults.old-state): a completed :restore-state op lists them
+  under :stale-store in its value. Their records of their channels are older
+  than the chain. Only that op's value is looked into: other faults' values can
+  be sorted maps with string keys, which throw on a keyword lookup."
   [history]
   (set (for [op    history
-             :when (and (= :nemesis (:process op)) (map? (:value op)))
+             :when (and (= :nemesis (:process op)) (= :restore-state (:f op))
+                        (map? (:value op)))
              n     (:stale-store (:value op))]
          n)))
 
@@ -428,9 +430,17 @@
   [locks]
   (into (sorted-map) (for [[n script] locks] [n (chain/capacity-of script)])))
 
+(defonce ^{:doc "Nodes the old-state fault restarted from an old copy of their store
+  in this run (it and baseline! reset this). close-all! asks the other end first:
+  a force close from a restored node broadcasts a revoked commitment, which only
+  --old-state-force-close should do."}
+  restored-nodes
+  (atom #{}))
+
 (defn baseline!
   "Every node's wallet before the faults."
   [test]
+  (reset! restored-nodes #{})
   (let [locks (node-locks test)]
     {:locks   (update-vals locks chain/lock-key)
      :wallets (wallets locks)}))
@@ -463,9 +473,10 @@
        (catch Exception e (or (ex-message e) (str (class e))))))
 
 (defn- request-close!
-  "Asks for one close, from the opener first and then alternating, up to 6 tries."
+  "Asks for one close, from the opener first and then alternating, up to 6 tries;
+  from the end that isn't a restored node first, if one is."
   [id {:keys [opener acceptor]} force?]
-  (let [nodes (cycle (remove nil? [opener acceptor]))]
+  (let [nodes (cycle (sort-by #(contains? @restored-nodes %) (remove nil? [opener acceptor])))]
     (loop [tries 1, [node & more] nodes]
       (let [result (shutdown! node id force?)]
         (if (or (= :ok result) (<= 6 tries))
@@ -475,7 +486,8 @@
 
 (defn close-all!
   "Closes every channel that is ready on either end: cooperatively, and by force
-  (from the opener) when it isn't Closed on both ends after coop-wait-ms."
+  (from the opener, or from the end that isn't a restored node) when it isn't
+  Closed on both ends after coop-wait-ms."
   [test]
   (let [open     (open-channels (read-channels test))
         requests (into (sorted-map) (for [[id who] open] [id (request-close! id who false)]))
