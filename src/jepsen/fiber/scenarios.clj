@@ -5,13 +5,16 @@
   arguments after it override them:
 
     scripts/run.sh --scenario c-01b --time-limit 60"
-  (:require [clojure.string :as str]))
+  (:require [cheshire.core :as json]
+            [clojure.string :as str]))
 
 (def scenarios
   "Name -> {:priority  the plan's priority
             :plan      the plan's fault, abridged
             :args      the arguments that run it here
-            :differs   where this suite departs from the plan}
+            :differs   where this suite departs from the plan
+            :compose   optional: the docker/docker-compose.NAME.yml file the
+                       scenario needs, which scripts/run.sh adds with --compose}
   A scenario is listed once the suite covers it. Keep the names in order."
   (sorted-map
     "c-01a" {:priority :p0
@@ -201,6 +204,7 @@
     "c-15"  {:priority :p1
              :plan     (str "CCH + LND, cross-chain swaps; kill CCH or disconnect LND at random."
                             " Every order ends completed or refunded, and both sides' funds agree")
+             :compose  "cch"
              :args     ["--cch" "--faults" "cch-kill,lnd-disconnect" "--nemesis-interval" "20"
                         "--time-limit" "300" "--swap-rate" "0.5" "--rate" "2" "--concurrency" "6"
                         "--quiesce" "60"]
@@ -237,3 +241,37 @@
 
           :else
           (recur more (conj out a)))))
+
+(defn select
+  "The names of the scenarios `spec` asks for: `all`, a priority (`p0`, `p1`,
+  `p2`), or comma-separated names and priorities. Throws for an unknown name."
+  [spec]
+  (let [parts (remove str/blank? (map str/trim (str/split (or spec "all") #",")))]
+    (->> (for [p parts]
+           (cond (= "all" p)          (keys scenarios)
+                 (re-matches #"p\d" p) (for [[n s] scenarios
+                                            :when (= (keyword p) (:priority s))]
+                                        n)
+                 :else                (do (scenario-args p) [p])))
+         (apply concat)
+         distinct
+         sort
+         vec)))
+
+(defn matrix
+  "The scenarios `spec` asks for (see `select`), as a GitHub Actions matrix:
+  [{:name :priority :args}], where :args is the string scripts/run.sh takes."
+  [spec]
+  (vec (for [n (select spec)
+             :let [{:keys [priority compose]} (get scenarios n)]]
+         {:name     n
+          :priority (name priority)
+          :args     (str/join " " (concat (when compose ["--compose" compose])
+                                          ["--scenario" n]))})))
+
+(defn -main
+  "Prints `matrix` of the first argument (default all) as JSON, for
+  .github/workflows/matrix.yml."
+  [& [spec]]
+  (println (json/generate-string (matrix spec)))
+  (flush))

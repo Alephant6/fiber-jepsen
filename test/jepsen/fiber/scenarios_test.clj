@@ -56,3 +56,15 @@
            (set (for [[name s] scenarios/scenarios
                       :when (not (:ledger (:options (parse ["--scenario" name]))))]
                   name))))))
+
+(deftest matrix
+  (testing "all, a priority, or names"
+    (is (= (sort (keys scenarios/scenarios)) (scenarios/select "all") (scenarios/select nil)))
+    (is (every? #(= :p0 (:priority (scenarios/scenarios %))) (scenarios/select "p0")))
+    (is (= ["c-01b" "c-04" "c-08"] (scenarios/select "c-08, c-04,c-01b,c-04")))
+    (is (= (scenarios/select "p1") (scenarios/select "p1,c-08")))
+    (is (thrown? clojure.lang.ExceptionInfo (scenarios/select "c-99"))))
+  (testing "run.sh's arguments: a scenario's compose file, then the scenario"
+    (is (= {:name "c-15", :priority "p1", :args "--compose cch --scenario c-15"}
+           (first (scenarios/matrix "c-15"))))
+    (is (= "--scenario c-04" (:args (first (scenarios/matrix "c-04")))))))

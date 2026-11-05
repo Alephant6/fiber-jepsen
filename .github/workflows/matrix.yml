@@ -1,0 +1,165 @@
+name: Matrix
+
+# The fault matrix (L2 of the CI plan): every scenario of the chaos-test plan
+# (src/jepsen/fiber/scenarios.clj), or a selection, against one Fiber commit.
+#
+# - plan: resolves the Fiber ref to a commit, so every job tests the same one
+#   even if a branch moves, and lists the scenarios as a job matrix.
+# - build: a run without faults through jepsen.yml. It builds fnn and the devnet
+#   snapshot once and caches them, so the scenario jobs restore them instead of
+#   each building its own, and it checks the harness on that commit first.
+# - scenario: one jepsen.yml job per scenario, all in parallel, each with
+#   `runs` runs. A scenario's failure doesn't stop the others.
+# - report: one table of every run's verdict and failed checks, from the
+#   scenario jobs' runs artifacts, in the run's summary and as an artifact.
+#
+# Manual only for now. When and how it should run (on a schedule against
+# develop, on demand from a Fiber pull request, or inside an existing flow) and
+# where results go are open question 4 to the team.
+on:
+  workflow_dispatch:
+    inputs:
+      fiber-repository:
+        description: The Fiber repository
+        default: nervosnetwork/fiber
+      fiber-ref:
+        description: The Fiber commit, branch or tag
+        default: develop
+      scenarios:
+        description: all, a priority (p0, p1, p2), or comma-separated scenario names and priorities
+        default: all
+      runs:
+        description: Runs per scenario
+        default: '2'
+      upload-store:
+        description: Upload every scenario's store also when all its runs pass
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      fiber-repository:
+        type: string
+        default: nervosnetwork/fiber
+      fiber-ref:
+        type: string
+        default: develop
+      scenarios:
+        type: string
+        default: all
+      runs:
+        type: string
+        default: '2'
+      upload-store:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      fiber-repository: ${{ steps.ref.outputs.repository }}
+      fiber-ref: ${{ steps.ref.outputs.ref }}
+      fiber-sha: ${{ steps.ref.outputs.sha }}
+      runs: ${{ steps.ref.outputs.runs }}
+      matrix: ${{ steps.list.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: ${{ job.workflow_repository || github.repository }}
+          ref: ${{ job.workflow_sha || github.sha }}
+      # The settings, with the defaults also for an event without inputs.
+      - id: ref
+        env:
+          REPO: ${{ inputs.fiber-repository || 'nervosnetwork/fiber' }}
+          REF: ${{ inputs.fiber-ref || 'develop' }}
+          RUNS: ${{ inputs.runs || '2' }}
+        run: |
+          echo "repository=$REPO" >>"$GITHUB_OUTPUT"
+          echo "ref=$REF" >>"$GITHUB_OUTPUT"
+          echo "runs=$RUNS" >>"$GITHUB_OUTPUT"
+          if printf '%s' "$REF" | grep -qE '^[0-9a-f]{40}$'; then
+            sha="$REF"
+          else
+            sha="$(git ls-remote "https://github.com/$REPO" "refs/heads/$REF" "refs/tags/$REF" "$REF" | head -1 | cut -f1)"
+          fi
+          [ -n "$sha" ] || { echo "::error::no commit for $REPO $REF"; exit 1; }
+          echo "sha=$sha" >>"$GITHUB_OUTPUT"
+          echo "Fiber $REPO $REF = $sha"
+      # The scenario list comes from scenarios.clj itself, through lein in the
+      # control node's image (docker/control/Dockerfile), with ci.yml's cache.
+      - uses: actions/cache@v5
+        with:
+          path: ~/.m2/repository
+          key: m2-${{ hashFiles('project.clj') }}
+          restore-keys: m2-
+      - id: list
+        env:
+          SCENARIOS: ${{ inputs.scenarios || 'all' }}
+        run: |
+          matrix="$(docker run --rm -v "$PWD:/w" -w /w -v "$HOME/.m2:/root/.m2" \
+            clojure:temurin-21-lein-bookworm lein run -m jepsen.fiber.scenarios "$SCENARIOS" | tail -1)"
+          echo "$matrix"
+          echo "matrix=$matrix" >>"$GITHUB_OUTPUT"
+
+  build:
+    name: build
+    needs: plan
+    uses: ./.github/workflows/jepsen.yml
+    with:
+      fiber-repository: ${{ needs.plan.outputs.fiber-repository }}
+      fiber-ref: ${{ needs.plan.outputs.fiber-sha }}
+      args: --time-limit 45 --faults none --ledger
+      label: build
+
+  scenario:
+    name: ${{ matrix.name }}
+    needs: [plan, build]
+    # The scenarios run even if the run without faults failed: its caches are
+    # saved before its run, and a scenario's own result says more than a skip.
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    uses: ./.github/workflows/jepsen.yml
+    with:
+      fiber-repository: ${{ needs.plan.outputs.fiber-repository }}
+      fiber-ref: ${{ needs.plan.outputs.fiber-sha }}
+      args: ${{ matrix.args }}
+      runs: ${{ fromJSON(needs.plan.outputs.runs) }}
+      label: ${{ matrix.name }}
+      upload-store: ${{ inputs.upload-store == true }}
+
+  report:
+    name: report
+    needs: [plan, build, scenario]
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: ${{ job.workflow_repository || github.repository }}
+          ref: ${{ job.workflow_sha || github.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: '*-runs'
+          path: runs
+          merge-multiple: true
+      - env:
+          FIBER_REPOSITORY: ${{ needs.plan.outputs.fiber-repository }}
+          FIBER_REF: ${{ needs.plan.outputs.fiber-ref }}
+          FIBER_SHA: ${{ needs.plan.outputs.fiber-sha }}
+          MATRIX: ${{ needs.plan.outputs.matrix }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python3 scripts/matrix_report.py runs | tee matrix-report.md >>"$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: matrix-report
+          path: matrix-report.md
+          retention-days: 30

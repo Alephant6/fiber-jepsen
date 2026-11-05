@@ -8,9 +8,11 @@
   node. Here fnn runs under libfaketime instead (jepsen.fiber.db adds the
   environment from `env` when this fault is in use): the library takes the
   offset from a file, which a :clock-jump op rewrites, and rereads it within a
-  second. Only the wall clock (CLOCK_REALTIME) moves; monotonic clocks, which
-  fnn's timers and its 30 s peer deadline use, keep running, as when NTP steps
-  a real clock. The offset outlives restarts: a killed fnn starts with it.
+  second. Only the wall clock (CLOCK_REALTIME) moves; monotonic clocks keep
+  running, as when NTP steps a real clock. fnn measures its 30 s peer-response
+  deadline with the wall clock (SystemTime), so a forward jump of more than
+  30 s while a channel waits for an ack can make fnn force-close it. The offset
+  outlives restarts: a killed fnn starts with it.
 
   After each change the op asks fnn for an invoice and compares the invoice's
   timestamp, from fnn's clock, with the control node's, so a run shows whether
