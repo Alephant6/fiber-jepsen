@@ -17,11 +17,6 @@ name: Matrix
 # develop, on demand from a Fiber pull request, or inside an existing flow) and
 # where results go are open question 4 to the team.
 on:
-  # TEMPORARY, to run this workflow from its draft pull request (workflow_dispatch
-  # works only once the file is on main): every scenario on Fiber develop's head,
-  # and the power job below. Remove before merging.
-  pull_request:
-    paths: ['.github/workflows/matrix.yml']
   workflow_dispatch:
     inputs:
       fiber-repository:
@@ -140,23 +135,9 @@ jobs:
       label: ${{ matrix.name }}
       upload-store: ${{ inputs.upload-store == true }}
 
-  # TEMPORARY: power loss with synced store writes (it needs a Fiber build with
-  # #1703, which develop has). Remove before merging.
-  power:
-    name: power-sync-on
-    needs: [plan, build]
-    if: ${{ !cancelled() && needs.plan.result == 'success' && github.event_name == 'pull_request' }}
-    uses: ./.github/workflows/jepsen.yml
-    with:
-      fiber-repository: ${{ needs.plan.outputs.fiber-repository }}
-      fiber-ref: ${{ needs.plan.outputs.fiber-sha }}
-      args: --faults power --store-sync-writes true --rate 10 --nemesis-interval 20 --time-limit 180 --ledger
-      runs: 2
-      label: power-sync-on
-
   report:
     name: report
-    needs: [plan, build, scenario, power]
+    needs: [plan, build, scenario]
     if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
