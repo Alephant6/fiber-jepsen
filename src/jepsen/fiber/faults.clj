@@ -8,7 +8,10 @@
     :package  (fn [opts]) -> a nemesis package in jepsen.nemesis.combined's shape,
               of which the test uses :nemesis, :final-generator and :perf;
     :ops      (fn [r opts]) -> its endless fault operations, drawn from the
-              SplittableRandom `r` alone, so that the seed fixes them.
+              SplittableRandom `r` alone, so that the seed fixes them;
+    :gaps     optional, (fn [streams opts]) -> the gaps in ns between its ops,
+              for a fault that sets how long each fault lasts. Without it, gaps
+              average :nemesis-interval seconds, from the fault's gap stream.
   Adding a fault is a new namespace and a line in `registry`."
   (:require [jepsen.generator :as gen]
             [jepsen.nemesis.combined :as nc]
@@ -56,12 +59,14 @@
 
 (defn generator
   "The faults in use, each a stream of operations drawn from the seed and paced
-  by gaps averaging :nemesis-interval seconds, combined as nc/compose-packages
-  combines generators. Nil without faults."
+  by gaps averaging :nemesis-interval seconds (or the fault's own :gaps),
+  combined as nc/compose-packages combines generators. Nil without faults."
   [streams opts]
-  (let [gens (for [{:keys [stream ops]} (in-use opts)]
-               (schedule/paced (schedule/gaps (schedule/gaps-stream streams stream)
-                                              (:nemesis-interval opts))
+  (let [gens (for [{:keys [stream ops gaps]} (in-use opts)]
+               (schedule/paced (if gaps
+                                 (gaps streams opts)
+                                 (schedule/gaps (schedule/gaps-stream streams stream)
+                                                (:nemesis-interval opts)))
                                (ops (schedule/stream streams stream) opts)))]
     (when (seq gens)
       (apply gen/any gens))))

@@ -20,7 +20,8 @@
                           [scenarios :as scenarios]
                           [schedule :as schedule]
                           [topology :as topology]]
-            [jepsen.fiber.faults.packet :as packet])
+            [jepsen.fiber.faults [packet :as packet]
+                                 [partition :as partition]])
   (:gen-class))
 
 (def supported-faults
@@ -149,6 +150,17 @@
     :default  0
     :parse-fn parse-long
     :validate [#(and % (<= 0 % 100)) "Must be 0 to 100"]]
+   [nil "--partition-targets TARGETS" (str "With --faults partition, comma-separated target specs to"
+                                           " choose from: one (one node), half (a random half of the"
+                                           " nodes).")
+    :default  [:one]
+    :parse-fn keywords
+    :validate [#(every? partition/target-specs %) (str "Must be a subset of " partition/target-specs)]]
+   [nil "--partition-duration SECONDS" (str "With --faults partition, how long each partition lasts,"
+                                            " or a range MIN-MAX drawn per partition. Default: until"
+                                            " the next fault op, like other faults (at most 100 s).")
+    :parse-fn partition/parse-duration
+    :validate [(fn [[lo hi]] (and lo hi (< 0 lo) (<= lo hi))) "Must be S or MIN-MAX, 0 < MIN <= MAX"]]
    [nil "--nonce-check" (str "Check MuSig2 nonce use. Needs an fnn built with the nonce-oracle"
                              " feature (scripts/build-fnn-nonce-oracle.sh).")]
    [nil "--close" (str "Halfway through the faults, ask every channel to close cooperatively, and"
