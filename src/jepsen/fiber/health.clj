@@ -188,16 +188,28 @@
       (str/replace #"\b\d+\b" "N")
       (subs* 0 160)))
 
+(defn actor-kind
+  "For ractor's line about an actor that panicked in a handler (the process
+  lives on, the actor doesn't), the actor's kind: the first word of its name,
+  such as \"Channel\" or \"Payment\", or \"unnamed\"; nil for another line."
+  [msg]
+  (when-let [[_ name] (re-find #"^Actor unexpectedly panicked \(id: Actor \{ name: (None|Some\(\"[A-Za-z]+)" msg)]
+    (if (= "None" name) "unnamed" (subs name 6))))
+
 (defn parse-log
   "Facts from fnn's log, a seq of lines: every panic as {:thread, :at, :message,
   :after, :shutdown?} (:after is the timestamp of the last log line before it;
   :shutdown? says fnn had logged that it got SIGTERM or SIGINT and was shutting
-  down), the number of ERROR lines and their most frequent classes, and how many
-  times fnn started (its \"Starting node\" line)."
+  down), the number of ERROR lines and their most frequent classes, how many
+  times fnn started (its \"Starting node\" line), and which kinds of actor
+  ractor reported as panicked (:actor-panics, {kind count}; the kind is the
+  actor name's first word, such as Channel or Payment)."
   [lines]
-  (loop [[line & more] lines, last-ts nil, stopping? false, panics [], errors {}, starts 0]
+  (loop [[line & more] lines, last-ts nil, stopping? false, panics [], errors {}, starts 0
+         actors {}]
     (if (nil? line)
       {:panics panics
+       :actor-panics actors
        :errors (reduce + 0 (vals errors))
        :top-errors (->> errors (sort-by (comp - val)) (take 5) vec)
        :starts starts}
@@ -215,11 +227,13 @@
                               :message (some-> (first more) (str/replace ansi "") str/trim (subs* 0 300))}
                              {:thread thread, :at at})]
             (recur more ts stopping? (conj panics (assoc panic :after last-ts :shutdown? stopping?))
-                   errors starts))
-          (let [[_ msg] (re-find #"\sERROR\s+(?:\w+::)*\w+:\s*(.*)$" line)]
+                   errors starts actors))
+          (let [[_ msg] (re-find #"\sERROR\s+(?:\w+::)*\w+:\s*(.*)$" line)
+                actor   (when msg (actor-kind msg))]
             (recur more ts (cond start? false stop? true :else stopping?) panics
                    (if msg (update errors (error-class msg) (fnil inc 0)) errors)
-                   (cond-> starts start? inc))))))))
+                   (cond-> starts start? inc)
+                   (cond-> actors actor (update actor (fnil inc 0))))))))))
 
 (defn read-log
   "parse-log of `node`'s fnn.log in the test's store, or nil without one."
@@ -299,6 +313,10 @@
                                         down? (assoc :during-shutdown true))))
                                (sort-by (juxt :node :at))
                                vec)
+     ; A channel actor that panicked stops answering its peer, which force-closes
+     ; the channel 30 s later; the node's RPC can still look healthy.
+     :panicked-actors     (into (sorted-map) (for [[n l] logs :when (seq (:actor-panics l))]
+                                               [n (into (sorted-map) (:actor-panics l))]))
      :oom-kills           ooms
      :unexpected-restarts (vec restarts)
      :fnn-starts          (into (sorted-map) (for [[n l] logs :when l] [n (:starts l)]))
