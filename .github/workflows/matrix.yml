@@ -17,11 +17,6 @@ name: Matrix
 # develop, on demand from a Fiber pull request, or inside an existing flow) and
 # where results go are open question 4 to the team.
 on:
-  # TEMPORARY, to test this workflow on its draft pull request (workflow_dispatch
-  # works only once the file is on main): every scenario on the pinned build,
-  # and the power job below. Remove before merging.
-  pull_request:
-    paths: ['.github/workflows/matrix.yml']
   workflow_dispatch:
     inputs:
       fiber-repository:
@@ -81,8 +76,7 @@ jobs:
       - id: ref
         env:
           REPO: ${{ inputs.fiber-repository || 'nervosnetwork/fiber' }}
-          # TEMPORARY: the pull request's test runs the pinned build.
-          REF: ${{ inputs.fiber-ref || (github.event_name == 'pull_request' && 'ae6f7d3440c23025385537c1519d2af607f3b6a0') || 'develop' }}
+          REF: ${{ inputs.fiber-ref || 'develop' }}
           RUNS: ${{ inputs.runs || '2' }}
         run: |
           echo "repository=$REPO" >>"$GITHUB_OUTPUT"
@@ -141,22 +135,9 @@ jobs:
       label: ${{ matrix.name }}
       upload-store: ${{ inputs.upload-store == true }}
 
-  # TEMPORARY: power loss with synced store writes after the merges (it needs a
-  # Fiber build with #1703, so not the pinned one). Remove before merging.
-  power:
-    name: power-sync-on
-    if: ${{ github.event_name == 'pull_request' }}
-    uses: ./.github/workflows/jepsen.yml
-    with:
-      fiber-repository: nervosnetwork/fiber
-      fiber-ref: 4777d5d64b8cd636c7b08850165e67bbc83690be
-      args: --faults power --store-sync-writes true --rate 10 --nemesis-interval 20 --time-limit 180 --ledger
-      runs: 2
-      label: power-sync-on
-
   report:
     name: report
-    needs: [plan, build, scenario, power]
+    needs: [plan, build, scenario]
     if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
