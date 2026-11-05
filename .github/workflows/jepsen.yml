@@ -219,6 +219,22 @@ jobs:
           done
           exit "$status"
 
+      # Which checks failed in each run (jepsen.fiber.verdict reads its
+      # results.edn), for the summary and for matrix.yml's report. The control
+      # container sees the store at /jepsen/store.
+      - name: Failed checks
+        if: always()
+        run: |
+          [ -f runs.txt ] || exit 0
+          dirs=()
+          while read -r i code store; do
+            [ "$store" = none ] || dirs+=("/jepsen/store/$store")
+          done <runs.txt
+          [ "${#dirs[@]}" -gt 0 ] || exit 0
+          (cd docker && docker compose exec -T control lein run -m jepsen.fiber.verdict "${dirs[@]}") \
+            >verdicts.txt </dev/null || true
+          cat verdicts.txt
+
       - name: Summary
         if: always()
         env:
@@ -237,9 +253,11 @@ jobs:
             echo "- Restored from cache: fnn ${FNN_HIT}${DEPS_HIT:+ (compiled dependencies: exact match ${DEPS_HIT})}, devnet snapshot ${SNAPSHOT_HIT}"
             echo "- To run a run's payments and faults again, add \`--seed <its seed>\` to the arguments, with the same Fiber commit. Timing still differs, so a failure may take several runs to come back."
             echo
-            echo "| Run | Seed | Exit | Verdict | Ledger | Post-heal probe | Success rate | Channels | Store |"
-            echo "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+            echo "| Run | Seed | Exit | Verdict | Failed checks | Ledger | Post-heal probe | Success rate | Channels | Store |"
+            echo "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"
             [ -f runs.txt ] || : >runs.txt
+            # One tab-separated line per run, for matrix.yml's report.
+            : >runs.tsv
             while read -r i code store; do
               log="run-$i.log"
               seed="$(awk -v i="$i" '$1 == i { print $2 }' seeds.txt 2>/dev/null || true)"
@@ -252,7 +270,10 @@ jobs:
               channels="$(tr '\n' ' ' <"$log" | grep -oE ':channel-summary +\{[^}]*\}' | tail -1 | sed -E 's/:channel-summary +//' | tr -s ' ' || true)"
               # With --availability-window: the baseline's success rate, then the recovery's.
               rates="$(tr '\n' ' ' <"$log" | grep -oE ':success-rates +"[^"]*"' | tail -1 | sed -E 's/^:success-rates +"//; s/"$//; s/->/→/' || true)"
-              echo "| $i | \`${seed:--}\` | $code | ${verdict:-none} | ${ledger:--} | $probe | ${rates:--} | ${channels:--} | \`${store}\` |"
+              failed="$(awk -F'\t' -v d="/jepsen/store/$store" '$1 == d { print $2 }' verdicts.txt 2>/dev/null || true)"
+              echo "| $i | \`${seed:--}\` | $code | ${verdict:-none} | ${failed:--} | ${ledger:--} | $probe | ${rates:--} | ${channels:--} | \`${store}\` |"
+              printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$LABEL" "$i" "${seed:--}" "$code" "${verdict:-none}" \
+                "${failed:--}" "$probe" "${rates:--}" "${channels:--}" "$store" >>runs.tsv
             done <runs.txt
           } >>"$GITHUB_STEP_SUMMARY"
 
@@ -270,6 +291,18 @@ jobs:
               tail -n 40 "$f"
             done
           done <runs.txt
+      # The runs' lines, which matrix.yml's report job collects. The label goes in
+      # the file's name too, since the report downloads every job's into one place.
+      - name: Keep the runs' lines
+        if: always()
+        run: '[ -f runs.tsv ] && cp runs.tsv "$LABEL.runs.tsv" || true'
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.label }}-runs
+          path: ${{ inputs.label }}.runs.tsv
+          if-no-files-found: ignore
+          retention-days: 14
       # upload-artifact rejects ':' in file names, and Jepsen names each run's
       # directory by its start time, so the store goes up as one tarball: after a
       # failure, or always with upload-store.
