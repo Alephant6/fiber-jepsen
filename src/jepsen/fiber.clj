@@ -112,6 +112,8 @@
                                     (gen/nemesis (:final-generator pkg))
                                     (gen/log "Waiting for the network to converge")
                                     (gen/sleep (:quiesce opts))
+                                    (when (seq (:channel-ops opts))
+                                      (gen/clients (gen/once {:f :settle-channels})))
                                     (when-not (:close opts) (gen/clients (gen/once {:f :probe})))
                                     (gen/clients (gen/once {:f :read})))})))
 
@@ -175,6 +177,11 @@
     :parse-fn parse-long]
    [nil "--channel-keep N" "With --channel-ops, closes leave at least this many ready channels on each edge."
     :default  1
+    :parse-fn parse-long]
+   [nil "--channel-settle-timeout SECONDS" (str "With --channel-ops, how long to wait after the quiet period"
+                                                " for every channel to be ready or closed on both ends. Fiber"
+                                                " checks for a counterparty's force close every 300 s.")
+    :default  360
     :parse-fn parse-long]
    [nil "--nonce-check" (str "Check MuSig2 nonce use. Needs an fnn built with the nonce-oracle"
                              " feature (scripts/build-fnn-nonce-oracle.sh).")]

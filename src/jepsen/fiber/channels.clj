@@ -15,7 +15,15 @@
   The checker (assertion 4 of the chaos-test plan, and C-09's): after the
   faults heal, every end of every channel is ChannelReady or Closed, never in
   between (opening, shutting down, stale), and both ends of a channel agree on
-  which of the two it is."
+  which of the two it is.
+
+  Fiber notices that its counterparty force-closed a channel only in a check
+  that runs every 300 s (CHECK_CHANNELS_SHUTDOWN_INTERVAL in fiber/network.rs at
+  ae6f7d3); until then its end stays ChannelReady, or ShuttingDown when it
+  force-closed too and waits for its own commitment transaction, which can no
+  longer confirm. So after the quiet period, and before the probe, the
+  :settle-channels operation waits until every channel is settled in this sense,
+  for up to --channel-settle-timeout seconds, and records how long it took."
   (:require [jepsen.checker :as checker]
             [jepsen.fiber [checker :as fc]
                           [client :as client]
@@ -147,21 +155,58 @@
 (def settled-states
   #{"channelready" "closed"})
 
+(defn unsettled
+  "In {node [channel ...]}: the channel ends that are neither ready nor closed
+  (:between), and the channels whose ends disagree on which of the two they are
+  (:disagree)."
+  [channels-by-node]
+  (let [ends (fc/by-channel channels-by-node)]
+    {:between  (vec (for [[id es] ends
+                          [node ch] es
+                          :when (not (settled-states (fc/state-name ch)))]
+                      {:channel id, :node node, :state (:state ch)}))
+     :disagree (vec (for [[id es] ends
+                          :let  [states (set (map fc/state-name (vals es)))]
+                          :when (and (= 2 (count es)) (every? settled-states states)
+                                     (< 1 (count states)))]
+                      {:channel id
+                       :states  (into (sorted-map) (for [[n ch] es] [n (:state ch)]))}))}))
+
+(def ^:const settle-poll-ms 5000)
+
+(defn settle!
+  "Waits until no channel is unsettled on any node, for up to
+  :channel-settle-timeout seconds: {:waited-s, :settled?, and what was still
+  unsettled at the first and the last poll}."
+  [test]
+  (let [start    (System/currentTimeMillis)
+        deadline (+ start (* 1000 (:channel-settle-timeout test 360)))
+        read     #(unsettled (into {} (for [n (:nodes test)] [n (client/read-node n)])))
+        first-u  (read)]
+    (loop [u first-u]
+      (let [settled? (and (empty? (:between u)) (empty? (:disagree u)))]
+        (if (or settled? (< deadline (System/currentTimeMillis)))
+          (cond-> {:waited-s (quot (- (System/currentTimeMillis) start) 1000)
+                   :settled? settled?}
+            (not= first-u {:between [], :disagree []}) (assoc :at-start first-u)
+            (not settled?)                             (assoc :at-end u))
+          (do (Thread/sleep settle-poll-ms)
+              (recur (read))))))))
+
+(defmethod client/invoke-op :settle-channels
+  [test _node op]
+  (assoc op :type :ok, :value (settle! test)))
+
 (defn analyze
   "Channel ends that are neither ready nor closed in the final read, and
   channels whose ends disagree on which of the two they are."
   [read history]
   (let [ends     (fc/by-channel (:channels read))
-        between  (vec (for [[id es] ends
-                            [node ch] es
-                            :when (not (settled-states (fc/state-name ch)))]
-                        {:channel id, :node node, :state (:state ch)}))
-        disagree (vec (for [[id es] ends
-                            :let  [states (set (map fc/state-name (vals es)))]
-                            :when (and (= 2 (count es)) (every? settled-states states)
-                                       (< 1 (count states)))]
-                        {:channel id
-                         :states  (into (sorted-map) (for [[n ch] es] [n (:state ch)]))}))
+        {:keys [between disagree]} (unsettled (:channels read))
+        settle   (->> history
+                      (filter #(and (= :ok (:type %)) (= :settle-channels (:f %))))
+                      last
+                      :value)
         ops      (->> history
                       (filter #(and (#{:open-channel :close-channel :force-close} (:f %))
                                     (#{:ok :fail :info} (:type %))))
@@ -176,6 +221,7 @@
                                             (get-in ch [:state :state_name])))))
      :between-states     between
      :ends-disagree      disagree
+     :settle-wait        (select-keys settle [:waited-s :settled? :at-start])
      :closed-on-purpose  (count (fc/closed-on-purpose history))}))
 
 (defn checker
