@@ -105,6 +105,39 @@
         (is (= [:not-ready "Closed"] (first (:problems (first (fc/channel-problems init final))))))
         (is (empty? (fc/channel-problems init final #{"b"})))))))
 
+(deftest settled-tlcs
+  (let [tlc (fn [hash status] {:payment_hash hash, :status status})]
+    (testing "a TLC removed on this end is settled, in either direction and either format"
+      (is (fc/settled-tlc? (tlc "h" {:Outbound "RemoveAckConfirmed"})))
+      (is (fc/settled-tlc? (tlc "h" {:Inbound "RemoveAckConfirmed"})))
+      (is (fc/settled-tlc? (tlc "h" "Inbound(RemoveAckConfirmed)")))
+      (is (not-any? fc/settled-tlc? [(tlc "h" {:Outbound "RemoveWaitAck"})
+                                     (tlc "h" {:Inbound "LocalRemoved"})
+                                     (tlc "h" {:Outbound "Committed"})
+                                     (tlc "h" "Outbound(Committed)")
+                                     (tlc "h" nil)])))
+    (let [done    (tlc "h1" {:Outbound "RemoveAckConfirmed"})
+          done-in (tlc "h1" {:Inbound "RemoveAckConfirmed"})
+          init    {"n1" [{:channel_id "a", :local_balance "0x10", :remote_balance "0x10"}]
+                   "n2" [{:channel_id "a", :local_balance "0x10", :remote_balance "0x10"}]}
+          final   (fn [t1 t2]
+                    {"n1" [(assoc (ch "a" "ChannelReady" :tlcs t1) :local_balance "0x10" :remote_balance "0x10")]
+                     "n2" [(assoc (ch "a" "ChannelReady" :tlcs t2) :local_balance "0x10" :remote_balance "0x10")]})]
+      (testing "a removal both ends confirmed leaves the channel clean, though both still list the TLC"
+        (is (empty? (fc/channel-problems init (final [done] [done-in]))))
+        (is (= {:ready-clean 2} (fc/channel-summary (final [done] [done-in]))))
+        (is (empty? (fc/held-on-chain (final [done] [done-in]) #{"a"}))))
+      (testing "a removal the offering end hasn't confirmed is still pending there"
+        (let [stuck (tlc "h1" {:Outbound "RemoveWaitAck"})]
+          (is (= [{:channel "a", :node "n1", :peer "n2", :problems [[:pending-tlcs 1]]}]
+                 (fc/channel-problems init (final [stuck] [done-in]))))
+          (is (= {:ready-clean 1, :ready-with-pending-tlcs 1}
+                 (fc/channel-summary (final [stuck] [done-in]))))))
+      (testing "a settled TLC beside a live one counts only the live one"
+        (is (= [[:pending-tlcs 1]]
+               (:problems (first (fc/channel-problems
+                                   init (final [done (tlc "h2" {:Outbound "Committed"})] [done-in]))))))))))
+
 (deftest unsettled
   (is (= {:between [], :disagree []}
          (channels/unsettled {"n1" [(ch "a" "ChannelReady") (ch "b" "Closed" :flags "COOPERATIVE")]

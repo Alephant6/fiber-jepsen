@@ -11,11 +11,18 @@
   until they time out; :reject answers every TCP packet to the other end with a
   reset, so connections fail at once.
 
+  Rules alone leave an idle Lightning connection up: neither LND notices a cut
+  until its next ping goes unanswered, which can outlast the cut. So a :peer cut
+  then disconnects the two LNDs from each other through each one's REST API
+  (DisconnectPeer, which release builds allow with open channels), and records
+  whether either still lists the other; the rules keep them from reconnecting.
+
   These hosts aren't Jepsen nodes, so the partition fault's healing (which
   flushes the nodes' rules) doesn't reach them, and no other fault adds rules
   there. Healing deletes this fault's rules from both hosts and asks lnd-ingrid
   to reconnect to lnd-bob, rather than wait out LND's reconnection backoff."
-  (:require [clojure.tools.logging :refer [warn]]
+  (:require [clojure.string :as str]
+            [clojure.tools.logging :refer [warn]]
             [jepsen [control :as c]
                     [nemesis :as n]]
             [jepsen.fiber [cch :as cch]
@@ -50,6 +57,44 @@
     (doseq [r (rules (cch/ips peer) mode)]
       (apply iptables! "-A" r))
     :cut))
+
+(defn- pubkey
+  [host]
+  (:identity_pubkey (cch/lnd-get host "/v1/getinfo")))
+
+(defn- peer?
+  "Whether `host`'s LND lists the LND with `key` as a connected peer."
+  [host key]
+  (boolean (some #(= key (:pub_key %)) (:peers (cch/lnd-get host "/v1/peers")))))
+
+(def drop-wait-ms
+  "How long drop-peers! waits for both LNDs to stop listing each other. LND
+  removes a disconnected peer asynchronously, about 100 ms after the call."
+  5000)
+
+(defn drop-peers!
+  "Disconnects lnd-ingrid and lnd-bob from each other, each through its own
+  REST API, and then reads, until neither lists the other or drop-wait-ms has
+  passed, whether each still does: {host connected?}. Called after the rules
+  are in, so neither can reconnect."
+  []
+  (let [hosts    [cch/hub-lnd cch/user-lnd]
+        pks      (zipmap hosts (map pubkey hosts))
+        other    {cch/hub-lnd cch/user-lnd, cch/user-lnd cch/hub-lnd}
+        deadline (+ (System/currentTimeMillis) drop-wait-ms)]
+    (doseq [h hosts]
+      (try (cch/lnd-delete h (str "/v1/peers/" (pks (other h))))
+           (catch clojure.lang.ExceptionInfo e
+             ; Already gone is what we want.
+             (when-not (re-find #"not connected" (str (ex-message e)))
+               (throw e)))))
+    (loop []
+      (let [connected (into (sorted-map) (for [h hosts] [h (peer? h (pks (other h)))]))]
+        (if (or (not-any? true? (vals connected))
+                (< deadline (System/currentTimeMillis)))
+          connected
+          (do (Thread/sleep 200)
+              (recur)))))))
 
 (defn- heal-host!
   "Deletes every rule this fault may have added on the bound host, as often as
@@ -105,11 +150,12 @@
       (case (:f op)
         :start-lnd-disconnect
         (let [{:keys [link mode]} (:value op)
-              host                (:host (links link))]
-          (assoc op :value {:link   link
-                            :mode   mode
-                            :result (try-op (str "cut " (name link))
-                                            #(cch/on-host test host (cut! link mode)))}))
+              host                (:host (links link))
+              result              (try-op (str "cut " (name link))
+                                          #(cch/on-host test host (cut! link mode)))]
+          (assoc op :value (cond-> {:link link, :mode mode, :result result}
+                             (and (= :peer link) (= :cut result))
+                             (assoc :connected (try-op "drop peers" drop-peers!)))))
 
         :stop-lnd-disconnect
         (assoc op :value (heal! test))))
@@ -138,14 +184,23 @@
                {:type :info, :f :stop-lnd-disconnect, :value nil}])
             (repeatedly #(schedule/pick r specs)))))
 
+(defn- failed?
+  [x]
+  (and (string? x) (.startsWith ^String x "failed")))
+
 (defn effect
   "Whether a :start-lnd-disconnect completion took effect (see
   jepsen.fiber.faults): not when the cut failed, which the nemesis records as a
-  \"failed: ...\" string."
+  \"failed: ...\" string, nor when a :peer cut left either LND still listing
+  the other as connected, or couldn't tell."
   [op]
-  (let [r (get-in op [:value :result])]
-    (when (and (= :start-lnd-disconnect (:f op)) (string? r) (.startsWith ^String r "failed"))
-      r)))
+  (when (= :start-lnd-disconnect (:f op))
+    (let [{:keys [result connected]} (:value op)]
+      (cond (failed? result)    result
+            (failed? connected) (str "disconnecting the LNDs " connected)
+            (map? connected)    (when-let [still (seq (for [[h c?] connected :when c?] h))]
+                                  (str "still connected after the cut: "
+                                       (str/join ", " still)))))))
 
 (def fault
   {:faults  #{:lnd-disconnect}

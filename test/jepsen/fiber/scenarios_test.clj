@@ -13,8 +13,10 @@
 (deftest every-scenario-parses
   (doseq [[name s] scenarios/scenarios]
     (testing name
-      (is (re-matches #"c-\d\d[ab]?" name))
-      (is (#{:p0 :p1 :p2} (:priority s)))
+      (if (= :extra (:priority s))
+        (is (re-matches #"[a-z]+(-[a-z]+)*" name))
+        (do (is (re-matches #"c-\d\d[ab]?" name))
+            (is (#{:p0 :p1 :p2} (:priority s)))))
       (is (every? string? (:args s)))
       (let [{:keys [options errors]} (parse ["--scenario" name])]
         (is (empty? errors))
@@ -68,9 +70,16 @@
                           (scenarios/expand ["--scenario" "c-99"])))
     (is (thrown? clojure.lang.ExceptionInfo (scenarios/expand ["--scenario"])))))
 
+(deftest power-scenarios
+  (doseq [[name sync] [["power-sync-on" true] ["power-sync-off" false]]]
+    (let [{:keys [options errors]} (parse ["--scenario" name])]
+      (is (empty? errors))
+      (is (= [:power] (:faults options)))
+      (is (= sync (:store-sync-writes options))))))
+
 (deftest ledger-coverage
   (testing "every scenario checks the ledger, except where on-chain closes or swaps move the balances"
-    (is (= #{"c-03" "c-09" "c-10" "c-15"}
+    (is (= #{"c-03" "c-09" "c-10" "c-11" "c-15"}
            (set (for [[name s] scenarios/scenarios
                       :when (not (:ledger (:options (parse ["--scenario" name]))))]
                   name))))))
@@ -82,7 +91,11 @@
     (is (= ["c-01b" "c-04" "c-08"] (scenarios/select "c-08, c-04,c-01b,c-04")))
     (is (= (scenarios/select "p1") (scenarios/select "p1,c-08")))
     (is (thrown? clojure.lang.ExceptionInfo (scenarios/select "c-99"))))
+  (testing "extra: the scenarios the plan doesn't have"
+    (is (= ["power-sync-off" "power-sync-on"] (scenarios/select "extra"))))
   (testing "run.sh's arguments: a scenario's compose file, then the scenario"
     (is (= {:name "c-15", :priority "p1", :args "--compose cch --scenario c-15"}
            (first (scenarios/matrix "c-15"))))
+    (is (= {:name "power-sync-on", :priority "extra", :args "--compose lazyfs --scenario power-sync-on"}
+           (first (scenarios/matrix "power-sync-on"))))
     (is (= "--scenario c-04" (:args (first (scenarios/matrix "c-04")))))))

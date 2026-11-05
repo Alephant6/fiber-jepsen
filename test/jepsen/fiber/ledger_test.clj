@@ -75,6 +75,29 @@
     (is (= {:listed 3, :success 2, :failed 1, :unfinished 0, :found-by-listing 0} (:payments r)))
     (is (= {} (:incomplete r)))))
 
+(deftest a-removed-tlc-still-listed-is-settled
+  ; As balanced, but the last removal on each channel is still listed, in status
+  ; RemoveAckConfirmed, because nothing has updated the channels since.
+  (let [done  (fn [dir] [{:payment_hash "0xa2", :amount "0x32", :status {dir "RemoveAckConfirmed"}}])
+        final (-> (line-channels 849 651 950 550)
+                  (assoc-in ["n1" 0 :pending_tlcs] (done :Outbound))
+                  (assoc-in ["n2" 0 :pending_tlcs] (done :Inbound))
+                  (assoc-in ["n2" 1 :pending_tlcs] (done :Outbound))
+                  (assoc-in ["n3" 0 :pending_tlcs] (done :Inbound)))
+        ops   [(pay :ok 1 "n1" "n2" 100 {:hash "0xa1", :fee 0})
+               (pay :ok 2 "n1" "n3" 50 {:hash "0xa2", :fee 1})
+               (pay :fail 3 "n3" "n1" 30 {:hash "0xa3"})]
+        list  {"n1" [(listed "0xa1" 1 "Success" 0) (listed "0xa2" 2 "Success" 1)]
+               "n2" []
+               "n3" [(listed "0xa3" 3 "Failed" 0)]}]
+    (is (= true (:valid? (check final list ops))))
+    (is (= {} (:incomplete (check final list ops))))
+    (testing "a TLC still in flight on one end is noted as possibly unsettled"
+      (let [r (check (assoc-in final ["n2" 1 :pending_tlcs 0 :status] {:Outbound "RemoveWaitAck"})
+                     list ops)]
+        (is (= [{:node "n2", :channel "0x23", :state "ChannelReady", :tlcs 1}]
+               (get-in r [:incomplete :channels])))))))
+
 (deftest forwarder-pays-but-the-sender-fails
   ; n2 settles the forwarded TLC with n3, but the TLC from n1 fails: n1 sees Failed.
   (let [final (line-channels 900 600 950 550)

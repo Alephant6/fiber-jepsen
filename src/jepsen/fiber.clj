@@ -22,6 +22,7 @@
                           [health :as health]
                           [invoice]
                           [ledger :as ledger]
+                          [mpp :as mpp]
                           [nonce :as nonce]
                           [onchain :as onchain]
                           [scenarios :as scenarios]
@@ -31,6 +32,7 @@
             [jepsen.fiber.faults [chain-partition :as chain-partition]
                                  [clock :as clock]
                                  [lnd-disconnect :as lnd-disconnect]
+                                 [old-state :as old-state]
                                  [outage :as outage]
                                  [packet :as packet]
                                  [partition :as partition]
@@ -48,12 +50,14 @@
 (defn payments
   "Payments for the whole fault window, drawn from the run's seed (see
   jepsen.fiber.schedule): 0.01-0.2 CKB each, about :rate a second, of the kinds
-  in --pay-kinds (keysend, invoice: jepsen.fiber.invoice). With --close,
+  in --pay-kinds (keysend, invoice: jepsen.fiber.invoice, mpp:
+  jepsen.fiber.mpp, whose amounts are --mpp-amount's). With --close,
   every channel is asked to close cooperatively halfway through, and payments go on
   against the closing channels, from a stream of their own."
   [opts streams]
   (let [pays (fn [k] (schedule/paced-payments streams k (:rate opts) (count (:nodes opts))
-                                              (:pay-kinds opts [:keysend])))
+                                              (:pay-kinds opts [:keysend])
+                                              (mpp/amount-ranges opts)))
         base (if (:close opts)
                (gen/phases (gen/time-limit (/ (:time-limit opts) 2) (pays :pay))
                            (gen/once {:f :close})
@@ -80,7 +84,7 @@
   [opts streams k window]
   (when (availability? opts)
     (->> (schedule/paced-payments streams k (:rate opts) (count (:nodes opts))
-                                  (:pay-kinds opts [:keysend]))
+                                  (:pay-kinds opts [:keysend]) (mpp/amount-ranges opts))
          (gen/map #(assoc % :window window))
          (gen/time-limit (:availability-window opts))
          gen/clients)))
@@ -138,14 +142,16 @@
             :nemesis              (health/compose (:nemesis pkg))
             ; Shared state between the topology setup, the clients and the checker.
             :pubkeys              (atom {})
-            :fnn-env              (faults/fnn-env opts)
+            :fnn-env              (merge (faults/fnn-env opts) (topology/fnn-env opts))
             :payments             (atom [])
+            ; With --pay-kinds mpp: every MPP invoice, for :read-invoices.
+            :invoices             (atom [])
             :initial-channels     (atom nil)
             ; With --cch: the swaps that got a payment hash, and the swap
             ; environment's starting state (jepsen.fiber.cch).
             :swaps                (atom [])
             :swap-env             (atom nil)
-            :nonserializable-keys [:pubkeys :payments :initial-channels :swaps :swap-env]
+            :nonserializable-keys [:pubkeys :payments :invoices :initial-channels :swaps :swap-env]
             :checker              (checker/compose
                                     (cond-> (merge (faults/checkers opts)
                                                    {:stats      (checker/stats)
@@ -154,17 +160,21 @@
                                                     :timeline   (timeline/html)
                                                     :health     (health/checker)})
                                       (seq (faults/in-use opts)) (assoc :faults (faults/fired-checker opts))
-                                      (not (:close opts)) (assoc :fiber (cond (:force-close-ok opts)
-                                                                              (closes/checker)
+                                      (not (:close opts)) (assoc :fiber (cond-> (cond (:force-close-ok opts)
+                                                                                        (closes/checker)
 
-                                                                              (:force-close-ok-after opts)
-                                                                              (closes/checker (:force-close-ok-after opts))
+                                                                                        (:force-close-ok-after opts)
+                                                                                        (closes/checker (:force-close-ok-after opts))
 
-                                                                              :else
-                                                                              (fiber-checker/checker)))
+                                                                                        :else
+                                                                                        (fiber-checker/checker))
+                                                                                ; What a restored node forgot.
+                                                                                (some #{:old-state} (:faults opts))
+                                                                                old-state/excused))
                                       (:close opts)       (assoc :close (fiber-checker/close-checker))
                                       (:nonce-check opts) (assoc :nonce (nonce/checker))
                                       (:ledger opts)      (assoc :ledger (ledger/checker))
+                                      (mpp/enabled? opts) (assoc :mpp (mpp/checker))
                                       (:onchain opts)     (assoc :onchain (onchain/checker))
                                       (seq (:channel-ops opts)) (assoc :channels (channels/checker))
                                       (:expiry-check opts) (assoc :expiry (expiry/checker))
@@ -190,6 +200,8 @@
                                     ; Assertion 7 (jepsen.fiber.health): is every fnn there and working?
                                     (gen/nemesis (gen/once health/final-sample))
                                     (gen/clients (gen/once {:f :read}))
+                                    (when (mpp/enabled? opts)
+                                      (gen/clients (gen/once {:f :read-invoices})))
                                     (when (:onchain opts)
                                       (gen/phases (gen/log "Closing every channel and waiting for it to settle on chain")
                                                   (gen/clients (gen/once {:f :settle}))))
@@ -218,11 +230,32 @@
     :default  5
     :parse-fn parse-double]
    [nil "--pay-kinds KINDS" (str "Comma-separated payment kinds, each payment's drawn uniformly from"
-                                 " them (list one twice to draw it twice as often): keysend, invoice.")
+                                 " them (list one twice to draw it twice as often): keysend, invoice,"
+                                 " mpp (an invoice that allows multi-part payment, of --mpp-amount;"
+                                 " checks that each ends all or nothing).")
     :default  [:keysend]
     :parse-fn keywords
     :validate [#(every? (methods client/send-payment!) %)
                (str "Each must be a payment kind: " (str/join ", " (map name (keys (methods client/send-payment!)))))]]
+   [nil "--mpp-amount CKB" (str "With --pay-kinds mpp, each MPP payment's amount in CKB, or a range"
+                                " MIN-MAX the amounts are spread over. Fiber splits a payment only"
+                                " when no single route carries it, so choose amounts above any one"
+                                " channel's balance.")
+    :default  mpp/default-amount-ckb
+    :parse-fn packet/parse-delay
+    :validate [(fn [[lo hi]] (and lo hi (<= 1 lo hi))) "Must be CKB or MIN-MAX, 1 <= MIN <= MAX"]]
+   [nil "--mpp-max-parts N" (str "With --pay-kinds mpp, the most parts a payment may be split into"
+                                 " (send_payment's max_parts, 2-24). Default: Fiber's (12).")
+    :parse-fn parse-long
+    :validate [#(and % (<= 2 % 24)) "Must be 2 to 24"]]
+   [nil "--acceptor-funding CKB" (str "CKB the acceptor of each channel opened at setup puts in, as"
+                                      " the opener puts in 1000 (Fiber's"
+                                      " auto_accept_channel_ckb_funding_amount, through"
+                                      " FIBER_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT). About 100 CKB"
+                                      " of either side is reserve. Default: Fiber's, 100, all"
+                                      " reserve, so the acceptor starts with nothing to send.")
+    :parse-fn parse-long
+    :validate [#(and % (<= 100 %)) "Must be 100 or more"]]
    [nil "--nemesis-interval SECONDS" "Seconds between fault operations."
     :default  15
     :parse-fn parse-long]
@@ -417,6 +450,39 @@
                                         " default (false).")
     :parse-fn #(case % "true" true "false" false nil)
     :validate [boolean? "Must be true or false"]]
+   [nil "--old-state-targets TARGETS" (str "With --faults old-state, comma-separated target specs to"
+                                           " choose from: one (any node), middle (a node that forwards"
+                                           " payments, n2 in line).")
+    :default  [:one]
+    :parse-fn keywords
+    :validate [#(every? old-state/target-specs %) (str "Must be a subset of " old-state/target-specs)]]
+   [nil "--old-state-restore MODE" (str "With --faults old-state, how the saved store comes back: raw"
+                                        " (the store directory is replaced with the copy, as a disk"
+                                        " or snapshot rollback would) or fiber (fnn --restore of the"
+                                        " newest backup fnn made itself, which marks the restored"
+                                        " channels Stale).")
+    :default  :raw
+    :parse-fn keyword
+    :validate [old-state/restore-modes (str "Must be one of " old-state/restore-modes)]]
+   [nil "--old-state-after SECONDS" (str "With --faults old-state, how long into the fault window the"
+                                         " first save waits, so that payments flow before it.")
+    :default  20
+    :parse-fn parse-long
+    :validate [#(and % (<= 0 %)) "Must be 0 or more"]]
+   [nil "--old-state-hold SECONDS" (str "With --faults old-state, seconds from a save of a node's store"
+                                        " to its restore, while payments move the node's channels on.")
+    :default  40
+    :parse-fn parse-long
+    :validate [#(and % (pos? %)) "Must be positive"]]
+   [nil "--old-state-count N" (str "With --faults old-state, how many save-and-restore pairs to run at"
+                                   " most (by default, as many as the fault window holds; one comes"
+                                   " every --old-state-hold + 100 s).")
+    :parse-fn parse-long
+    :validate [#(and % (pos? %)) "Must be positive"]]
+   [nil "--old-state-force-close" (str "With --faults old-state, have the restored node force-close every"
+                                       " channel it still has, once its peers have reconnected: with"
+                                       " --old-state-restore raw it broadcasts the revoked commitments it"
+                                       " holds, which its peers' watchtowers should punish.")]
    [nil "--nonce-check" (str "Check MuSig2 nonce use. Needs an fnn built with the nonce-oracle"
                              " feature (scripts/build-fnn-nonce-oracle.sh).")]
    [nil "--close" (str "Halfway through the faults, ask every channel to close cooperatively, and"

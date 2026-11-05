@@ -12,6 +12,10 @@ name: Matrix
 #   `runs` runs. A scenario's failure doesn't stop the others.
 # - report: one table of every run's verdict and failed checks, from the
 #   scenario jobs' runs artifacts, in the run's summary and as an artifact.
+#   With baseline-run (the id of an earlier Matrix run, whose runs artifacts
+#   are kept 14 days), it also says which failed checks never failed in that
+#   run's runs of the same scenario: known failures come from a baseline run,
+#   not from a list kept by hand.
 #
 # Manual only for now. When and how it should run (on a schedule against
 # develop, on demand from a Fiber pull request, or inside an existing flow) and
@@ -30,11 +34,14 @@ on:
         default: all
       runs:
         description: Runs per scenario
-        default: '2'
+        default: '3'
       upload-store:
         description: Upload every scenario's store also when all its runs pass
         type: boolean
         default: false
+      baseline-run:
+        description: The id of an earlier Matrix run to compare with (optional)
+        default: ''
   workflow_call:
     inputs:
       fiber-repository:
@@ -48,10 +55,13 @@ on:
         default: all
       runs:
         type: string
-        default: '2'
+        default: '3'
       upload-store:
         type: boolean
         default: false
+      baseline-run:
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -77,7 +87,7 @@ jobs:
         env:
           REPO: ${{ inputs.fiber-repository || 'nervosnetwork/fiber' }}
           REF: ${{ inputs.fiber-ref || 'develop' }}
-          RUNS: ${{ inputs.runs || '2' }}
+          RUNS: ${{ inputs.runs || '3' }}
         run: |
           echo "repository=$REPO" >>"$GITHUB_OUTPUT"
           echo "ref=$REF" >>"$GITHUB_OUTPUT"
@@ -141,6 +151,10 @@ jobs:
     if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: read
+      # To download the baseline run's artifacts.
+      actions: read
     steps:
       - uses: actions/checkout@v6
         with:
@@ -151,13 +165,31 @@ jobs:
           pattern: '*-runs'
           path: runs
           merge-multiple: true
+      # An expired or wrong baseline leaves the report without the comparison.
+      - if: ${{ inputs.baseline-run != '' }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '*-runs'
+          path: baseline
+          merge-multiple: true
+          run-id: ${{ inputs.baseline-run }}
+          github-token: ${{ github.token }}
       - env:
           FIBER_REPOSITORY: ${{ needs.plan.outputs.fiber-repository }}
           FIBER_REF: ${{ needs.plan.outputs.fiber-ref }}
           FIBER_SHA: ${{ needs.plan.outputs.fiber-sha }}
           MATRIX: ${{ needs.plan.outputs.matrix }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: python3 scripts/matrix_report.py runs | tee matrix-report.md >>"$GITHUB_STEP_SUMMARY"
+          BASELINE_RUN: ${{ inputs.baseline-run }}
+          BASELINE_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ inputs.baseline-run }}
+        run: |
+          base=()
+          if [ -n "$BASELINE_RUN" ]; then
+            if compgen -G 'baseline/*.runs.tsv' >/dev/null; then base=(baseline)
+            else echo "::warning::No runs artifacts from baseline run $BASELINE_RUN"; fi
+          fi
+          python3 scripts/matrix_report.py runs "${base[@]}" | tee matrix-report.md >>"$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
           name: matrix-report
