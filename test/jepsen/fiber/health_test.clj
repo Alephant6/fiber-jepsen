@@ -1,7 +1,10 @@
 (ns jepsen.fiber.health-test
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
+            [jepsen.generator :as gen]
+            [jepsen.generator.test :as gt]
             [jepsen.nemesis :as n]
+            [jepsen.fiber :as fiber]
             [jepsen.fiber [health :as health]
                           [db :as db]]))
 
@@ -22,23 +25,33 @@
    "put should be ok: Error { message: \"IO error: No space left on device\" }"
    "note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace"
    "thread 'main' panicked at 'old style', src/main.rs:2:5"
-   "  2026-11-05T03:41:00Z  INFO fnn: Starting node with git version 0.6.1 (ae6f7d3)"])
+   "  2026-11-05T03:41:00Z  INFO fnn: Starting node with git version 0.6.1 (ae6f7d3)"
+   "  2026-11-05T03:42:00Z  INFO fnn: SIGTERM received, shutting down"
+   "thread 'tokio-runtime-worker' panicked at crates/fiber-lib/src/fiber/channel.rs:5833:14:"
+   "network actor must be alive: SendErr"
+   "  2026-11-05T03:43:00Z  INFO fnn: Starting node with git version 0.6.1 (ae6f7d3)"
+   "thread 'x' panicked at a.rs:1:1:"
+   "after the restart"])
 
 (deftest parse-log
   (let [r (health/parse-log log)]
-    (testing "two panics, both message styles, with the time before each"
+    (testing "panics in both message styles, with the time before each"
       (is (= [{:thread  "tokio-runtime-worker"
                :at      "crates/fiber-store/src/native.rs:52:30"
                :message "put should be ok: Error { message: \"IO error: No space left on device\" }"
-               :after   "2026-11-05T03:40:04.0Z"}
-              {:thread "main", :at "'old style', src/main.rs:2:5", :after "2026-11-05T03:40:04.0Z"}]
-             (:panics r))))
+               :after   "2026-11-05T03:40:04.0Z"
+               :shutdown? false}
+              {:thread "main", :at "'old style', src/main.rs:2:5", :after "2026-11-05T03:40:04.0Z"
+               :shutdown? false}]
+             (take 2 (:panics r)))))
+    (testing "a panic after SIGTERM is in the shutdown, until fnn starts again"
+      (is (= [true false] (map :shutdown? (drop 2 (:panics r))))))
     (testing "ERROR lines group by their message without numbers or hashes"
       (is (= 3 (:errors r)))
       (is (= [["Failed to send message to peer 0x..: timeout after N ms" 2] ["write failed" 1]]
              (:top-errors r))))
     (testing "each start of fnn"
-      (is (= 2 (:starts r))))
+      (is (= 3 (:starts r))))
     (testing "an empty log"
       (is (= {:panics [], :errors 0, :top-errors [], :starts 0} (health/parse-log []))))))
 
@@ -107,7 +120,15 @@
         (is (false? (:valid? r)))
         (is (= 2 (:panics r)))
         (is (= [{:node "n2", :at "a.rs:1:2", :count 2, :message "m", :first-after nil}]
-               (:panic-sites r)))))
+               (:panic-sites r)))
+        (is (= 0 (:shutdown-panics r)))))
+    (testing "a panic in the graceful shutdown fails it too, and is marked"
+      (let [r (health/check (assoc-in logs ["n1" :panics] [{:thread "t", :at "c.rs:5:6", :message "m"
+                                                           :shutdown? true}])
+                            final [])]
+        (is (false? (:valid? r)))
+        (is (= 1 (:shutdown-panics r)))
+        (is (:during-shutdown (first (:panic-sites r))))))
     (testing "a node that looks alive but can't write"
       (let [r (health/check logs (assoc-in final ["n2" :store-write :error] "boom") [])]
         (is (false? (:valid? r)))
@@ -136,3 +157,14 @@
 (deftest pidfile
   (testing "the health sample reads the pidfile jepsen.fiber.db writes"
     (is (str/starts-with? db/pidfile "/"))))
+
+(deftest in-the-generator
+  (let [opts {:faults [:kill], :nodes ["n1" "n2" "n3"], :rate 5, :time-limit 10, :quiesce 5
+              :nemesis-interval 3, :kill-targets [:one]}
+        fs   (->> (gt/simulate (gen/context {:concurrency 3})
+                               (:generator (fiber/fiber-test opts))
+                               (fn [_ctx op] (-> op (assoc :type :ok) (update :time + 50000000))))
+                  (filter #(#{:invoke :info} (:type %)))
+                  (map :f))]
+    (testing "one sample, by the nemesis, after the probe and before the final read"
+      (is (= [:probe :health :read] (filter #{:probe :health :read} fs))))))
