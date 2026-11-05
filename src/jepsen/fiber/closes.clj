@@ -77,7 +77,7 @@
         closed   (closed-ids ends)]
     (if (empty? closed)
       (assoc r :force-closed {:channels []})
-      (let [held     (set (for [id closed, ch (vals (get ends id)), tlc (:pending_tlcs ch)]
+      (let [held     (set (for [id closed, ch (vals (get ends id)), tlc (fc/live-tlcs ch)]
                             (:payment_hash tlc)))
             graph    (ready-graph ends)
             probe-ok (fn [{:keys [from to route?]}]
@@ -88,7 +88,7 @@
             ; Pending TLCs of an open channel, all for payments a closed one holds.
             held-tlcs? (fn [{:keys [channel node]}]
                          (every? (comp held :payment_hash)
-                                 (:pending_tlcs (get-in ends [channel node]))))
+                                 (fc/live-tlcs (get-in ends [channel node]))))
             problems (for [p (:channel-problems r)]
                        (if (and (not (closed (:channel p))) (held-tlcs? p))
                          (update p :problems

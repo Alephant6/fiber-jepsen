@@ -223,6 +223,19 @@
   (testing "rules cut both directions"
     (is (= [["OUTPUT" "-d" "10.77.0.21" "-j" "DROP"] ["INPUT" "-s" "10.77.0.21" "-j" "DROP"]]
            (lnd-disconnect/rules "10.77.0.21" :drop))))
+  (testing "a cut took effect unless it failed or left the LNDs connected"
+    (let [cut (fn [v] {:type :info, :f :start-lnd-disconnect, :value v})
+          eff lnd-disconnect/effect]
+      (is (nil? (eff (cut {:link :cch, :mode :drop, :result :cut}))))
+      (is (nil? (eff (cut {:link :peer, :mode :drop, :result :cut
+                           :connected {"lnd-bob" false, "lnd-ingrid" false}}))))
+      (is (= "failed: ssh" (eff (cut {:link :cch, :mode :drop, :result "failed: ssh"}))))
+      (is (= "still connected after the cut: lnd-bob"
+             (eff (cut {:link :peer, :mode :drop, :result :cut
+                        :connected {"lnd-bob" true, "lnd-ingrid" false}}))))
+      (is (= "disconnecting the LNDs failed: 500"
+             (eff (cut {:link :peer, :mode :drop, :result :cut, :connected "failed: 500"}))))
+      (is (nil? (eff {:type :info, :f :stop-lnd-disconnect, :value {:reconnect "failed: x"}})))))
   (testing "adding the swap faults changes no kill"
     (doseq [seed [1 2]]
       (let [kill  #(filter (comp #{:kill :start} first) %)

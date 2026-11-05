@@ -93,11 +93,11 @@
                :let       [f (get-in final [(:channel_id ch) node])]
                :when      (or (nil? f)
                               (not= "channelready" (fc/state-name f))
-                              (seq (:pending_tlcs f)))]
+                              (seq (fc/live-tlcs f)))]
            {:node    node
             :channel (:channel_id ch)
             :state   (if f (get-in f [:state :state_name]) :missing)
-            :tlcs    (count (:pending_tlcs f))}))))
+            :tlcs    (count (fc/live-tlcs f))}))))
 
 (defn expected-changes
   "{node change} implied by `payments` (successful, each joined to its :attempt).

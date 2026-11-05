@@ -9,7 +9,8 @@
             [clojure.string :as str]))
 
 (def scenarios
-  "Name -> {:priority  the plan's priority
+  "Name -> {:priority  the plan's priority (:p0, :p1, :p2), or :extra for a
+                       scenario the plan doesn't have (named after its fault)
             :plan      the plan's fault, abridged
             :args      the arguments that run it here
             :differs   where this suite departs from the plan
@@ -125,6 +126,29 @@
                             " over 30 s force-closes the channels across it that had an update in"
                             " flight, which fails the run; add --force-close-ok to excuse closed"
                             " channels and what they explain (open question 1).")}
+    "c-07"  {:priority :p1
+             :plan     (str "A-B-C, large MPP payments, tc netem delay of 500 ms-3 s plus 10% loss."
+                            " Each MPP payment fully succeeds or fully fails; money is conserved.")
+             :args     ["--nodes" "n1,n2,n3,n4" "--topology" "mesh" "--acceptor-funding" "1000"
+                        "--pay-kinds" "mpp" "--mpp-amount" "1000-1600" "--rate" "1" "--faults" "packet"
+                        "--packet-delay" "500-3000" "--packet-loss" "10" "--nemesis-interval" "30"
+                        "--time-limit" "300" "--quiesce" "150" "--ledger"]
+             :differs  (str "Four nodes, every two joined by a channel (the mesh of four), rather"
+                            " than A-B-C, whose one route gives a payment nothing to split over:"
+                            " here a payment between neighbours has the direct channel and two"
+                            " routes of two hops. Each channel's acceptor funds it as its opener"
+                            " does (--acceptor-funding 1000), so every node starts with about 900"
+                            " CKB to send on each of its three channels. Every payment is MPP, of"
+                            " 1000-1600 CKB, above any one channel's balance on either side, to a"
+                            " node drawn uniformly, one a second (--rate 1) rather than five, as a"
+                            " payment that waits on the delay holds liquidity the next ones need;"
+                            " Fiber splits it into up to 12 parts. The packet fault delays the"
+                            " traffic of one node, or of all, by 500-3000 ms (drawn per fault, a"
+                            " tenth of it as jitter) and drops 10% of it,"
+                            " alternating with healing, each an exponential 30 s on average, capped"
+                            " at 100 s. The quiesce, 150 s, outlasts the 120 s a receiver holds an"
+                            " incomplete set of parts. A channel that ends force-closed fails the"
+                            " run; add --force-close-ok to excuse it (open question 1).")}
     "c-08"  {:priority :p1
              :plan     "SIGSTOP a node for tens of seconds, then resume"
              :args     ["--faults" "pause" "--nemesis-interval" "30" "--time-limit" "300" "--ledger"]
@@ -237,7 +261,37 @@
                             " wrapped-BTC channels with n3, and the BTC user is lnd-bob, on one"
                             " channel with the hub's lnd-ingrid. Keysend payments over the line go"
                             " on alongside. An LND disconnect is an iptables cut of either CCH's link"
-                            " to its LND or the link between the two LNDs. A kill is SIGKILL.")}))
+                            " to its LND or the link between the two LNDs. A kill is SIGKILL.")}
+    "power-sync-off"
+            {:priority :extra
+             :plan     (str "Not in the plan; proposed in a comment on it (open question 3). A node"
+                            " loses power: fnn dies, and every store write it didn't fsync is lost."
+                            " Run with fiber.store_sync_writes on and off")
+             :compose  "lazyfs"
+             :args     ["--faults" "power" "--store-sync-writes" "false" "--rate" "10"
+                        "--nemesis-interval" "20" "--time-limit" "180" "--ledger"]
+             :differs  (str "Unsynced writes, fnn's default: a node can come back with an older"
+                            " channel state than its peer's."
+                            " fnn's store is on LazyFS (scripts/run.sh --compose lazyfs), which keeps"
+                            " writes in a cache of its own until fsync; a power loss SIGKILLs fnn on"
+                            " one node or all of them and drops that cache. Needs Fiber from"
+                            " 4777d5d6 (#1703): an earlier build ignores the setting, and the power"
+                            " check is then unknown.")}
+    "power-sync-on"
+            {:priority :extra
+             :plan     (str "Not in the plan; proposed in a comment on it (open question 3). A node"
+                            " loses power: fnn dies, and every store write it didn't fsync is lost."
+                            " Run with fiber.store_sync_writes on and off")
+             :compose  "lazyfs"
+             :args     ["--faults" "power" "--store-sync-writes" "true" "--rate" "10"
+                        "--nemesis-interval" "20" "--time-limit" "180" "--ledger"]
+             :differs  (str "Synced writes: every store write waits for the disk, so a node should"
+                            " come back with everything it acknowledged."
+                            " fnn's store is on LazyFS (scripts/run.sh --compose lazyfs), which keeps"
+                            " writes in a cache of its own until fsync; a power loss SIGKILLs fnn on"
+                            " one node or all of them and drops that cache. Needs Fiber from"
+                            " 4777d5d6 (#1703): an earlier build ignores the setting, and the power"
+                            " check is then unknown.")}))
 
 (defn scenario-args
   "The arguments of scenario `name`. Throws for an unknown name."
@@ -267,12 +321,13 @@
 
 (defn select
   "The names of the scenarios `spec` asks for: `all`, a priority (`p0`, `p1`,
-  `p2`), or comma-separated names and priorities. Throws for an unknown name."
+  `p2`, `extra`), or comma-separated names and priorities. Throws for an unknown
+  name."
   [spec]
   (let [parts (remove str/blank? (map str/trim (str/split (or spec "all") #",")))]
     (->> (for [p parts]
            (cond (= "all" p)          (keys scenarios)
-                 (re-matches #"p\d" p) (for [[n s] scenarios
+                 (re-matches #"p\d|extra" p) (for [[n s] scenarios
                                             :when (= (keyword p) (:priority s))]
                                         n)
                  :else                (do (scenario-args p) [p])))

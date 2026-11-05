@@ -1,5 +1,5 @@
 # For --faults power: LazyFS in the node image, and FUSE in the node containers.
-# scripts/run.sh adds this file when its arguments mention power; by hand:
+# scripts/run.sh adds this file for --faults power or --compose lazyfs; by hand:
 #   COMPOSE_FILE=docker-compose.yml:docker-compose.lazyfs.yml scripts/run.sh --faults power ...
 # Mounting a FUSE filesystem in a container needs the host's /dev/fuse,
 # CAP_SYS_ADMIN, and, on hosts with AppArmor (Ubuntu, GitHub's runners), no

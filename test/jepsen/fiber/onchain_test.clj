@@ -123,7 +123,11 @@
       (let [tlc  {:amount "0x32", :expiry (rpc/int->hex 90000)}
             ends (assoc-in ends ["n1" :pending_tlcs] [tlc])]
         (is (= :awaiting-expiry (:status (oc/check-channel ends t locks 100000))))
-        (is (= :unsettled (:status (oc/check-channel ends t locks 200000)))))))
+        (is (= :unsettled (:status (oc/check-channel ends t locks 200000))))
+        (testing "but not a TLC already removed, which no commitment holds"
+          (let [ends (assoc-in ends ["n1" :pending_tlcs]
+                               [(assoc tlc :status {:Outbound "RemoveAckConfirmed"})])]
+            (is (= :unsettled (:status (oc/check-channel ends t locks 100000)))))))))
   (testing "a funding cell nobody spent: the channel never closed"
     (let [t (channel-trace [] :live [{:tx funding-hash, :index 0, :lock "F", :capacity 1000}])]
       (is (= :open (:status (oc/check-channel ends t locks 0))))))

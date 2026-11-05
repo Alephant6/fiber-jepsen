@@ -260,7 +260,7 @@
   than expiry-grace-ms before `time` (or hasn't expired yet)."
   [ends time]
   (some (fn [tlc] (< time (+ (or (hex-long (:expiry tlc)) 0) expiry-grace-ms)))
-        (mapcat :pending_tlcs (vals ends))))
+        (mapcat fc/live-tlcs (vals ends))))
 
 (defn check-channel
   "The verdict for one channel: `ends` {node record}, its `trace`, `locks`

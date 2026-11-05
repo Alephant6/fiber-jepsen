@@ -53,7 +53,7 @@
   "The jepsen.lazyfs map of `node`'s store: the store directory is a FUSE mount
   that keeps written data in LazyFS's own page cache until it is fsynced, backed
   by /fiber/lazyfs/data. LazyFS is in the node image only when built for it
-  (scripts/run.sh does with --faults power)."
+  (scripts/run.sh does with --faults power or --compose lazyfs)."
   [node]
   (lazyfs/lazyfs {:dir        (store-dir node)
                   :lazyfs-dir "/fiber/lazyfs"
@@ -199,6 +199,11 @@
             (c/exec :mkdir :-p (str small-fs "/store") (str (node-dir node) "/fiber"))
             (c/exec :ln :-s (str small-fs "/store") (store-dir node))))
     (when (lazyfs-store? test)
+      ; Without it, jepsen.lazyfs would try to build LazyFS on the node.
+      (when-not (c/su (cu/exists? lazyfs/bin))
+        (throw (ex-info (str "LazyFS isn't in " node "'s image: run with --compose lazyfs"
+                             " (scripts/run.sh adds it for --faults power, not for a scenario)")
+                        {:type :no-lazyfs, :node node})))
       (lazyfs/mount! (store-lazyfs node)))
     (start-fnn! test node)
     (await-rpc! node))

@@ -67,7 +67,16 @@
       (is (= {"n1" true, "n2" :not-logged, "n3" :no-log, "n4" [false true]}
              (:store-sync-writes (power/check h {"n1" [true], "n2" [], "n3" nil, "n4" [false true]})))))
     (testing "no power loss at all"
-      (is (= :unknown (:valid? (power/check [] modes)))))))
+      (is (= :unknown (:valid? (power/check [] modes)))))
+    (testing "--store-sync-writes asked for a mode fnn didn't log: the run didn't test it"
+      (is (true? (:valid? (power/check h modes false))))
+      (let [r (power/check h modes true)]
+        (is (= :unknown (:valid? r)))
+        (is (= {"n1" false, "n2" false, "n3" false} (:other-mode r))))
+      (is (= {"n2" :not-logged}
+             (:other-mode (power/check h {"n1" [true], "n2" [], "n3" [true true]} true))))
+      (is (false? (:valid? (power/check (conj h (assoc (op :power-off nil 7) :exception {}, :error "x"))
+                                        modes true)))))))
 
 (deftest in-the-test
   (is (contains? faults/supported :power))
