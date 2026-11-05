@@ -342,8 +342,9 @@
                        :color "#C4A0E9"}}})
 
 (defn ops
-  "A sleep of --old-state-after seconds, then endless pairs of a :save-state and
-  a :restore-state of one node, drawn from `r` by --old-state-targets."
+  "A sleep of --old-state-after seconds, then pairs of a :save-state and a
+  :restore-state of one node, drawn from `r` by --old-state-targets: endless, or
+  --old-state-count of them."
   [^SplittableRandom r opts]
   (let [specs   (vec (:old-state-targets opts [:one]))
         nodes   (vec (:nodes opts))
@@ -360,9 +361,10 @@
           (mapcat (fn [node]
                     [{:type :info, :f :save-state, :value {:node node}}
                      {:type :info, :f :restore-state, :value {:node node}}])
-                  (repeatedly #(case (schedule/pick r specs)
-                                 :one    (schedule/pick r nodes)
-                                 :middle (schedule/pick r middles)))))))
+                  (cond->> (repeatedly #(case (schedule/pick r specs)
+                                          :one    (schedule/pick r nodes)
+                                          :middle (schedule/pick r middles)))
+                    (:old-state-count opts) (take (:old-state-count opts)))))))
 
 (defn gaps
   "No gap after the opening sleep; then --old-state-hold seconds from a save to

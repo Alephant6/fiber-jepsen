@@ -25,6 +25,8 @@
       (is (< 1 (count (set (map (comp :node :value) (rest xs)))))))
     (testing "the same seed, the same targets"
       (is (= xs (take 21 (ops 3 opts))))))
+  (testing "--old-state-count: that many pairs, then nothing"
+    (is (= [:save-state :restore-state] (keep :f (take 21 (ops 3 (assoc opts :old-state-count 1)))))))
   (testing "middle: only the node that forwards"
     (is (= #{"n2"} (set (keep (comp :node :value) (take 21 (ops 4 (assoc opts :old-state-targets [:middle]))))))))
   (testing "not with the faults that move the store"

@@ -429,6 +429,11 @@
     :default  40
     :parse-fn parse-long
     :validate [#(and % (pos? %)) "Must be positive"]]
+   [nil "--old-state-count N" (str "With --faults old-state, how many save-and-restore pairs to run at"
+                                   " most (by default, as many as the fault window holds; one comes"
+                                   " every --old-state-hold + 100 s).")
+    :parse-fn parse-long
+    :validate [#(and % (pos? %)) "Must be positive"]]
    [nil "--old-state-force-close" (str "With --faults old-state, have the restored node force-close every"
                                        " channel it still has, once its peers have reconnected: with"
                                        " --old-state-restore raw it broadcasts the revoked commitments it"
