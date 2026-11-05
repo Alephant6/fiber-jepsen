@@ -25,6 +25,7 @@
                           [schedule :as schedule]
                           [topology :as topology]]
             [jepsen.fiber.faults [clock :as clock]
+                                 [outage :as outage]
                                  [packet :as packet]
                                  [partition :as partition]
                                  [process :as process]])
@@ -210,21 +211,22 @@
     :default  :kill
     :parse-fn keyword
     :validate [process/kill-signals (str "Must be one of " process/kill-signals)]]
-   [nil "--kill-duration SECONDS" (str "With --faults kill (and not pause), how long each kill lasts,"
-                                       " or a range MIN-MAX drawn per kill; the first kill then comes a"
-                                       " gap into the fault window. Default: until the next fault op"
-                                       " (at most 100 s).")
-    :parse-fn partition/parse-duration
-    :validate [(fn [[lo hi]] (and lo hi (< 0 lo) (<= lo hi))) "Must be S or MIN-MAX, 0 < MIN <= MAX"]]
    [nil "--tlc-expiry-delta MS" (str "After opening the channels, set every channel's TLC expiry delta"
                                      " to MS milliseconds (update_channel) and wait until every node"
-                                     " routes with it. Below 160 minutes it needs a debug build of fnn"
-                                     " (C-03: TLCs that expire within the run).")
+                                     " routes with it. A release build's minimum is 160 minutes"
+                                     " (9600000).")
     :parse-fn parse-long
     :validate [#(and % (pos? %)) "Must be positive"]]
    [nil "--final-tlc-expiry-delta MS" (str "Payments ask for this final TLC expiry delta, in"
                                            " milliseconds (send_payment, and new_invoice for"
-                                           " invoices). Below 160 minutes it needs a debug build.")
+                                           " invoices). A release build's minimum is 160 minutes.")
+    :parse-fn parse-long
+    :validate [#(and % (pos? %)) "Must be positive"]]
+   [nil "--tlc-expiry-limit MS" (str "Payments ask that no TLC expire more than MS milliseconds after"
+                                     " it is sent (send_payment's tlc_expiry_limit). Fiber adds a"
+                                     " random delay of 4 hours or more to every hop, so the limit must"
+                                     " cover 4 hours plus the route's deltas; just over that, it pins"
+                                     " the delay at 4 hours (C-03).")
     :parse-fn parse-long
     :validate [#(and % (pos? %)) "Must be positive"]]
    [nil "--term-grace SECONDS" (str "With --kill-signal term, seconds fnn has to exit after SIGTERM"
@@ -273,6 +275,30 @@
     :default  [60 1800]
     :parse-fn clock/parse-range
     :validate [(fn [[lo hi]] (and lo hi (<= 1 lo hi))) "Must be SECONDS or MIN-MAX, 1 <= MIN <= MAX"]]
+   [nil "--outage-targets TARGETS" (str "With --faults outage, comma-separated target specs to choose"
+                                        " from: middle (a node that forwards payments, n2 in line), one"
+                                        " (any node).")
+    :default  [:middle]
+    :parse-fn keywords
+    :validate [#(every? outage/target-specs %) (str "Must be a subset of " outage/target-specs)]]
+   [nil "--outage-duration SECONDS" (str "With --faults outage, how long each outage keeps its node down,"
+                                         " or a range MIN-MAX drawn per outage.")
+    :default  [120 180]
+    :parse-fn partition/parse-duration
+    :validate [(fn [[lo hi]] (and lo hi (< 0 lo) (<= lo hi))) "Must be S or MIN-MAX, 0 < MIN <= MAX"]]
+   [nil "--outage-await SECONDS" (str "With --faults outage, how long an outage waits for a neighbour"
+                                      " of its node to hold a TLC in flight to it before it kills the"
+                                      " node anyway.")
+    :default  30
+    :parse-fn parse-long
+    :validate [#(and % (<= 0 %)) "Must be 0 or more"]]
+   [nil "--outage-jump SECONDS" (str "With --faults outage, move every fnn's clock and the CKB node's"
+                                     " forward by this much during each outage that caught a TLC in"
+                                     " flight, so that the TLC expires (C-03). The clocks never jump"
+                                     " back. 0: no jump.")
+    :default  0
+    :parse-fn parse-long
+    :validate [#(and % (<= 0 %)) "Must be 0 or more"]]
    [nil "--nonce-check" (str "Check MuSig2 nonce use. Needs an fnn built with the nonce-oracle"
                              " feature (scripts/build-fnn-nonce-oracle.sh).")]
    [nil "--close" (str "Halfway through the faults, ask every channel to close cooperatively, and"

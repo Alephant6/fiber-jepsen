@@ -2,8 +2,6 @@
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.tools.cli :as cli]
             [jepsen.checker :as checker]
-            [jepsen.generator :as gen]
-            [jepsen.generator.test :as gt]
             [jepsen.fiber :as fiber]
             [jepsen.fiber [faults :as faults]
                           [schedule :as schedule]]
@@ -72,54 +70,8 @@
   (is (empty? (faults/checkers {:faults [:kill]})))
   (is (empty? (faults/checkers {:faults [:pause], :kill-signal :term}))))
 
-(deftest kill-durations
-  (let [usual #(take 20 (schedule/gaps (schedule/gaps-stream (schedule/streams 9) :db) 15))]
-    (testing "without --kill-duration, the usual gaps and ops"
-      (is (= (usual) (take 20 (process/gaps (schedule/streams 9) {:nemesis-interval 15}))))
-      (is (= :kill (:f (first (kill-ops 1 {}))))))
-    (testing "with it, the ops start with a start that starts nothing, then alternate"
-      (let [ops (kill-ops 40 {:kill-duration [60 90], :kill-targets [:middle]})]
-        (is (= process/first-start (first ops)))
-        (is (= (take 39 (kill-ops 39 {:kill-targets [:middle]})) (rest ops)))
-        (is (every? #(= :kill (:f %)) (take-nth 2 (rest ops))))
-        (is (every? #(= :start (:f %)) (take-nth 2 ops)))))
-    (testing "and the gaps alternate: the usual one after a start, a drawn one after a kill"
-      (let [g (take 20 (process/gaps (schedule/streams 9) {:nemesis-interval 15
-                                                          :kill-duration [60 90]}))]
-        (is (= (take 10 (usual)) (take-nth 2 g)))
-        (is (every? #(and (<= 60e9 % 90e9) (zero? (mod % 1000000000))) (take-nth 2 (rest g))))
-        (is (< 3 (count (set (take-nth 2 (rest g))))))))
-    (testing "under the simulator, a kill lasts what was drawn and the first comes a gap in"
-      (let [hist  (->> (gt/simulate (gen/context {:concurrency 1})
-                                    (gen/nemesis (gen/limit 21 (faults/generator
-                                                                 (schedule/streams 9)
-                                                                 {:nodes nodes, :faults [:kill]
-                                                                  :kill-targets [:middle]
-                                                                  :nemesis-interval 15
-                                                                  :kill-duration [60 90]})))
-                                    (fn [_ctx op] (-> op (assoc :type :ok) (update :time + 1000000))))
-                       (filter #(= :info (:type %))))
-            spans (->> (rest hist) (partition 2)
-                       (map (fn [[a b]] [(:f a) (:value a) (:f b) (- (:time b) (:time a))])))]
-        (is (= :start (:f (first hist))))
-        (is (= (first (usual)) (:time (second hist))))
-        (is (= 10 (count spans)))
-        (is (every? (fn [[a v b dt]] (and (= :kill a) (= ["n2"] v) (= :start b) (<= 60e9 dt 90e9)))
-                    spans)))))
-  (testing "only with kills, and not with pauses"
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"--kill-duration needs"
-                          (kill-ops 1 {:faults [:kill :pause], :kill-duration [60 90]})))
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"--kill-duration needs"
-                          (doall (take 1 ((:ops process/fault) (schedule/stream (schedule/streams 11) :db)
-                                                               {:nodes nodes, :faults [:pause]
-                                                                :kill-duration [60 90]})))))))
-
 (deftest options
   (let [parse #(cli/parse-opts % fiber/cli-opts)]
-    (is (= [60 90] (:kill-duration (:options (parse ["--kill-duration" "60-90"])))))
-    (is (= [75 75] (:kill-duration (:options (parse ["--kill-duration" "75"])))))
-    (is (seq (:errors (parse ["--kill-duration" "90-60"]))))
-    (is (nil? (:kill-duration (:options (parse [])))))
     (is (= :kill (:kill-signal (:options (parse [])))))
     (is (= 30 (:term-grace (:options (parse [])))))
     (is (= :term (:kill-signal (:options (parse ["--kill-signal" "term"])))))

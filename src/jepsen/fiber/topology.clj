@@ -130,8 +130,8 @@
   "--tlc-expiry-delta: every node sets `delta` ms as the TLC expiry delta of each
   of its channels (update_channel), then the test waits until every node's graph
   shows it for both directions of every channel, so that routes use it. A
-  release fnn refuses anything under 160 minutes; a debug build, whose epochs
-  last 2 s, takes a few seconds."
+  release fnn refuses anything under 160 minutes (two thirds of its 4-hour
+  epoch)."
   [test delta]
   (doseq [n  (:nodes test)
           ch (:channels (rpc/call n "list_channels" {}))]
@@ -139,8 +139,7 @@
                                        :tlc_expiry_delta (rpc/int->hex delta)})
          (catch clojure.lang.ExceptionInfo e
            (throw (ex-info (str "--tlc-expiry-delta " delta ": " n " refused it (" (ex-message e)
-                                "); under 160 minutes it needs a debug build of fnn"
-                                " (the workflow's fnn-profile: debug)")
+                                "); a release build's minimum is 160 minutes (9600000)")
                            {:type :tlc-expiry-delta, :node n, :delta delta}
                            e)))))
   (doseq [n (:nodes test)]

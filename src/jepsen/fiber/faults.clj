@@ -22,6 +22,7 @@
             [jepsen.fiber.schedule :as schedule]
             [jepsen.fiber.faults [clock :as clock]
                                  [disconnect :as disconnect]
+                                 [outage :as outage]
                                  [packet :as packet]
                                  [partition :as partition]
                                  [process :as process]]))
@@ -32,7 +33,8 @@
    process/fault
    disconnect/fault
    packet/fault
-   clock/fault])
+   clock/fault
+   outage/fault])
 
 (def supported
   "Every name --faults accepts."

@@ -4,13 +4,12 @@
   back, on chain once it has force-closed the channel, and the payment ends
   Failed.
 
-  A release build expires a TLC hours after it is sent, so this needs a debug
-  build of fnn (2-second epochs; the workflow's fnn-profile: debug), short
-  deltas (--tlc-expiry-delta, --final-tlc-expiry-delta) and kills of the
-  forwarding node that last longer than them (--kill-targets middle
-  --kill-duration). A node force-closes a channel once an offered TLC is within
-  2/3 of the commitment delay of its expiry (1.3 s in a debug build) and checks
-  every 3 s; after the commitment delay its watchtower takes the TLC back.
+  A release build of fnn makes a payment's TLC last at least 4 hours, so the
+  outage fault (jepsen.fiber.faults.outage, --faults outage --outage-jump)
+  moves every clock, the CKB node's included, past the expiry while the node is
+  down. A node force-closes a channel once an offered TLC is within 2/3 of the
+  commitment delay of its expiry (160 minutes in a release build), checking
+  every 60 s; after the commitment delay its watchtower takes the TLC back.
 
   After --onchain's settle, :final-payments reads every payment's status again.
   The check looks at every TLC a node's record of a closed channel still lists
@@ -23,12 +22,11 @@
               when the peer claims it with the preimage, which settles the
               payment; so the receipt must be at least balance + reserve - the
               channel's fees - the TLCs it offered that aren't a Failed payment
-              of its own (in a debug build, where they all expire within the
-              run).
+              of its own.
 
   Each TLC is a whole multiple of 0.01 CKB and fees are a few thousand
   shannons, so a TLC that went the wrong way shows. The verdict is :unknown
-  when no such TLC was left on a closed channel: the kills then caught no
+  when no such TLC was left on a closed channel: the outages then caught no
   payment in flight, and the run tested nothing of C-03."
   (:require [clojure.string :as str]
             [jepsen.checker :as checker]

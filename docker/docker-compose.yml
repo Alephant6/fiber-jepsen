@@ -21,6 +21,9 @@ services:
       dockerfile: chain/Dockerfile
     image: fiber-jepsen-chain
     hostname: chain
+    volumes:
+      # The CKB node's clock offset, which the outage fault writes from control.
+      - chain-clock:/chain-clock
     networks:
       fibernet: {ipv4_address: 10.77.0.10}
 
@@ -70,11 +73,13 @@ services:
     volumes:
       - ..:/jepsen
       - m2:/root/.m2
+      - chain-clock:/chain-clock
     networks:
       fibernet: {ipv4_address: 10.77.0.5}
 
 volumes:
   m2: {}
+  chain-clock: {}
 
 networks:
   fibernet:
