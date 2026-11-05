@@ -26,6 +26,7 @@
                           [schedule :as schedule]
                           [topology :as topology]]
             [jepsen.fiber.faults [chain-partition :as chain-partition]
+                                 [clock :as clock]
                                  [packet :as packet]
                                  [partition :as partition]
                                  [process :as process]])
@@ -33,8 +34,8 @@
 
 (def supported-faults
   "Faults this suite can inject, one namespace each under jepsen.fiber.faults.
-  Jepsen's :clock fault changes the host clock, which Docker containers share, so
-  clock skew needs a per-process approach (libfaketime) instead."
+  Jepsen's own clock nemesis changes the host clock, which Docker containers
+  share, so :clock here moves fnn's clock alone, with libfaketime."
   faults/supported)
 
 (defn payments
@@ -123,6 +124,7 @@
             :nemesis              (health/compose (:nemesis pkg))
             ; Shared state between the topology setup, the clients and the checker.
             :pubkeys              (atom {})
+            :fnn-env              (faults/fnn-env opts)
             :payments             (atom [])
             :initial-channels     (atom nil)
             :nonserializable-keys [:pubkeys :payments :initial-channels]
@@ -290,6 +292,17 @@
                                      " disconnected until the next fault op.")
     :parse-fn packet/parse-delay
     :validate [(fn [[lo hi]] (and lo hi (<= 0 lo hi))) "Must be MS or MIN-MAX, 0 <= MIN <= MAX"]]
+   [nil "--clock-targets TARGETS" (str "With --faults clock, comma-separated target specs to choose"
+                                       " from: one (a random node's clock jumps), all (every node's,"
+                                       " by the same offset).")
+    :default  [:one]
+    :parse-fn keywords
+    :validate [#(every? clock/target-specs %) (str "Must be a subset of " clock/target-specs)]]
+   [nil "--clock-jump SECONDS" (str "With --faults clock, how far fnn's clock jumps, or a range MIN-MAX"
+                                    " drawn per jump; forward or back at random.")
+    :default  [60 1800]
+    :parse-fn clock/parse-range
+    :validate [(fn [[lo hi]] (and lo hi (<= 1 lo hi))) "Must be SECONDS or MIN-MAX, 1 <= MIN <= MAX"]]
    [nil "--nonce-check" (str "Check MuSig2 nonce use. Needs an fnn built with the nonce-oracle"
                              " feature (scripts/build-fnn-nonce-oracle.sh).")]
    [nil "--close" (str "Halfway through the faults, ask every channel to close cooperatively, and"
