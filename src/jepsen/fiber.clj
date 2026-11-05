@@ -54,13 +54,14 @@
 
 (defn availability-window
   "With --availability-window, payments without faults for that many seconds,
-  at --rate, from a stream of their own (`k`), each op marked with :window
-  `window` for jepsen.fiber.checker/availability-checker. Nil without the
-  option. The streams are new, so the fault window's payments for a seed don't
-  change."
+  at --rate and of the --pay-kinds, from a stream of their own (`k`), each op
+  marked with :window `window` for jepsen.fiber.checker/availability-checker.
+  Nil without the option. The streams are new, so the fault window's payments
+  for a seed don't change."
   [opts streams k window]
   (when (availability? opts)
-    (->> (schedule/paced-payments streams k (:rate opts) (count (:nodes opts)))
+    (->> (schedule/paced-payments streams k (:rate opts) (count (:nodes opts))
+                                  (:pay-kinds opts [:keysend]))
          (gen/map #(assoc % :window window))
          (gen/time-limit (:availability-window opts))
          gen/clients)))
