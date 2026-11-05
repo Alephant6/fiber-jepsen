@@ -43,6 +43,10 @@ on:
         description: Names the summary and the artifact; give each call in one workflow its own.
         type: string
         default: jepsen
+      upload-store:
+        description: Upload the store also when every run passes.
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       fiber-repository:
@@ -63,6 +67,10 @@ on:
       label:
         description: Names the summary and the artifact
         default: jepsen
+      upload-store:
+        description: Upload the store also when every run passes
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -260,11 +268,12 @@ jobs:
             done
           done <runs.txt
       # upload-artifact rejects ':' in file names, and Jepsen names each run's
-      # directory by its start time, so the store goes up as one tarball.
+      # directory by its start time, so the store goes up as one tarball: after a
+      # failure, or always with upload-store.
       - name: Pack the store
-        if: failure()
+        if: failure() || inputs.upload-store
         run: tar -czf "$LABEL-store.tgz" --ignore-failed-read store run-*.log runs.txt seeds.txt
-      - if: failure()
+      - if: failure() || inputs.upload-store
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.label }}-store
