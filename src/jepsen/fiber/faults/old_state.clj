@@ -691,12 +691,12 @@
             held     (set (for [[_ records] final
                                 ch records
                                 :when (chans (:channel_id ch))
-                                tlc (:pending_tlcs ch)]
+                                tlc (fc/live-tlcs ch)]
                             (:payment_hash tlc)))
             ; A forwarder can't settle or fail its upstream TLC before the
             ; downstream one, on a restored node's channel, resolves.
             forwarded? (fn [{:keys [channel node problems]}]
-                         (let [tlcs (some #(when (= channel (:channel_id %)) (:pending_tlcs %))
+                         (let [tlcs (some #(when (= channel (:channel_id %)) (fc/live-tlcs %))
                                           (get final node))]
                            (and (seq tlcs)
                                 (every? #(= :pending-tlcs (first %)) problems)
