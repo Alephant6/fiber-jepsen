@@ -132,17 +132,18 @@
 
 (defn probe!
   "After the network has healed, sends one small keysend each way over every
-  channel. A healthy network completes them; a wedged channel leaves them stuck.
-  Status is Rejected when the node certainly created no payment, and Unknown when
-  the call got no reply."
+  channel, and with --probe-routes one between every two nodes without a channel
+  (marked :route? true; see topology/probe-pairs). A healthy network completes
+  them; a wedged channel leaves them stuck. Status is Rejected when the node
+  certainly created no payment, and Unknown when the call got no reply."
   [test]
-  (vec (for [[a b]     (topology/edges test)
-             [from to] [[a b] [b a]]
-             :let      [amount 1000000
-                        id     (attempt-id)]]
+  (vec (for [[from to route?] (topology/probe-pairs test)
+             :let             [amount 1000000
+                               id     (attempt-id)]]
          (let [res   (try (send-keysend! test from to amount id)
                           (catch Exception e {::indefinite (ex-message e)}))
-               entry {:from from, :to to, :amount amount, :id id}
+               entry (cond-> {:from from, :to to, :amount amount, :id id}
+                       route? (assoc :route? true))
                ; The checker matches errors as strings.
                err   #(if (string? %) % (pr-str %))]
            (cond

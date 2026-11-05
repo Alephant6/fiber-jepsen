@@ -177,3 +177,76 @@
                             [(pay :ok 1 "n1" "n2" 100 {:hash "0xa1", :fee 0}) read] {})]
     ; n2 paid n3 50 that no payment explains.
     (is (= :unbalanced (:outcome r)))))
+
+;; Off the line: a ring n1 - n2 - n3 - n4 - n1, where a payment may take either way.
+
+(def ring-nodes ["n1" "n2" "n3" "n4"])
+
+(def ring-ids
+  {"0x12" ["n1" "n2"], "0x23" ["n2" "n3"], "0x34" ["n3" "n4"], "0x41" ["n4" "n1"]})
+
+(defn ring-channels
+  "Channel records for the ring: each channel starts 1000 on both ends, and
+  `moves` maps a channel id to how much its first node paid its second."
+  [moves]
+  (reduce (fn [m [id [a b]]]
+            (let [d (get moves id 0)]
+              (-> m
+                  (update a (fnil conj []) (channel id (- 1000 d) (+ 1000 d)))
+                  (update b (fnil conj []) (channel id (+ 1000 d) (- 1000 d))))))
+          {}
+          (sort ring-ids)))
+
+(defn ring-check
+  [moves listing ops]
+  (ledger/analyze ring-nodes (ring-channels {}) {:channels (ring-channels moves), :listed listing}
+                  ops {:line? false}))
+
+(def no-listing {"n2" [], "n3" [], "n4" []})
+
+(deftest off-the-line
+  (testing "n1 pays n3 50 for a fee of 1, through either n2 or n4"
+    (doseq [moves [{"0x12" 51, "0x23" 50} {"0x41" -51, "0x34" -50}]]
+      (let [r (ring-check moves
+                          (assoc no-listing "n1" [(listed "0xa1" 1 "Success" 1)])
+                          [(pay :ok 1 "n1" "n3" 50 {:hash "0xa1", :fee 1})])]
+        (is (= :balanced (:outcome r)))
+        (is (= {"n1" -51, "n2" 0, "n3" 50, "n4" 0} (update-vals (:nodes r) :expected)))
+        (is (= {"n1" 0, "n2" 1, "n3" 0, "n4" 1} (update-vals (:nodes r) :forwarded-max)))
+        (is (= {:paid 1, :forwarded 1} (:fees r))))))
+  (testing "neighbours: no fee, nothing forwarded"
+    (let [r (ring-check {"0x12" 20}
+                        (assoc no-listing "n1" [(listed "0xa1" 1 "Success" 0)])
+                        [(pay :ok 1 "n1" "n2" 20 {:hash "0xa1", :fee 0})])]
+      (is (= :balanced (:outcome r)))))
+  (testing "n2 pays n3 for a payment from n1 that failed"
+    (let [r (ring-check {"0x23" 50}
+                        (assoc no-listing "n1" [(listed "0xa1" 1 "Failed" 0)])
+                        [(pay :fail 1 "n1" "n3" 50 {:hash "0xa1"})])]
+      (is (= false (:valid? r)))
+      (is (= :unbalanced (:outcome r)))
+      (is (= ["n2" "n3"] (:unbalanced-nodes r)))
+      (is (= {"n1" 0, "n2" -50, "n3" 50, "n4" 0} (update-vals (:nodes r) :diff)))))
+  (testing "n2 is paid for a payment it doesn't pass on"
+    (let [r (ring-check {"0x12" 51}
+                        (assoc no-listing "n1" [(listed "0xa1" 1 "Success" 1)])
+                        [(pay :ok 1 "n1" "n3" 50 {:hash "0xa1", :fee 1})])]
+      (is (= :unbalanced (:outcome r)))
+      (is (= ["n2" "n3"] (:unbalanced-nodes r)))))
+  (testing "income within every node's bound, but not adding up to the fees"
+    ; n1 pays n3 through n2 for a fee of 2, and n4's end of 0x34 gains 2 from nowhere
+    ; (the channel checks catch that too).
+    (let [final (-> (ring-channels {"0x12" 52, "0x23" 50})
+                    (update "n4" (partial mapv #(if (= "0x34" (:channel_id %))
+                                                  (channel "0x34" 1002 1000)
+                                                  %))))
+          r     (ledger/analyze ring-nodes (ring-channels {})
+                                {:channels final
+                                 :listed   (assoc no-listing "n1" [(listed "0xa1" 1 "Success" 2)])}
+                                [(pay :ok 1 "n1" "n3" 50 {:hash "0xa1", :fee 2})]
+                                {:line? false})]
+      (is (= [] (:unbalanced-nodes r)))
+      (is (= {:paid 2, :forwarded 4} (:fees r)))
+      (is (= :unbalanced (:outcome r)))))
+  (testing "the line keeps its exact check"
+    (is (nil? (:fees (check (line-channels 1000 500 1000 500) {"n1" [], "n2" [], "n3" []} []))))))

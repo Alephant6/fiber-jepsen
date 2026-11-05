@@ -2,11 +2,13 @@
   (:require [clojure.test :refer [deftest is testing]]
             [jepsen.generator :as gen]
             [jepsen.generator.test :as gt]
+            [jepsen.nemesis :as n]
             [jepsen.fiber [faults :as faults]
                           [schedule :as schedule]
                           [topology :as topology]]
             [jepsen.fiber.faults [chain-partition :as chain-partition]
-                                 [packet :as packet]]))
+                                 [packet :as packet]
+                                 [partition :as partition]]))
 
 (def nodes ["n1" "n2" "n3"])
 
@@ -79,9 +81,115 @@
     (is (= [500 3000] (packet/parse-delay "500-3000")))
     (is (= [800 800] (packet/parse-delay "800")))))
 
+(def six
+  ["n1" "n2" "n3" "n4" "n5" "n6"])
+
+(defn connected?
+  "Whether `edges` connect all of `nodes`."
+  [nodes edges]
+  (let [nb (topology/neighbours edges)]
+    (loop [seen #{(first nodes)}, todo [(first nodes)]]
+      (if-let [[x & more] (seq todo)]
+        (let [new (remove seen (nb x))]
+          (recur (into seen new) (into (vec more) new)))
+        (= (set nodes) seen)))))
+
 (deftest topologies
   (is (= [["n1" "n2"] ["n2" "n3"]] (topology/edges {:nodes nodes})))
-  (is (= [["n1" "n2"] ["n2" "n3"]] (topology/edges {:nodes nodes, :topology :line}))))
+  (is (= [["n1" "n2"] ["n2" "n3"]] (topology/edges {:nodes nodes, :topology :line})))
+  (is (= [["n1" "n2"] ["n2" "n3"] ["n3" "n1"]] (topology/edges {:nodes nodes, :topology :ring})))
+  (testing "three nodes: the mesh is the ring"
+    (is (= (topology/ring nodes) (topology/mesh nodes))))
+  (testing "six nodes: the mesh is the ring and its three diameters, three channels a node"
+    (is (= [["n1" "n2"] ["n2" "n3"] ["n3" "n4"] ["n4" "n5"] ["n5" "n6"] ["n6" "n1"]
+            ["n1" "n4"] ["n2" "n5"] ["n3" "n6"]]
+           (topology/edges {:nodes six, :topology :mesh})))
+    (is (= {"n1" #{"n2" "n6" "n4"}} (select-keys (topology/neighbours (topology/mesh six)) ["n1"])))
+    (is (every? #(= 3 (count %)) (vals (topology/neighbours (topology/mesh six))))))
+  (testing "every graph spans its nodes, with one channel per pair and none to itself"
+    (doseq [k (range 2 7), t (keys topology/topologies)]
+      (let [ns    (subvec six 0 k)
+            edges (topology/edges {:nodes ns, :topology t})
+            pairs (map set edges)]
+        (testing (str t " over " k)
+          (is (connected? ns edges))
+          (is (every? #(= 2 (count %)) pairs))
+          (is (apply distinct? pairs))
+          (when (and (< 2 k) (not= :line t))
+            (is (every? #(<= 2 (count %)) (vals (topology/neighbours edges)))))))))
+  (testing "node addresses"
+    (is (= ["10.77.0.11" "10.77.0.13" "10.77.0.16" "10.77.0.22"]
+           (map topology/node-ip ["n1" "n3" "n6" "n12"])))))
+
+(defn partition-ops-before-target-specs
+  "partition/ops as it was before target specs, at 84599bc."
+  [r nodes]
+  (mapcat (fn [node]
+            [{:type  :info
+              :f     :start-partition
+              :value (n/complete-grudge [[node] (vec (remove #{node} nodes))])}
+             {:type :info, :f :stop-partition, :value nil}])
+          (repeatedly #(schedule/pick r nodes))))
+
+(defn components
+  "The sides of a complete grudge between two groups."
+  [grudge]
+  (set (for [[node enemies] grudge]
+         (set (remove enemies (keys grudge))))))
+
+(deftest partition-targets
+  (let [r    #(schedule/stream (schedule/streams %) :partition)
+        ops  (fn [seed opts]
+               (take 200 ((:ops partition/fault) (r seed) (merge {:nodes six} opts))))
+        cuts (fn [ops] (map (comp components :value) (filter (comp #{:start-partition} :f) ops)))]
+    (testing "one, the default, gives the ops it gave before"
+      (doseq [seed [1 2 3], ns [nodes six]]
+        (let [before (take 200 (partition-ops-before-target-specs (r seed) ns))]
+          (is (= before (take 200 (partition/ops (r seed) ns))))
+          (is (= before (take 200 ((:ops partition/fault) (r seed) {:nodes ns}))))
+          (is (= before (take 200 ((:ops partition/fault) (r seed)
+                                                          {:nodes ns, :partition-targets [:one]})))))))
+    (testing "half cuts a random half from the rest"
+      (let [cs (cuts (ops 4 {:partition-targets [:half]}))]
+        (is (every? #(= #{3} (set (map count %))) cs))
+        (is (every? #(= (set six) (apply into %)) cs))
+        (is (< 5 (count (set cs))))
+        (is (= cs (cuts (ops 4 {:partition-targets [:half]}))))
+        (is (not= cs (cuts (ops 5 {:partition-targets [:half]}))))))
+    (testing "an odd count isolates the smaller half"
+      (is (every? #(= #{2 3} (set (map count %)))
+                  (cuts (take 40 ((:ops partition/fault) (r 4) {:nodes (subvec six 0 5)
+                                                                :partition-targets [:half]}))))))
+    (testing "one,half draws both"
+      (is (= #{#{1 5} #{3}}
+             (set (map #(set (map count %)) (cuts (ops 6 {:partition-targets [:one :half]})))))))))
+
+(deftest partition-durations
+  (let [usual #(take 20 (schedule/gaps (schedule/gaps-stream (schedule/streams 9) :partition) 15))]
+    (testing "without --partition-duration, the usual gaps"
+      (is (= (usual) (take 20 (partition/gaps (schedule/streams 9) {:nemesis-interval 15})))))
+    (testing "with it, each partition lasts a drawn number of seconds; the healings keep their gaps"
+      (let [g (take 20 (partition/gaps (schedule/streams 9) {:nemesis-interval 15
+                                                            :partition-duration [120 300]}))]
+        (is (every? #(and (<= 120e9 % 300e9) (zero? (mod % 1000000000))) (take-nth 2 g)))
+        (is (< 3 (count (set (take-nth 2 g)))))
+        (is (= (take 10 (usual)) (take-nth 2 (rest g))))))
+    (testing "under the simulator, a partition lasts what was drawn"
+      (let [hist  (->> (gt/simulate (gen/context {:concurrency 1})
+                                    (gen/nemesis (gen/limit 20 (faults/generator
+                                                                 (schedule/streams 9)
+                                                                 {:nodes six, :faults [:partition]
+                                                                  :nemesis-interval 15
+                                                                  :partition-duration [120 300]})))
+                                    (fn [_ctx op] (-> op (assoc :type :ok) (update :time + 1000000))))
+                       (filter #(= :info (:type %))))
+            spans (->> hist (partition 2) (map (fn [[a b]] [(:f a) (:f b) (- (:time b) (:time a))])))]
+        (is (= 10 (count spans)))
+        (is (every? (fn [[a b dt]] (and (= :start-partition a) (= :stop-partition b)
+                                        (<= 120e9 dt 300e9)))
+                    spans))))
+    (is (= [120 300] (partition/parse-duration "120-300")))
+    (is (= [180 180] (partition/parse-duration "180")))))
 
 (deftest chain-partition
   (let [ops    (take 400 (chain-partition/ops (schedule/stream (schedule/streams 5) :chain-partition)
