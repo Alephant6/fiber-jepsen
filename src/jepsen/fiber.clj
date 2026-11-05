@@ -234,8 +234,11 @@
     :parse-fn resources/parse-range
     :validate [(fn [[lo hi]] (and lo hi (<= 0.01 lo hi))) "Must be CPUS or MIN-MAX, 0.01 <= MIN <= MAX"]]
    [nil "--memory-limit MIB" (str "With --faults memory, the memory a limited node's container gets"
-                                  " (MiB, no swap), or a range MIN-MAX drawn per fault.")
-    :default  [64 256]
+                                  " (MiB, no swap), or a range MIN-MAX drawn per fault. The default"
+                                  " starts above fnn's anonymous memory under c-12's load (at most"
+                                  " 92 MiB on ae6f7d34), so an OOM kill means fnn grew, not that the"
+                                  " limit was below what it always needs.")
+    :default  [128 256]
     :parse-fn resources/parse-range
     :validate [(fn [[lo hi]] (and lo hi (<= 16 lo hi))) "Must be MIB or MIN-MAX, 16 <= MIN <= MAX"]]
    [nil "--nonce-check" (str "Check MuSig2 nonce use. Needs an fnn built with the nonce-oracle"

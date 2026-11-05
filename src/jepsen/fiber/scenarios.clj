@@ -29,7 +29,7 @@
                         "--log-level" "info,fnn::fiber::network=debug"]
              :differs  (str "Limits are Docker's (docker update), on the node's whole container:"
                             " fnn and sshd. Each limit draws CPU (0.1-0.5 CPUs) or memory"
-                            " (64-256 MiB, no swap) and one node or all of them, and lasts an"
+                            " (128-256 MiB, no swap) and one node or all of them, and lasts an"
                             " exponential 30 s on average, capped at 100 s. Lifting sets the limits"
                             " to the host's size, since Docker can't remove one. A disconnect loop"
                             " is a pair of nodes disconnecting 3 times or more within a limit and"

@@ -11,7 +11,7 @@
 
 (def opts
   {:nodes nodes, :faults [:cpu :memory], :resource-targets [:one :all]
-   :cpu-limit [0.1 0.5], :memory-limit [64 256]})
+   :cpu-limit [0.1 0.5], :memory-limit [128 256]})
 
 (defn draw
   [seed opts n]
@@ -31,7 +31,7 @@
       (doseq [l limits]
         (if-let [c (:cpus l)]
           (is (and (<= 0.1 c 0.5) (= c (/ (Math/round (* 100 c)) 100.0))))
-          (is (and (integer? (:memory-mib l)) (<= 64 (:memory-mib l) 256))))))
+          (is (and (integer? (:memory-mib l)) (<= 128 (:memory-mib l) 256))))))
     (testing "only the kinds asked for"
       (is (every? :cpus (map :value (filter (comp #{:limit-resources} :f)
                                             (draw 3 (assoc opts :faults [:cpu]) 100)))))
