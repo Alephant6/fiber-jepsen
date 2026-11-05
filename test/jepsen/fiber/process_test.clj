@@ -96,3 +96,23 @@
       (is (nil? (process/effect {:f :pause, :value ["n1"]})))
       (is (nil? (process/effect {:f :resume, :value {"n1" "Ssl"}})))
       (is (nil? (process/effect {:f :kill, :value {"n1" nil}}))))))
+
+(deftest process-duration
+  (let [opts   {:nodes nodes, :faults [:kill :pause], :kill-targets [:one], :nemesis-interval 45}
+        ops    #(take 40 ((:ops process/fault) (schedule/stream (schedule/streams 11) :db) %))
+        gaps   #(take 40 ((:gaps process/fault) (schedule/streams 11) %))
+        usual  (gaps opts)]
+    (testing "without the option: the ops and gaps of before"
+      (is (= usual (take 40 (schedule/gaps (schedule/gaps-stream (schedule/streams 11) :db) 45))))
+      (is (some #(= [:pause :kill] %) (map (comp vec (partial map :f)) (partition 2 1 (ops opts))))))
+    (testing "with it, each kill or pause is followed by its own recovery after a drawn time"
+      (let [o  (assoc opts :process-duration [5 15])
+            fs (map :f (ops o))
+            gs (gaps o)]
+        (is (every? #{[:kill :start] [:pause :resume]} (map vec (partition 2 fs))))
+        (is (= #{:kill :pause} (set (take-nth 2 fs))))
+        (is (every? #(<= 5e9 % 15e9) (take-nth 2 gs)))
+        (is (= (take 20 usual) (take-nth 2 (rest gs))))))
+    (testing "the option parses"
+      (is (= [5 15] (:process-duration (:options (cli/parse-opts ["--process-duration" "5-15"] fiber/cli-opts)))))
+      (is (seq (:errors (cli/parse-opts ["--process-duration" "15-5"] fiber/cli-opts)))))))

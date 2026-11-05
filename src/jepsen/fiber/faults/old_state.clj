@@ -63,7 +63,6 @@
                     [nemesis :as n]
                     [store :as store]]
             [jepsen.fiber [checker :as fc]
-                          [closes :as closes]
                           [db :as fdb]
                           [health :as health]
                           [onchain :as onchain]
@@ -667,6 +666,16 @@
           :else
           (recur more began saves out))))))
 
+;; Not closes/final-read: jepsen.fiber.closes loads jepsen.fiber.faults, which
+;; loads this namespace.
+(defn- final-read
+  "The value of the last :ok :read in `history`."
+  [history]
+  (->> history
+       (filter #(and (= :ok (:type %)) (= :read (:f %))))
+       last
+       :value))
+
 (defn excuse
   "The fiber checker's result `r`, less what a restore explains: problems of a
   restored node's channels, on either end (the restored end's balances are old
@@ -687,7 +696,7 @@
                                 :when (map? v)
                                 id (keys v)]
                             id))
-            final    (:channels (closes/final-read history))
+            final    (:channels (final-read history))
             held     (set (for [[_ records] final
                                 ch records
                                 :when (chans (:channel_id ch))

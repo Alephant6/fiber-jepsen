@@ -192,6 +192,12 @@ jobs:
       # number, run.sh's exit status and its store directory. Each run gets its
       # own seed, unless the arguments give one to replay a run; seeds.txt gets
       # the run's number and its seed.
+      #
+      # load-N.log samples the runner every 30 s while run N goes: the load
+      # average (/proc/loadavg) and each container's CPU and memory (docker
+      # stats), to show how busy the runner was (six fnn nodes and many faults
+      # at once, C-16, on 4 vCPUs). It goes into the run's store directory as
+      # runner-load.log.
       - name: Run
         run: |
           set +e -u -o pipefail
@@ -202,10 +208,17 @@ jobs:
             extra=()
             [ -n "$given" ] || extra=(--seed "$seed")
             echo "::group::run $i of $RUNS, seed $seed"
+            (while :; do
+               echo "== $(date -u +%FT%TZ) loadavg $(cat /proc/loadavg) cpus $(nproc)"
+               timeout 20 docker stats --no-stream --format '{{.Name}} cpu {{.CPUPerc}} mem {{.MemUsage}}' </dev/null
+               sleep 30
+             done) >"load-$i.log" 2>&1 &
+            sampler=$!
             # ARGS is a list of arguments, so it is split on purpose.
             # shellcheck disable=SC2086
             scripts/run.sh $ARGS "${extra[@]}" 2>&1 | tee "run-$i.log"
             code=${PIPESTATUS[0]}
+            kill "$sampler" 2>/dev/null
             # The chain container's log (ckb and its miner); the store has fnn's.
             (cd docker && docker compose logs --no-color --timestamps chain) >"chain-$i.log" 2>&1 </dev/null || true
             echo "::endgroup::"
@@ -213,6 +226,7 @@ jobs:
             # this checkout at /jepsen.
             dir="$(readlink store/latest 2>/dev/null)"
             dir="${dir#/jepsen/store/}"
+            [ -z "$dir" ] || sudo cp "load-$i.log" "store/$dir/runner-load.log"
             echo "$i $code ${dir:-none}" >>runs.txt
             echo "$i $seed" >>seeds.txt
             [ "$code" -eq 0 ] || status=1
@@ -275,6 +289,13 @@ jobs:
               printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$LABEL" "$i" "${seed:--}" "$code" "${verdict:-none}" \
                 "${failed:--}" "$probe" "${rates:--}" "${channels:--}" "$store" >>runs.tsv
             done <runs.txt
+            # The runner's 1-minute load average while each run went (load-N.log).
+            echo
+            for f in load-*.log; do
+              [ -f "$f" ] || continue
+              awk -v run="${f//[^0-9]/}" '/^== / { n++; s += $4; if ($4 > m) m = $4; c = $NF }
+                END { if (n) printf "- Run %s: runner load average (1 min) peak %.1f, mean %.1f, over %d samples, %s CPUs\n", run, m, s / n, n, c }' "$f"
+            done
           } >>"$GITHUB_STEP_SUMMARY"
 
       # Jepsen reports only that a node's RPC never came up; fnn's log says why,
@@ -308,7 +329,7 @@ jobs:
       # failure, or always with upload-store.
       - name: Pack the store
         if: failure() || inputs.upload-store
-        run: tar -czf "$LABEL-store.tgz" --ignore-failed-read store run-*.log chain-*.log runs.txt seeds.txt
+        run: tar -czf "$LABEL-store.tgz" --ignore-failed-read store run-*.log chain-*.log load-*.log runs.txt seeds.txt
       - if: failure() || inputs.upload-store
         uses: actions/upload-artifact@v4
         with:

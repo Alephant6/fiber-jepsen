@@ -144,3 +144,79 @@
   (testing "six nodes in a mesh: six pairs, each way"
     (is (= 12 (count (filter last (topology/probe-pairs {:nodes ["n1" "n2" "n3" "n4" "n5" "n6"]
                                                          :topology :mesh, :probe-routes true})))))))
+
+(defn nem
+  "A nemesis completion at `s` seconds, after its invocation."
+  [s f value]
+  [{:type :info, :process :nemesis, :f f, :time (long (* 1e9 (- s 0.5)))}
+   {:type :info, :process :nemesis, :f f, :value value, :time (long (* 1e9 s))}])
+
+(def faults-history
+  (vec (concat (nem 10 :kill {"n2" :killed})
+               (nem 12 :pause {"n4" "T"})
+               (nem 20 :pause {"n1" "S"})          ; not stopped: no spell
+               (nem 25 :resume {"n1" "S", "n2" :not-running, "n3" "S", "n4" "S"})
+               (nem 30 :start-partition [:isolated {"n3" #{"n4"}, "n4" #{"n3"}}])
+               (nem 50 :start {"n1" :already-running, "n2" :started, "n3" :already-running
+                               "n4" :already-running})
+               (nem 60 :kill {"n1" :killed})
+               (nem 100 :stop-partition :network-healed)
+               (nem 105 :health {})
+               (nem 120 :start {"n1" :started}))))
+
+(deftest outages
+  (is (= [{:kind :pause, :node "n4", :seconds 13.0}
+          {:kind :kill, :node "n2", :seconds 40.0}
+          {:kind :kill, :node "n1", :seconds 60.0}
+          {:kind :partition, :nodes #{"n3" "n4"}, :seconds 70.0}]
+         (sort-by :seconds (map #(dissoc % :from :to) (closes/outages faults-history)))))
+  (testing "a spell nothing ends lasts until the history does"
+    (is (= [{:kind :kill, :node "n2", :seconds 30.0}]
+           (map #(dissoc % :from :to)
+                (closes/outages (concat (nem 10 :kill {"n2" :killed})
+                                        [{:type :ok, :process 0, :f :read, :time (long 40e9)}])))))))
+
+(deftest explainer
+  (let [why (closes/explainer faults-history 30)]
+    (is (= :kill (:kind (why ["n1" "n2"]))))            ; n1 down 60 s, n2 down 40 s: the longer
+    (is (= 60.0 (:seconds (why ["n1" "n2"]))))
+    (is (= :partition (:kind (why ["n3" "n4"]))))
+    (is (nil? (why ["n3" "n5"])))                      ; n4's pause lasted 13 s
+    (is (nil? ((closes/explainer faults-history 70) ["n3" "n4"])))))
+
+(defn run-after
+  "As `run`, with --force-close-ok-after 30 and `faults` before the final read."
+  [final faults]
+  (let [test {:nodes nodes, :topology :ring, :initial-channels (atom (ring))}]
+    (checker/check (closes/checker 30) test
+                   (concat faults
+                           [{:type :ok, :f :probe, :value all-probes, :time (long 200e9)}
+                            {:type :ok, :f :read, :value {:channels final, :payments []}
+                             :time (long 201e9)}])
+                   {})))
+
+(deftest force-close-ok-after
+  (let [closed {["0x23" "n2"] "Closed", ["0x23" "n3"] "Closed"}]
+    (testing "a closed channel one of whose ends was down past the deadline is excused"
+      (let [r (run-after (ring closed {}) (concat (nem 10 :kill {"n3" :killed})
+                                                  (nem 45 :start {"n3" :started})))]
+        (is (= true (:valid? r)))
+        (is (= ["0x23"] (get-in r [:force-closed :channels])))
+        (is (= {"0x23" {:kind :kill, :node "n3", :seconds 35.0}} (get-in r [:force-closed :because])))
+        (is (= 30 (:force-close-ok-after-s r)))))
+    (testing "but not after a shorter fault, nor one of other nodes"
+      (doseq [faults [(concat (nem 10 :kill {"n3" :killed}) (nem 25 :start {"n3" :started}))
+                      (concat (nem 10 :kill {"n1" :killed}) (nem 95 :start {"n1" :started}))
+                      []]]
+        (let [r (run-after (ring closed {}) faults)]
+          (is (= false (:valid? r)))
+          (is (= ["0x23"] (get-in r [:force-closed :not-excused])))
+          (is (= #{"0x23"} (set (map :channel (:channel-problems r))))))))
+    (testing "a partition of its two ends past the deadline"
+      (let [r (run-after (ring closed {})
+                         (concat (nem 10 :start-partition [:isolated {"n2" #{"n3" "n4"}
+                                                                      "n3" #{"n1" "n2"}}])
+                                 (nem 50 :stop-partition :network-healed)))]
+        (is (= true (:valid? r)))
+        (is (= {:kind :partition, :nodes ["n2" "n3"], :seconds 40.0}
+               (get-in r [:force-closed :because "0x23"])))))))

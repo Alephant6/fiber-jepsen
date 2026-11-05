@@ -35,6 +35,24 @@
   (testing "flashes of 100 ms to 5 s"
     (is (= [100 5000] (:disconnect-flash (:options (parse ["--scenario" "c-05"])))))))
 
+(deftest c-16
+  (let [{:keys [options errors]} (parse ["--scenario" "c-16"])]
+    (is (empty? errors))
+    (testing "nine faults that can run together, on the six-node mesh"
+      (is (= #{:kill :pause :partition :disconnect :packet :chain-partition :cpu :memory :clock}
+             (set (:faults options))))
+      (is (= :mesh (:topology options)))
+      (is (= 6 (count (:nodes options)))))
+    (testing "kills, pauses, partitions and clock steps under fnn's 30 s deadline; closes fail the run"
+      (is (< (second (:process-duration options)) 30))
+      (is (< (second (:partition-duration options)) 30))
+      (is (< (second (:clock-jump options)) 30))
+      (is (not (:force-close-ok options)))
+      (is (nil? (:force-close-ok-after options))))
+    (testing "the narrower rule can be added"
+      (is (= 30 (:force-close-ok-after (:options (parse ["--scenario" "c-16"
+                                                         "--force-close-ok-after" "30"]))))))))
+
 (deftest expand
   (testing "a scenario's arguments follow the option, so later ones override them"
     (let [{:keys [options errors]} (parse ["--scenario" "c-08" "--time-limit" "60"])]

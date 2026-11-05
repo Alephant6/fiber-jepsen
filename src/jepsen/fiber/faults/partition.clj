@@ -15,9 +15,15 @@
   so this rarely makes channels reestablish; the disconnect fault does. A node
   waiting more than 30 s for its peer's reply force-closes the channel (fnn's
   PEER_CHANNEL_RESPONSE_TIMEOUT), so a partition longer than that usually closes
-  the channels across it (open question 1 on the chaos-test plan)."
+  the channels across it (open question 1 on the chaos-test plan).
+
+  Healing deletes the partitions' own rules only (`net`), so that it doesn't
+  also end a chain partition that is in effect at the time."
   (:require [clojure.string :as str]
-            [jepsen.nemesis :as n]
+            [jepsen [control :as c]
+                    [nemesis :as n]
+                    [net :as jnet]]
+            [jepsen.net.proto :as p]
             [jepsen.nemesis.combined :as nc]
             [jepsen.fiber.schedule :as schedule])
   (:import (java.util ArrayList Collection Collections SplittableRandom)))
@@ -71,6 +77,44 @@
         (interleave (repeatedly #(* 1000000000 (+ lo (.nextInt r (int (inc (- hi lo)))))))
                     usual))
       usual)))
+
+(def partition-rule
+  "A rule of jepsen.net/iptables's partitions as `iptables -S INPUT` prints it:
+  everything from one address dropped, with no match or comment that would
+  mark another fault's rule (the chain partition's carry a comment)."
+  #"-A INPUT -s (\S+) -j DROP")
+
+(defn partition-sources
+  "The source address of every partition rule in `s`, the output of
+  `iptables -S INPUT`, once per rule."
+  [s]
+  (keep #(second (re-matches partition-rule (str/trim %))) (str/split-lines (or s ""))))
+
+(defn heal-partitions!
+  "Deletes the current node's partition rules, and no other rule."
+  []
+  (c/su (doseq [src (partition-sources (c/exec :iptables :-w :-S :INPUT))]
+          (c/exec :iptables :-w :-D :INPUT :-s src :-j :DROP))))
+
+(def net
+  "The test's network (its :net): jepsen.net/iptables, except that healing
+  deletes only the partitions' rules. iptables' own heal! flushes every rule on
+  every node, so a partition's healing used to end any chain partition
+  (jepsen.fiber.faults.chain-partition) in effect at the time, whenever both
+  faults ran (C-16)."
+  (let [base jnet/iptables]
+    (reify
+      p/Net
+      (drop! [_ test src dest] (p/drop! base test src dest))
+      (heal! [_ test] (c/on-nodes test (fn [_ _] (heal-partitions!))))
+      (slow! [_ test] (p/slow! base test))
+      (slow! [_ test opts] (p/slow! base test opts))
+      (flaky! [_ test] (p/flaky! base test))
+      (fast! [_ test] (p/fast! base test))
+      (shape! [_ test nodes behavior] (p/shape! base test nodes behavior))
+
+      p/PartitionAll
+      (drop-all! [_ test grudge] (p/drop-all! base test grudge)))))
 
 (defn parse-duration
   "\"120-300\" -> [120 300]; \"180\" -> [180 180]. Seconds."

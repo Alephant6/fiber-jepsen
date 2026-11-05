@@ -13,7 +13,8 @@
             [clojure.tools.logging :refer [warn]]
             [jepsen [generator :as gen]
                     [nemesis :as n]
-                    [random :as rand]]
+                    [random :as rand]
+                    [util :as util]]
             [jepsen.fiber [rpc :as rpc]
                           [schedule :as schedule]
                           [topology :as topology]])
@@ -27,6 +28,19 @@
        (catch Exception e
          (warn "disconnect nemesis:" node method (.getMessage e))
          (str "failed: " (.getMessage e)))))
+
+(defn- connect!
+  "connect_peer from `a` to `b`, at the address in `b`'s node_info `info`, or a
+  short failure string. The address can be missing when node_info failed (b
+  down or paused, with other faults), and then the op records that rather than
+  throwing: a thrown :reconnect fails the run's :faults check, though nothing
+  is wrong with the fault."
+  [a b info]
+  (let [addr (try (topology/p2p-address b info)
+                  (catch Exception e (str "failed: " (.getMessage e))))]
+    (if (str/starts-with? addr "failed")
+      addr
+      (try-call a "connect_peer" {:address addr}))))
 
 (defn disconnect-nemesis
   []
@@ -57,17 +71,20 @@
                 seen (try (boolean (some #(= (pubkeys b) (:pubkey %))
                                          (:peers (rpc/call a "list_peers"))))
                           (catch Exception e (str "failed: " (.getMessage e))))
-                up   (try-call a "connect_peer" {:address (topology/p2p-address b info)})]
+                up   (connect! a b info)]
             (assoc op :value {:from a, :to b, :down-ms down-ms, :disconnect down
                               :peer-before-reconnect seen, :reconnect up}))
 
           :reconnect
+          ; Every pair at once: each call to a paused node waits for its timeout,
+          ; and in a row they held up the other faults' ops for tens of seconds.
           (assoc op :value
                  (into (sorted-map)
-                       (for [[a b] edges]
-                         (let [info (try (rpc/call b "node_info") (catch Exception _ nil))]
-                           [(str a "->" b)
-                            (try-call a "connect_peer" {:address (topology/p2p-address b info)})])))))))
+                       (util/real-pmap
+                         (fn [[a b]]
+                           (let [info (try (rpc/call b "node_info") (catch Exception _ nil))]
+                             [(str a "->" b) (connect! a b info)]))
+                         edges))))))
 
     (teardown! [_ _test])))
 
