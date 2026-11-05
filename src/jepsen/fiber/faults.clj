@@ -79,13 +79,34 @@
    :pause     {:targets [:one]}
    :partition {:targets [:one]}})
 
+(def ^:private heal-last
+  "Faults whose final step brings nodes back (restarts and resumes fnn, then
+  reconnects the peers), in that order. Their final steps run after every other
+  fault has healed, so that fnn doesn't restart under a CPU or memory limit,
+  cut off the CKB node, or with its clock off, when several faults run
+  together (C-16)."
+  [process/fault disconnect/fault])
+
+(defn final-order
+  "The faults in use, in the order their final generators run: as in the
+  registry, but with heal-last's at the end."
+  [faults]
+  (let [last? (set heal-last)]
+    (concat (remove last? faults) (filter (set faults) heal-last))))
+
 (defn package
   "The nemesis package for the faults in use. Only those faults' packages are
   built: jepsen.nemesis.combined's full package also sets up file-corruption
-  tooling (it downloads bitflip onto every node) even when that fault is off."
+  tooling (it downloads bitflip onto every node) even when that fault is off.
+  The final generators run in final-order."
   [db opts]
-  (let [popts (package-opts db opts)]
-    (nc/compose-packages (mapv #((:package %) popts) (in-use opts)))))
+  (let [popts  (package-opts db opts)
+        faults (in-use opts)
+        pkgs   (into {} (map (fn [f] [f ((:package f) popts)])) faults)
+        pkg    (nc/compose-packages (mapv pkgs faults))]
+    (if (< 1 (count faults))
+      (assoc pkg :final-generator (vec (keep (comp :final-generator pkgs) (final-order faults))))
+      pkg)))
 
 (defn fault-completions
   "The completions of the faults' ops in `history`. A nemesis op is :info both

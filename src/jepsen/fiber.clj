@@ -131,6 +131,8 @@
                                                   "none"))
             :seed                 seed
             :os                   os/noop
+            ; jepsen.net/iptables, but a partition's healing leaves other faults' rules.
+            :net                  partition/net
             :db                   db
             :client               (client/client)
             :nemesis              (health/compose (:nemesis pkg))
@@ -152,9 +154,14 @@
                                                     :timeline   (timeline/html)
                                                     :health     (health/checker)})
                                       (seq (faults/in-use opts)) (assoc :faults (faults/fired-checker opts))
-                                      (not (:close opts)) (assoc :fiber (if (:force-close-ok opts)
-                                                                          (closes/checker)
-                                                                          (fiber-checker/checker)))
+                                      (not (:close opts)) (assoc :fiber (cond (:force-close-ok opts)
+                                                                              (closes/checker)
+
+                                                                              (:force-close-ok-after opts)
+                                                                              (closes/checker (:force-close-ok-after opts))
+
+                                                                              :else
+                                                                              (fiber-checker/checker)))
                                       (:close opts)       (assoc :close (fiber-checker/close-checker))
                                       (:nonce-check opts) (assoc :nonce (nonce/checker))
                                       (:ledger opts)      (assoc :ledger (ledger/checker))
@@ -414,6 +421,13 @@
    [nil "--force-close-ok" (str "Don't fail the run for channels that ended closed, nor for what"
                                 " they explain (open question 1 on the chaos-test plan: a pause or"
                                 " partition over 30 s force-closes channels). They are reported.")]
+   [nil "--force-close-ok-after SECONDS"
+    (str "Like --force-close-ok, but only for a channel one of whose ends was killed or paused,"
+         " or whose ends a partition cut apart, for longer than SECONDS during the run (fnn's"
+         " peer deadline is 30 s): open question 1 answered \"expected\". A channel closed"
+         " without such a fault still fails the run. --force-close-ok overrides it.")
+    :parse-fn parse-long
+    :validate [#(and % (pos? %)) "Must be positive"]]
    [nil "--onchain" (str "After the final read, close every channel and check on chain that each"
                          " party received its last balance plus its reserve, less fees, and that"
                          " every node's wallet changed by what its channels' transactions explain.")]

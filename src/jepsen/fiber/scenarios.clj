@@ -214,7 +214,36 @@
                             " wrapped-BTC channels with n3, and the BTC user is lnd-bob, on one"
                             " channel with the hub's lnd-ingrid. Keysend payments over the line go"
                             " on alongside. An LND disconnect is an iptables cut of either CCH's link"
-                            " to its LND or the link between the two LNDs. A kill is SIGKILL.")}))
+                            " to its LND or the link between the two LNDs. A kill is SIGKILL.")}
+    "c-16"  {:priority :p1
+             :plan     (str "Mesh; long mixed load; a random combination of the faults above, for"
+                            " hours. Every assertion passes, no panic.")
+             :args     ["--nodes" "n1,n2,n3,n4,n5,n6" "--topology" "mesh"
+                        "--faults" "kill,pause,partition,disconnect,packet,chain-partition,cpu,memory,clock"
+                        "--kill-targets" "one" "--partition-targets" "one,half"
+                        "--packet-targets" "one,all,chain" "--clock-targets" "one,all"
+                        "--resource-targets" "one" "--pay-kinds" "keysend,invoice"
+                        "--nemesis-interval" "45" "--time-limit" "1200"
+                        "--availability-window" "60" "--quiesce" "60" "--probe-routes" "--ledger"
+                        "--log-level" "info,fnn::fiber::network=debug"]
+             :differs  (str "The short form: 20 minutes of faults, not hours (the long form and"
+                            " where it runs wait for open questions 4 and 5). Six nodes, each with"
+                            " channels to three others (the ring and its diameters), as in c-04 and"
+                            " c-06; keysend and invoice payments, drawn uniformly. Nine faults, each"
+                            " with its own stream from the seed, so they overlap at random: kill"
+                            " (SIGKILL) or pause of one node, partition of one node or of a random"
+                            " half, disconnect of a channel's peers, packet delay of 0.5-3 s (one"
+                            " node, all, or traffic to CKB), a cut from the CKB node, a CPU (0.1-0.5"
+                            " CPUs) or memory (128-256 MiB) limit on one node, and a clock jump of 1-30"
+                            " minutes either way on one node or all. Each fault's ops come every 45 s"
+                            " on average (capped at 100 s), so about three faults are in effect at"
+                            " any time. Not in the mix: the outage fault (its clock jump is C-03's),"
+                            " disk and power (each puts the store on a filesystem of its own), and"
+                            " c-15's CCH and LND hosts. Pauses, kills and partitions over 30 s"
+                            " force-close channels (open question 1), and on develop so do restarts"
+                            " over 30 s with an ack outstanding (#1677's V2 deadline), so by default nearly every"
+                            " run fails on closed channels; --force-close-ok-after 30 excuses only"
+                            " the closes such a fault explains.")}))
 
 (defn scenario-args
   "The arguments of scenario `name`. Throws for an unknown name."

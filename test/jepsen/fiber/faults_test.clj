@@ -3,7 +3,8 @@
             [jepsen.generator :as gen]
             [jepsen.generator.test :as gt]
             [jepsen.nemesis :as n]
-            [jepsen.fiber [faults :as faults]
+            [jepsen.fiber [db :as db]
+                          [faults :as faults]
                           [schedule :as schedule]
                           [topology :as topology]]
             [jepsen.fiber.faults [chain-partition :as chain-partition]
@@ -309,3 +310,27 @@
   (doseq [f faults/registry, nm (:faults f)]
     (testing nm
       (is (contains? (:fired f) nm)))))
+
+(deftest final-order
+  (let [opts {:nodes nodes, :faults [:kill :pause :partition :disconnect :packet :chain-partition
+                                     :clock :cpu :memory], :kill-targets [:one]}
+        final (:final-generator (faults/package (db/db) opts))]
+    (testing "every other fault heals before fnn restarts, and peers reconnect last"
+      (is (= [:stop-partition :stop-packet :stop-chain-partition :clock-reset :lift-resources
+              :resume :start :reconnect]
+             (map :f (flatten final)))))
+    (testing "the faults keep their registry order otherwise"
+      (is (= [:partition :clock :db :disconnect]
+             (map :stream (faults/final-order (faults/in-use {:faults [:clock :disconnect :partition :kill]})))))))
+  (testing "a single fault's package is untouched"
+    (is (= [{:type :info, :f :stop-partition, :value nil}]
+           [(:final-generator (faults/package nil {:nodes nodes, :faults [:partition]}))]))))
+
+(deftest partition-heal-leaves-other-rules
+  (let [s (str "-P INPUT ACCEPT\n"
+               "-A INPUT -s 10.77.0.12/32 -j DROP\n"
+               "-A INPUT -s 10.77.0.10/32 -m comment --comment fiber-chain-partition -j DROP\n"
+               "-A INPUT -s 10.77.0.13/32 -j DROP\n"
+               "-A INPUT -s 10.77.0.12/32 -j DROP\n")]
+    (is (= ["10.77.0.12/32" "10.77.0.13/32" "10.77.0.12/32"] (partition/partition-sources s)))
+    (is (empty? (partition/partition-sources nil)))))

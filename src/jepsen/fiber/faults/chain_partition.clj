@@ -10,8 +10,8 @@
   the CKB node with a TCP reset, so requests fail at once (reset_peer).
 
   The rules carry a comment, and healing deletes only them. The partition
-  fault's healing flushes every rule on every node, so it ends a chain
-  partition too when both run."
+  fault's healing likewise deletes only its own rules (its `net`), so a chain
+  partition lasts its drawn time when both run."
   (:require [clojure.tools.logging :refer [warn]]
             [jepsen [control :as c]
                     [nemesis :as n]]
