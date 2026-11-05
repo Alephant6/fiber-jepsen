@@ -146,7 +146,7 @@
   start a new one, with no space. :rpc-up when fnn answered within
   restart-full-ms, or how it didn't."
   [db test node]
-  (db/kill! db test node)
+  (fdb/crash!)
   (db/start! db test node)
   (try (await-fn #(rpc/call node "node_info") {:timeout restart-full-ms, :retry-interval 500, :log-interval 60000})
        :rpc-up

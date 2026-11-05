@@ -177,6 +177,12 @@
             {:log-message (str "Waiting for fnn RPC on " node)
              :timeout     120000}))
 
+(defn crash!
+  "SIGKILLs fnn on the current node, whatever --kill-signal says: for faults that
+  model a crash or a power loss rather than a kill op."
+  []
+  (c/su (cu/stop-daemon! binary pidfile)))
+
 (defrecord FiberDB []
   db/DB
   (setup! [_ test node]
