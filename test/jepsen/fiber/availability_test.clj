@@ -1,5 +1,6 @@
 (ns jepsen.fiber.availability-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is testing]]
             [jepsen.generator :as gen]
             [jepsen.generator.test :as gt]
             [jepsen.fiber :as fiber]
@@ -36,6 +37,20 @@
       (is (= 18.0 (:seconds stats)))
       (is (= 0.11 (:ok-per-s stats)))
       (is (= {:p50 300.0, :p95 300.0, :max 300.0} (:latency-ms stats))))
+    (testing "unsuccessful payments by sender and by error"
+      (let [err  "Failed to build route, Insufficient balance: max outbound liquidity 0 is insufficient, required amount: 8000000"
+            bad  (fn [p from type error]
+                   (let [[i c] (pay :baseline p 0 type 10)]
+                     [(assoc-in i [:value :from] from)
+                      (-> c (assoc-in [:value :from] from) (assoc :error error))]))
+            s    (fc/window-stats (fc/window-pays (concat (bad 0 "n3" :fail err)
+                                                          (bad 1 "n3" :fail (str/replace err "8000000" "20000"))
+                                                          (bad 2 "n1" :info [:no-reply "SocketTimeoutException"]))
+                                                  :baseline))]
+        (is (= {"n1" 1, "n3" 2} (get-in s [:unsuccessful :by-sender])))
+        (is (= [["Failed to build route, Insufficient balance: max outbound liquidity N is insufficient, required amount: N" 2]
+                ["[:no-reply \"SocketTimeoutException\"]" 1]]
+               (get-in s [:unsuccessful :by-error])))))
     (testing "an empty window"
       (is (= 0 (:payments (fc/window-stats []))))
       (is (nil? (:success-pct (fc/window-stats [])))))))

@@ -189,11 +189,21 @@
     (let [m (Math/pow 10 digits)]
       (/ (Math/round (* (double x) m)) m))))
 
+(defn error-class
+  "A payment error with its numbers taken out, so that errors of one kind group
+  together: \"... max outbound liquidity 0 is insufficient, required amount:
+  8000000\" -> \"... max outbound liquidity N is insufficient, required amount: N\"."
+  [error]
+  (-> (if (string? error) error (pr-str error))
+      (str/replace #"0x[0-9a-fA-F]+" "0x…")
+      (str/replace #"\d+" "N")))
+
 (defn window-stats
   "How the payments of one window went: how many completed :ok, :fail (the node
   said Failed, or certainly created no payment) and :info (no answer in time);
   the success rate in percent; and, reported only, the successful payments per
-  second over the window and their latency."
+  second over the window, their latency, and the unsuccessful ones by sender and
+  by error."
   [pairs]
   (let [n       (count pairs)
         types   (frequencies (map (comp :type second) pairs))
@@ -212,7 +222,17 @@
              :ok-per-s    (when seconds (round (/ ok seconds) 2))}
       (seq latency) (assoc :latency-ms {:p50 (round (percentile latency 0.5) 0)
                                         :p95 (round (percentile latency 0.95) 0)
-                                        :max (round (peek latency) 0)}))))
+                                        :max (round (peek latency) 0)})
+      (< ok n)      (assoc :unsuccessful
+                           (let [bad (map second (remove #(= :ok (:type (second %))) pairs))]
+                             {:by-sender (into (sorted-map)
+                                               (frequencies (map #(get-in % [:value :from]) bad)))
+                              :by-error  (->> bad
+                                              (map (comp error-class :error))
+                                              frequencies
+                                              (sort-by (comp - val))
+                                              (take 5)
+                                              vec)})))))
 
 (def availability-min-payments
   "Fewer payments than this in either window make the availability check :unknown."
