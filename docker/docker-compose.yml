@@ -13,6 +13,11 @@ x-fnn-node: &fnn-node
   image: fiber-jepsen-node
   # iptables for partitions
   cap_add: [NET_ADMIN]
+  # With --faults disk, fnn's store goes on this small filesystem, which the
+  # fault fills (jepsen.fiber.db/small-fs). Memory-backed: it uses RAM only as
+  # it fills.
+  tmpfs:
+    - /fiber/small:size=256m
 
 services:
   chain:

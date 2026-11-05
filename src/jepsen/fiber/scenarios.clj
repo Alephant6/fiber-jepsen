@@ -171,6 +171,19 @@
                             " to the host's size, since Docker can't remove one. A disconnect loop"
                             " is a pair of nodes disconnecting 3 times or more within a limit and"
                             " the minute after it, from fnn's debug log.")}
+    "c-13"  {:priority :p1
+             :plan     (str "A-B under steady payments; fill the disk, then free it; the node"
+                            " reports an error or stops, recovers once space is freed, loses no state")
+             :args     ["--faults" "disk" "--rate" "20" "--nemesis-interval" "30" "--time-limit" "300"]
+             :differs  (str "Three nodes in a line rather than A-B. Only fnn's store (RocksDB) is"
+                            " on the filled filesystem, a 256 MiB tmpfs per node; its log is not,"
+                            " so the run can read what fnn said. Each fill takes one node at"
+                            " random and lasts an exponential 30 s on average, capped at 100 s."
+                            " RocksDB preallocates its write-ahead log, so a running fnn can go on"
+                            " writing on a full disk; half the fills also crash fnn and start it"
+                            " again on the full disk."
+                            " If fnn isn't healthy 10 s after the space is freed, the harness"
+                            " restarts it, as an operator would, and records that it had to.")}
     "c-14"  {:priority :p2
              :plan     "A-B, payments and invoices; a node's clock jumps forward or back"
              :args     ["--faults" "clock" "--clock-targets" "one,all" "--clock-jump" "60-1800"
