@@ -21,6 +21,22 @@
              :differs  (str "Three nodes in a line rather than A-B. The gap between a kill and"
                             " the restart, and between restarts and kills, is exponential with a"
                             " 75 s mean, capped at 100 s, rather than uniform over 30-120 s.")}
+    "c-04"  {:priority :p0
+             :plan     (str "4-6 node mesh, mixed payments. Random nodes restarted again and"
+                            " again. Once all recover, the success rate is back to baseline.")
+             :args     ["--nodes" "n1,n2,n3,n4,n5,n6" "--topology" "mesh" "--faults" "kill"
+                        "--kill-targets" "one" "--nemesis-interval" "30" "--time-limit" "300"
+                        "--availability-window" "60" "--quiesce" "60" "--probe-routes"]
+             :differs  (str "Six nodes, each with channels to three others (the ring and its"
+                            " diameters), as in c-06. A kill (SIGKILL) takes one node drawn"
+                            " uniformly; the gap between a kill and the restart, and between a"
+                            " restart and the next kill, is exponential with a 30 s mean, capped"
+                            " at 100 s. Baseline and recovery are 60 s of payments each, before"
+                            " the first kill and after healing and --quiesce; the recovery's"
+                            " success rate may be at most --availability-tolerance (5) points"
+                            " below the baseline's. Payments are keysends only, until"
+                            " --pay-kinds lands. A channel that ends force-closed fails the run;"
+                            " add --force-close-ok to excuse it (open question 1).")}
     "c-06"  {:priority :p0
              :plan     (str "Mesh, multi-hop payments. A partition isolates half the nodes for"
                             " minutes, then heals. Routing works after healing, payments converge.")
