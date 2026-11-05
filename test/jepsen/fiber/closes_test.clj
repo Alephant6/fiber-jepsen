@@ -83,6 +83,16 @@
       (is (= 2 (count (get-in r [:force-closed :excused :channel-problems]))))
       (is (= ["0xh1"] (map :hash (get-in r [:force-closed :excused :unfinished-payments]))))
       (is (= 2 (count (get-in r [:force-closed :excused :probe-failures])))))
+    (testing "and so is the upstream TLC of that payment on a channel still open"
+      (let [final (ring closed {["0x23" "n2"] tlc, ["0x12" "n1"] tlc, ["0x12" "n2"] tlc})
+            r     (run final pays probes)]
+        (is (= true (:valid? r)))
+        (is (= 4 (count (get-in r [:force-closed :excused :channel-problems]))))))
+    (testing "but not a TLC for another payment"
+      (let [other [{:payment_hash "0xh9", :amount "0x10"}]
+            r     (run (ring closed {["0x23" "n2"] tlc, ["0x12" "n1"] other}) pays probes)]
+        (is (= false (:valid? r)))
+        (is (= [[[:pending-tlcs 1]]] (map :problems (:channel-problems r))))))
     (testing "the fiber checker alone fails it"
       (let [test {:nodes nodes, :topology :ring, :initial-channels (atom (ring))}]
         (is (= false (:valid? (checker/check (jepsen.fiber.checker/checker) test

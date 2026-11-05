@@ -12,7 +12,9 @@
     - its ends' problems (not ready, balances) are dropped: settlement is on
       chain, which the checker doesn't read;
     - an unfinished payment is excused when a closed channel still holds a TLC
-      for its hash, since the TLC can only resolve on chain;
+      for its hash, since the TLC can only resolve on chain, and so are the
+      pending TLCs of other channels for such hashes (a forwarder can't settle
+      or fail its upstream TLC before the downstream one resolves);
     - a probe over it is excused, and a route probe (--probe-routes) is excused
       when no path of channels that are ready at both ends joins its nodes.
   Everything else fails as before: a channel only one end considers closed, a
@@ -83,7 +85,17 @@
                          (not (reachable? graph from to))
                          (contains? closed (channel-between ends from to))))
             split    (fn [pred xs] [(vec (remove pred xs)) (vec (filter pred xs))])
-            [problems p-excused] (split #(closed (:channel %)) (:channel-problems r))
+            ; Pending TLCs of an open channel, all for payments a closed one holds.
+            held-tlcs? (fn [{:keys [channel node]}]
+                         (every? (comp held :payment_hash)
+                                 (:pending_tlcs (get-in ends [channel node]))))
+            problems (for [p (:channel-problems r)]
+                       (if (and (not (closed (:channel p))) (held-tlcs? p))
+                         (update p :problems
+                                 (partial filterv #(not= :pending-tlcs (first %))))
+                         p))
+            [problems p-excused] (split #(or (closed (:channel %)) (empty? (:problems %)))
+                                        problems)
             [unfinished u-excused] (split #(held (:hash %)) (:unfinished-payments r))
             [probes pr-excused] (split probe-ok (:probe-failures r))]
         (assoc r
