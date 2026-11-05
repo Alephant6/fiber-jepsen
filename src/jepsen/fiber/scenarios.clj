@@ -26,7 +26,22 @@
              :args     ["--faults" "pause" "--nemesis-interval" "30" "--time-limit" "300"]
              :differs  (str "Three nodes in a line rather than A-B. A pause lasts an exponential"
                             " 30 s on average, capped at 100 s, so some cross V2's 30 s"
-                            " peer-response deadline.")}))
+                            " peer-response deadline.")}
+    "c-09"  {:priority :p0
+             :plan     (str "Any topology; channels opened and closed continuously; CKB disconnected"
+                            " for seconds to minutes. Channels end Ready or Closed, never stuck in"
+                            " between.")
+             :args     ["--faults" "chain-partition" "--nemesis-interval" "40"
+                        "--channel-ops" "open,close,force-close" "--channel-interval" "15"
+                        "--time-limit" "300"]
+             :differs  (str "Three nodes in a line. The fnn nodes' traffic with the CKB node is"
+                            " dropped both ways, so requests time out, for one node or for all,"
+                            " alternating with healing; each phase lasts an exponential 40 s on"
+                            " average, capped at 100 s. Every 15 s on average a client opens,"
+                            " cooperatively closes or force-closes a channel on an edge, keeping one"
+                            " ready channel per edge. After the quiet period the test waits up to"
+                            " 360 s for both ends of every channel to settle, since Fiber checks for"
+                            " a counterparty's force close every 300 s.")}))
 
 (defn scenario-args
   "The arguments of scenario `name`. Throws for an unknown name."
