@@ -112,11 +112,12 @@
             :initial-channels     (atom nil)
             :nonserializable-keys [:pubkeys :payments :initial-channels]
             :checker              (checker/compose
-                                    (cond-> {:stats      (checker/stats)
-                                             :exceptions (checker/unhandled-exceptions)
-                                             :perf       (checker/perf {:nemeses (:perf pkg)})
-                                             :timeline   (timeline/html)
-                                             :health     (health/checker)}
+                                    (cond-> (merge (faults/checkers opts)
+                                                   {:stats      (checker/stats)
+                                                    :exceptions (checker/unhandled-exceptions)
+                                                    :perf       (checker/perf {:nemeses (:perf pkg)})
+                                                    :timeline   (timeline/html)
+                                                    :health     (health/checker)})
                                       (not (:close opts)) (assoc :fiber (fiber-checker/checker))
                                       (:close opts)       (assoc :close (fiber-checker/close-checker))
                                       (:nonce-check opts) (assoc :nonce (nonce/checker))

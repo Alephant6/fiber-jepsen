@@ -28,6 +28,20 @@
   [node]
   (str "/fiber/tests/nodes/" (node-id node)))
 
+(def small-fs
+  "A small tmpfs on every node (docker/docker-compose.yml). With --faults disk,
+  fnn's store lives on it, and the disk fault fills it and frees it."
+  "/fiber/small")
+
+(defn store-dir
+  [node]
+  (str (node-dir node) "/fiber/store"))
+
+(defn small-store?
+  "Whether the test puts fnn's store on small-fs."
+  [test]
+  (boolean (some #{:disk} (:faults test))))
+
 (defn start-fnn!
   [test node]
   (c/su
@@ -89,13 +103,18 @@
 (defrecord FiberDB []
   db/DB
   (setup! [_ test node]
-    (c/su (c/exec :rm :-rf (str (node-dir node) "/fiber/store") logfile pidfile nonce-file))
+    (c/su (c/exec :rm :-rf (store-dir node) logfile pidfile nonce-file)
+          (when (small-store? test)
+            ; The store directory becomes a link into small-fs.
+            (c/exec :rm :-rf (str small-fs "/store") (str small-fs "/fill"))
+            (c/exec :mkdir :-p (str small-fs "/store") (str (node-dir node) "/fiber"))
+            (c/exec :ln :-s (str small-fs "/store") (store-dir node))))
     (start-fnn! test node)
     (await-rpc! node))
 
   (teardown! [_ _test node]
     (c/su (cu/stop-daemon! binary pidfile)
-          (c/exec :rm :-rf (str (node-dir node) "/fiber/store"))))
+          (c/exec :rm :-rf (store-dir node))))
 
   db/Primary
   (primaries [_ test]
