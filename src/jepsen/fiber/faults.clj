@@ -13,7 +13,9 @@
   (:require [jepsen.generator :as gen]
             [jepsen.nemesis.combined :as nc]
             [jepsen.fiber.schedule :as schedule]
-            [jepsen.fiber.faults [disconnect :as disconnect]
+            [jepsen.fiber.faults [cch-kill :as cch-kill]
+                                 [disconnect :as disconnect]
+                                 [lnd-disconnect :as lnd-disconnect]
                                  [packet :as packet]
                                  [partition :as partition]
                                  [process :as process]]))
@@ -23,7 +25,9 @@
   [partition/fault
    process/fault
    disconnect/fault
-   packet/fault])
+   packet/fault
+   cch-kill/fault
+   lnd-disconnect/fault])
 
 (def supported
   "Every name --faults accepts."

@@ -1,0 +1,52 @@
+# The cross-chain hub (CCH) and the Lightning side, for cross-chain swap tests
+# (--cch, scenario c-15). Add it to the default cluster:
+#   scripts/run.sh --compose cch --scenario c-15
+# which is the same as
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.cch.yml scripts/run.sh --scenario c-15
+#
+# None of these containers is a Jepsen node: the test's --nodes stay n1-n3, and
+# jepsen.fiber.cch reaches these hosts over SSH and their RPCs by name. The CKB
+# user is n1 and the hub's Fiber node n3 (the first and last of --nodes).
+x-btc-host: &btc-host
+  build:
+    context: .
+    dockerfile: btc/Dockerfile
+  image: fiber-jepsen-btc
+  # iptables for lnd-disconnect
+  cap_add: [NET_ADMIN]
+
+services:
+  bitcoind:
+    <<: *btc-host
+    hostname: bitcoind
+    networks:
+      fibernet: {ipv4_address: 10.77.0.20}
+
+  # The hub operator's LND, CCH's backend.
+  lnd-ingrid:
+    <<: *btc-host
+    hostname: lnd-ingrid
+    networks:
+      fibernet: {ipv4_address: 10.77.0.21}
+
+  # The BTC user's LND.
+  lnd-bob:
+    <<: *btc-host
+    hostname: lnd-bob
+    networks:
+      fibernet: {ipv4_address: 10.77.0.22}
+
+  # fnn running only the CCH and RPC services, against n3's RPC (Fiber's
+  # separate-service mode, tests/bruno/e2e/cross-chain-hub-separate).
+  cch:
+    build:
+      context: .
+      dockerfile: node/Dockerfile
+      args:
+        NODE_BASE: ${NODE_BASE:-ubuntu:24.04}
+    image: fiber-jepsen-node
+    hostname: cch
+    # iptables for lnd-disconnect
+    cap_add: [NET_ADMIN]
+    networks:
+      fibernet: {ipv4_address: 10.77.0.23}

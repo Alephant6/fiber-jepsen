@@ -32,6 +32,8 @@ With `--ledger`, it also checks that money adds up at every node, not only on ev
 | `partition` | iptables drops traffic between one node and the others. |
 | `disconnect` | `disconnect_peer` over RPC closes the connection between two neighbours; a later `connect_peer` reconnects them. Channels reestablish while both processes keep running, which a partition rarely causes (TCP keeps the connection and retransmits). |
 | `packet` | tc netem delays traffic, and with `--packet-loss` drops some of it: to and from one node, between all nodes, or from the nodes to the CKB node (`--packet-targets one,all,chain`). Each fault draws its delay from `--packet-delay MIN-MAX` (ms; default 500-3000), with a jitter of a tenth of it. One shaping is active at a time. |
+| `cch-kill` | With `--cch` only: `SIGKILL` on the cross-chain hub (CCH), then a restart. The op records the pid and whether it is gone. |
+| `lnd-disconnect` | With `--cch` only: iptables cuts CCH from the hub's LND, or the hub's LND from the user's (`--lnd-disconnect-targets cch,peer`), dropping packets or resetting connections (`--lnd-disconnect-mode drop` or `reject`). Healing removes the rules and reconnects the two LNDs. |
 
 Each fault is a namespace under `src/jepsen/fiber/faults/` that defines `fault`: the `--faults` names it handles, its nemesis package, and its operations, drawn from a random stream of its own so that the seed fixes them. `faults.clj` lists them; adding a fault is a new namespace and a line there, and changes no other fault's operations for a given seed (`test/jepsen/fiber/faults_test.clj` checks this).
 
@@ -40,6 +42,7 @@ Planned: **clock skew**. Fiber expires TLCs by wall-clock timestamp (off-chain c
 ## Layout
 
 - `docker/`: a CKB devnet (`chain`), three fnn nodes (`n1`–`n3`) and the Jepsen control node, on a private network `10.77.0.0/24`.
+  `docker-compose.cch.yml` adds, for `--cch`, bitcoind, two LNDs and a standalone CCH (`docker/btc/` is their image); the default cluster doesn't start them.
 - `scripts/make-snapshot.sh`: creates the devnet with Fiber's own `tests/deploy/init-dev-chain.sh` (funded wallets, contracts, UDT), then stages it with the binaries into `docker/build/`. Every test starts from this snapshot. With `FNN_BIN` set empty it leaves out `bin/fnn`, which nothing else depends on; CI adds each commit's fnn afterwards.
 - `src/jepsen/fiber/`:
   - `db.clj` (process lifecycle)
@@ -48,7 +51,8 @@ Planned: **clock skew**. Fiber expires TLCs by wall-clock timestamp (off-chain c
   - `checker.clj` (invariants)
   - `ledger.clj` (per-node money check, with `--ledger`)
   - `nonce.clj` (MuSig2 nonce reuse, with `--nonce-check`)
-  - `faults.clj` and `faults/` (one namespace per fault: `process` for kill and pause, `partition`, `disconnect`, `packet`)
+  - `faults.clj` and `faults/` (one namespace per fault: `process` for kill and pause, `partition`, `disconnect`, `packet`, `cch-kill`, `lnd-disconnect`)
+  - `cch.clj` and `swap.clj` (cross-chain swaps, with `--cch`: the Lightning side, CCH, the swap workload and its checker)
   - `scenarios.clj` (named scenarios of the chaos-test plan, `--scenario`)
   - `schedule.clj` (payments, and the random streams faults draw from, fixed in advance by the run's seed)
 - `instrument/`: the logging-only fnn instrumentation the nonce check needs.
@@ -139,6 +143,21 @@ With `--ledger`, the checker compares each node's balance change, summed over th
 The result is invalid when a node's change differs from the expected one, when the status the client saw when a payment finished differs from the sender's final status (or the client was told no payment was created and one succeeded), or when one attempt produced two payments. A difference is `:unknown` rather than invalid when the final records can't show every settlement: a channel that is closed, missing or still holds TLCs, a payment that hasn't finished, or a payment the sender no longer lists. The check doesn't read the chain, so settlement after a force close is not covered. `repeat.sh` prints the outcome (`balanced`, `unbalanced`, `client-mismatch` or `incomplete`); `test/jepsen/fiber/ledger_test.clj` covers the rules.
 
 The option is off by default, so runs without it send the same requests to the nodes and run the same checks as before.
+
+### Cross-chain swaps (`--cch`)
+
+C-15 of the plan swaps BTC on Lightning for wrapped BTC on Fiber through Fiber's cross-chain hub (CCH), while CCH is killed or LND is cut off. With `--cch`, the test needs the hosts of `docker/docker-compose.cch.yml`, which `run.sh --compose cch` adds to the cluster:
+
+```bash
+scripts/run.sh --compose cch --scenario c-15
+scripts/run.sh --compose cch --cch --faults none --time-limit 60      # swaps, no faults
+```
+
+The setup follows Fiber's own `tests/deploy/lnd-init` and its e2e test `tests/bruno/e2e/cross-chain-hub-separate`. bitcoind runs regtest, `lnd-ingrid` is the hub's LND and `lnd-bob` the BTC user's, with one channel between them and half of it on each side. CCH runs on its own host as a separate service (fnn with only the `cch` and `rpc` services) that drives the hub's Fiber node, n3, over RPC; n1 is the CKB user, with two wrapped-BTC (devnet simple UDT) channels to n3, one opened by each. The keysend payments of the other scenarios keep running alongside.
+
+Each swap is drawn from the seed (`--swap-rate`, `--swap-amount MIN-MAX` in sats, `--swap-kinds send-btc,receive-btc`). `send-btc`: bob's LND makes an invoice, CCH creates an order for it, and n1 pays the order's Fiber invoice; CCH then pays bob. `receive-btc`: n1 makes an invoice, CCH creates an order with a Lightning invoice, and bob pays it; CCH then pays n1. After the faults heal, the final read waits up to `--swap-settle-timeout` seconds until no order, payment or invoice is in flight, then reads every order from CCH and the four records of each swap: both payments and both invoices, from n1, n3 and both LNDs.
+
+The swap checker is invalid when an order is unfinished or money is still held; when the two records of one side disagree; when one side was paid and the other wasn't (it names who lost: the hub when it paid out and wasn't paid, the user otherwise); when the order's status doesn't match what was paid; when the client saw a success that didn't happen, or a failure for a swap that was paid; when n1's wrapped-BTC balance or bob's Lightning balance moved by other than the paid swaps imply (the order amount includes the hub's fee, and the payer pays its own routing fee); and when a wrapped-BTC or Lightning channel isn't ready, holds TLCs or HTLCs, or its two ends disagree. It is unknown when a record couldn't be read, and when no swap completed. `--ledger` doesn't know about swaps; running both together is untested.
 
 ### In another repository's CI
 
