@@ -205,9 +205,10 @@
             ts     (or (re-find timestamp line) last-ts)
             start? (str/includes? line "Starting node with git version")
             stop?  (boolean (re-find #"SIG(TERM|INT) received, shutting down" line))]
-        (if-let [[_ thread at] (re-find #"thread '([^']*)' panicked at (.*)$" line)]
+        (if-let [[_ thread at] (re-find #"thread '([^']*)'(?: \(\d+\))? panicked at (.*)$" line)]
           ; Since Rust 1.73: "... panicked at src/x.rs:1:2:" and the message on the
-          ; next line. Before: "... panicked at 'message', src/x.rs:1:2".
+          ; next line. Before: "... panicked at 'message', src/x.rs:1:2". Newer
+          ; Rust puts the thread's id after its name: "thread 'w' (42) panicked".
           (let [new-style? (str/ends-with? at ":")
                 panic      (if new-style?
                              {:thread thread, :at (subs at 0 (dec (count at)))
