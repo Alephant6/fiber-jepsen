@@ -70,7 +70,8 @@ def report(run_dir):
         state = re.search(r'\[:not-ready "(\w+)"\]', probs)
         tlcs = re.search(r"\[:pending-tlcs (\d+)\]", probs)
         problems[(ch, node)] = (state.group(1) if state else "Ready", int(tlcs.group(1)) if tlcs else 0)
-    logs = {n: node_log(run_dir / n / "fnn.log") for n in ("n1", "n2", "n3")}
+    nodes = sorted(d.name for d in run_dir.iterdir() if (d / "fnn.log").is_file())
+    logs = {n: node_log(run_dir / n / "fnn.log") for n in nodes}
     channels = {ch for ch, _ in problems}
     for fired, stalled in logs.values():
         channels |= fired | set(stalled)
