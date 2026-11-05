@@ -1,7 +1,10 @@
 (ns jepsen.fiber.health-test
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
+            [jepsen.generator :as gen]
+            [jepsen.generator.test :as gt]
             [jepsen.nemesis :as n]
+            [jepsen.fiber :as fiber]
             [jepsen.fiber [health :as health]
                           [db :as db]]))
 
@@ -136,3 +139,14 @@
 (deftest pidfile
   (testing "the health sample reads the pidfile jepsen.fiber.db writes"
     (is (str/starts-with? db/pidfile "/"))))
+
+(deftest in-the-generator
+  (let [opts {:faults [:kill], :nodes ["n1" "n2" "n3"], :rate 5, :time-limit 10, :quiesce 5
+              :nemesis-interval 3, :kill-targets [:one]}
+        fs   (->> (gt/simulate (gen/context {:concurrency 3})
+                               (:generator (fiber/fiber-test opts))
+                               (fn [_ctx op] (-> op (assoc :type :ok) (update :time + 50000000))))
+                  (filter #(#{:invoke :info} (:type %)))
+                  (map :f))]
+    (testing "one sample, by the nemesis, after the probe and before the final read"
+      (is (= [:probe :health :read] (filter #{:probe :health :read} fs))))))
