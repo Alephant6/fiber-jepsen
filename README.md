@@ -77,9 +77,10 @@ Why a clock fault: Fiber expires TLCs by wall-clock timestamp (off-chain checks 
   - `faults.clj` and `faults/` (one namespace per fault: `process` for kill and pause, `partition`, `disconnect`, `packet`, `chain-partition`, `clock`, `outage`, `resources` for cpu and memory, `disk`, `power`, `cch-kill`, `lnd-disconnect`)
   - `cch.clj` and `swap.clj` (cross-chain swaps, with `--cch`: the Lightning side, CCH, the swap workload and its checker)
   - `scenarios.clj` (named scenarios of the chaos-test plan, `--scenario`)
+  - `verdict.clj` (which checks failed in a stored run, for CI summaries)
   - `schedule.clj` (payments, and the random streams faults draw from, fixed in advance by the run's seed)
 - `instrument/`: the logging-only fnn instrumentation the nonce check needs.
-- `.github/workflows/`: `ci.yml` (lint and unit tests), `smoke.yml` (a run without faults whenever the harness changes), `jepsen.yml` (any arguments against any Fiber commit; other repositories can call it, see [below](#in-another-repositorys-ci)) and `failure-summary.yml` (a Copilot note on failed manual runs, see [below](#a-note-on-failed-runs-copilot)); `.github/failure-summary/` has its digest script, prompt and known issues.
+- `.github/workflows/`: `ci.yml` (lint and unit tests), `smoke.yml` (a run without faults whenever the harness changes), `jepsen.yml` (any arguments against any Fiber commit; other repositories can call it, see [below](#in-another-repositorys-ci)), `matrix.yml` (every scenario against one Fiber commit, one job each, see [below](#the-fault-matrix-matrixyml)) and `failure-summary.yml` (a Copilot note on failed manual runs, see [below](#a-note-on-failed-runs-copilot)); `.github/failure-summary/` has its digest script, prompt and known issues.
 
 ## Running
 
@@ -250,6 +251,12 @@ jobs:
 ```
 
 Inputs: `fiber-repository` and `fiber-ref` (default: the caller's repository and commit), `args` for `run.sh`, `runs`, `ckb-version` and `label`. The job summary has one row per run; the job fails if any run's verdict isn't valid, after all runs have finished, and then uploads the store.
+
+### The fault matrix (`matrix.yml`)
+
+`matrix.yml` runs the scenarios of `scenarios.clj` against one Fiber commit, each in its own job: started by hand from the Actions tab (inputs `fiber-repository`, `fiber-ref`, `scenarios`, `runs`, `upload-store`), or called like `jepsen.yml`. `scenarios` is `all`, a priority (`p0`, `p1`, `p2`), or scenario names and priorities, comma-separated; `lein run -m jepsen.fiber.scenarios SCENARIOS` prints what it selects. A plan job turns the Fiber ref into a commit, so every job tests the same one, and lists the scenarios; a run without faults builds fnn and the devnet snapshot once into the caches; then every scenario runs `runs` times in a job of its own, all at once, and a report job puts every run's verdict and failed checks into one table, in the run's summary and in the `matrix-report` artifact. A scenario that needs extra hosts names its compose file (`:compose`), which goes to `run.sh --compose`. It doesn't run on a schedule yet: when and how the team wants it run is still open.
+
+Each `jepsen.yml` job lists, per run, the checks whose `:valid?` isn't true (`jepsen.fiber.verdict` reads the run's `results.edn`) in its summary, and uploads the runs as tab-separated lines (artifact `<label>-runs`), which the report reads.
 
 ### A note on failed runs (Copilot)
 
