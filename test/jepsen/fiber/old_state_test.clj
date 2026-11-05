@@ -79,7 +79,14 @@
     (is (= 1 (:revocations-sent f)))
     (testing "the pool turning down the same revocation again isn't a failure"
       (is (= 1 (:revocations-failed f))))
-    (is (= ["0x03d7"] (:settlement-unrecoverable f)))))
+    (is (= ["0x03d7"] (:settlement-unrecoverable f))))
+  (testing "V2 channels (develop) reject the reestablish and time out 5 min later"
+    (let [f (os/log-findings
+              ["  2026-11-05T18:53:51Z ERROR fnn::fiber::channel: Pubkey(02a6) Error while processing channel message: InvalidState(\"Incompatible V2 completed outgoing history\") with message: ReestablishChannelV2(ReestablishChannelV2 { channel_id: Hash256(0xc3aa), next_commitment_number: 373, next_ack_number: 375, next_local_commitment_nonce: PubNonce { } })"
+               "  2026-11-05T18:58:51Z ERROR fnn::fiber::channel: Channel Hash256(0xc3aa) from peer Pubkey(02bc) has been reestablishing too long, shutting down it forcefully"])]
+      (is (= 1 (:reestablish-failed f)))
+      (is (= [{:why "completed outgoing", :peer-next [373 375]}] (:v2-rejected f)))
+      (is (= 1 (:reestablish-timeouts f))))))
 
 (def locks {"n1" "L1", "n2" "L2", "n3" "L3"})
 
@@ -178,10 +185,12 @@
                  {:process :nemesis, :type :info, :f :restore-state, :time 200, :value restore-value}
                  {:process 0, :type :ok, :f :read, :time 300
                   :value {:channels {"n2" [{:channel_id "0xc1", :pending_tlcs [{:payment_hash "0xheld"}]}
-                                           {:channel_id "0xc2", :pending_tlcs [{:payment_hash "0xother"}]}]}}}]
+                                           {:channel_id "0xc2", :pending_tlcs [{:payment_hash "0xother"}]}
+                                           {:channel_id "0xc3", :pending_tlcs [{:payment_hash "0xheld"}]}]}}}]
         r       {:valid?              false
                  :channel-problems    [{:channel "0xc1", :node "n2", :peer "n1", :problems [[:mirror {}]]}
-                                       {:channel "0xc2", :node "n2", :peer "n3", :problems [[:pending-tlcs 1]]}]
+                                       {:channel "0xc2", :node "n2", :peer "n3", :problems [[:pending-tlcs 1]]}
+                                       {:channel "0xc3", :node "n2", :peer "n3", :problems [[:pending-tlcs 1]]}]
                  :unfinished-payments [{:node "n1", :hash "0xold"} {:node "n3", :hash "0xheld"}
                                        {:node "n3", :hash "0xother"}]
                  :success-flipped     [{:hash "0xbefore"} {:hash "0xafter"} {:hash "0xn3"}
@@ -198,8 +207,9 @@
       (is (= ["0xc2"] (map :channel (:channel-problems x))))
       (is (= ["0xafter" "0xduring"] (map :hash (get-in x [:old-state-excused :success-flipped]))))
       (is (= [{:from "n2", :to "n3"}] (:probe-failures x))))
-    (testing "another node's payment whose TLC a restored node's channel holds"
-      (is (= ["0xold" "0xheld"] (map :hash (get-in x [:old-state-excused :unfinished-payments])))))
+    (testing "another node's payment whose TLC a restored node's channel holds, and its forwarded TLC"
+      (is (= ["0xold" "0xheld"] (map :hash (get-in x [:old-state-excused :unfinished-payments]))))
+      (is (= ["0xc1" "0xc3"] (map :channel (get-in x [:old-state-excused :channel-problems])))))
     (testing "what it doesn't explain still fails the run"
       (is (= ["0xother"] (map :hash (:unfinished-payments x))))
       (is (= ["0xbefore" "0xn3"] (map :hash (:success-flipped x))))

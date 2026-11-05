@@ -428,8 +428,9 @@
 (defn log-findings
   "What fnn logged about old state in `lines`: reestablish handshakes whose
   commitment numbers are more than one apart (the numbers as each end printed
-  them: its own local and remote, then the peer's), failed reestablishes and
-  Stale audits, revoked commitments the watchtower found, the revocation
+  them: its own local and remote, then the peer's), failed reestablishes (V2
+  channels' rejections with the peer's next numbers) and Stale audits, channels
+  force-closed for reestablishing too long (REESTABLISH_TIMEOUT), revoked commitments the watchtower found, the revocation
   transactions it sent or failed to send, and channels whose closing commitment
   it couldn't settle because none of its settlement data matched the commitment
   on chain (watchtower/actor.rs, \"Cannot recover settlement snapshot\")."
@@ -440,6 +441,19 @@
         (cond
           (str/includes? line "invalid commitment numbers")
           (update acc :reestablish-failed inc)
+
+          ; Fiber's V2 channels (develop, #1677) reject a reestablish whose
+          ; numbers don't fit in channel_v2.rs; the line names the peer's.
+          (re-find #"Incompatible V2 [a-zA-Z ]+history" line)
+          (let [[_ why] (re-find #"Incompatible V2 ([a-zA-Z ]+) history" line)
+                [_ c a] (re-find #"next_commitment_number: (\d+), next_ack_number: (\d+)" line)]
+            (-> acc
+                (update :reestablish-failed inc)
+                (update :v2-rejected conj (cond-> {:why why}
+                                            c (assoc :peer-next [(parse-long c) (parse-long a)])))))
+
+          (str/includes? line "has been reestablishing too long")
+          (update acc :reestablish-timeouts inc)
 
           :else
           (let [[_ a b c d] (re-find #"local_commitment_number \((\d+), (\d+)\) peer_commitment_number \((\d+) (\d+)\)" line)
@@ -464,7 +478,8 @@
               (update acc :settlement-unrecoverable add-new
                       (second (re-find #"Hash256\((0x[0-9a-f]+)\)" line)))
               :else acc)))))
-    {:reestablish-failed 0, :gaps [], :stale-audits-failed [], :stale-audits-passed 0
+    {:reestablish-failed 0, :gaps [], :v2-rejected [], :reestablish-timeouts 0
+     :stale-audits-failed [], :stale-audits-passed 0
      :revoked-found [], :revocations-sent 0, :revocations-failed 0
      :settlement-unrecoverable []}
     lines))
@@ -616,7 +631,8 @@
      :logs      (into (sorted-map)
                       (for [[node f] findings :when f]
                         [node (cond-> f
-                                (< 5 (count (:gaps f))) (update :gaps #(vec (take 5 %))))]))}))
+                                (< 5 (count (:gaps f))) (update :gaps #(vec (take 5 %)))
+                                (< 5 (count (:v2-rejected f))) (update :v2-rejected #(vec (take 5 %))))]))}))
 
 (defn checker
   []
@@ -658,8 +674,9 @@
   own payments that it reports unfinished (it lost their outcome) or that it no
   longer reports Success although the client saw them succeed after its save
   began; other nodes' unfinished payments whose TLC one of its channels still
-  holds in the final read (the channel can't settle it off chain any more); and
-  probes from or to it. Lists what it excused under :old-state-excused."
+  holds in the final read (the channel can't settle it off chain any more), and
+  other channels' pending TLCs that all forward such payments; and probes from
+  or to it. Lists what it excused under :old-state-excused."
   [r history]
   (let [nodes (restored history)]
     (if (or (empty? nodes) (not (contains? r :channel-problems)))
@@ -670,11 +687,20 @@
                                 :when (map? v)
                                 id (keys v)]
                             id))
-            held     (set (for [[_ records] (:channels (closes/final-read history))
+            final    (:channels (closes/final-read history))
+            held     (set (for [[_ records] final
                                 ch records
                                 :when (chans (:channel_id ch))
                                 tlc (:pending_tlcs ch)]
                             (:payment_hash tlc)))
+            ; A forwarder can't settle or fail its upstream TLC before the
+            ; downstream one, on a restored node's channel, resolves.
+            forwarded? (fn [{:keys [channel node problems]}]
+                         (let [tlcs (some #(when (= channel (:channel_id %)) (:pending_tlcs %))
+                                          (get final node))]
+                           (and (seq tlcs)
+                                (every? #(= :pending-tlcs (first %)) problems)
+                                (every? (comp held :payment_hash) tlcs))))
             senders  (into {} (for [op history
                                     :when (and (= :ok (:type op)) (= :pay (:f op)))]
                                 [(get-in op [:value :hash]) [(get-in op [:value :from]) (:time op)]]))
@@ -684,7 +710,8 @@
             split    (fn [pred xs] [(vec (remove pred xs)) (vec (filter pred xs))])
             [problems p-x]   (split #(or (chans (:channel %))
                                          (contains? nodes (:node %))
-                                         (contains? nodes (:peer %)))
+                                         (contains? nodes (:peer %))
+                                         (forwarded? %))
                                     (:channel-problems r))
             [unfinished u-x] (split #(or (contains? nodes (:node %)) (held (:hash %)))
                                     (:unfinished-payments r))
