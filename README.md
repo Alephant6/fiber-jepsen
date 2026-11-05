@@ -23,6 +23,8 @@ With `--close`, every channel is asked to close cooperatively halfway through th
 
 With `--ledger`, it also checks that money adds up at every node, not only on every channel (see [below](#per-node-ledger---ledger)).
 
+With `--availability-window`, it also checks that the payment success rate after healing is back to what it was before the first fault (see [below](#availability-after-healing---availability-window)).
+
 ## Faults
 
 | Fault | How |
@@ -48,6 +50,7 @@ Planned: **clock skew**. Fiber expires TLCs by wall-clock timestamp (off-chain c
   - `db.clj` (process lifecycle)
   - `topology.clj` (opens the channels of a named graph, `--topology`; `line` is n1 - n2 - n3)
   - `client.clj` (keysend payments, final read; workloads add payment kinds with `send-payment!` and operations with `invoke-op`)
+  - `invoice.clj` (invoice payments, with `--pay-kinds invoice`)
   - `checker.clj` (invariants)
   - `ledger.clj` (per-node money check, with `--ledger`)
   - `nonce.clj` (MuSig2 nonce reuse, with `--nonce-check`)
@@ -134,6 +137,10 @@ scripts/nonce_report.py store/fiber-kill/<run> ...    # per node: restarts, repl
 - A record is written when the signing code returns a partial signature for the peer. A crash before the message actually leaves counts it as sent, which can only add violations.
 - Signatures that are only aggregated locally (V1 `sign_and_aggregate`) become visible only if that transaction is published. They are recorded as `Aggregated`, count toward `:revealable-count`, and are not violations by themselves.
 
+### Payment kinds (`--pay-kinds`)
+
+By default every payment is a keysend. `--pay-kinds keysend,invoice` draws each payment's kind from the list, uniformly; a kind listed twice is drawn twice as often, and `--pay-kinds invoice` makes every payment an invoice payment. For an invoice payment the receiver creates an invoice with `new_invoice` (devnet currency `Fibd`, an hour's expiry, a preimage derived from the attempt id), and the sender pays it with `send_payment`. Unlike a keysend, it needs the receiver up: when `new_invoice` fails, the payment fails without being sent (`[:new-invoice :receiver-down]`). The kinds come from a stream of their own, so the payments' amounts, destinations and ids for a seed are the same whatever the kinds; with keysend alone nothing is drawn. Invoice payments carry their attempt id like keysends, so `--ledger` counts them. A workload adds a kind with a `client/send-payment!` method; `--pay-kinds` accepts every kind that has one.
+
 ### Per-node ledger (`--ledger`)
 
 The per-channel checks can't see a payment that is only half done. Say n1 pays n3 through n2, and n2 settles its TLC with n3 while the TLC from n1 fails. n1 reports `Failed`, both channels still conserve their totals, both ends still agree, and the payment is final, so every check above passes; yet n2 has paid n3 for nothing.
@@ -143,6 +150,16 @@ With `--ledger`, the checker compares each node's balance change, summed over th
 The result is invalid when a node's change differs from the expected one, when the status the client saw when a payment finished differs from the sender's final status (or the client was told no payment was created and one succeeded), or when one attempt produced two payments. A difference is `:unknown` rather than invalid when the final records can't show every settlement: a channel that is closed, missing or still holds TLCs, a payment that hasn't finished, or a payment the sender no longer lists. The check doesn't read the chain, so settlement after a force close is not covered. `repeat.sh` prints the outcome (`balanced`, `unbalanced`, `client-mismatch` or `incomplete`); `test/jepsen/fiber/ledger_test.clj` covers the rules.
 
 The option is off by default, so runs without it send the same requests to the nodes and run the same checks as before.
+
+### Availability after healing (`--availability-window`)
+
+Assertion 5 of the chaos-test plan says that once the faults are gone, payments succeed as often as before. With `--availability-window SECONDS`, the test sends payments for that many seconds before the fault window, with no faults (the baseline), and again after healing and `--quiesce` (the recovery), at `--rate`. The `:availability` checker compares the two windows' success rates: the share of payments that ended `Success`, where a payment the node failed, refused or didn't answer in time counts against it. It is valid when the recovery's rate is at most `--availability-tolerance` percentage points (default 5) below the baseline's, and `:unknown` when either window has fewer than 10 payments.
+
+```bash
+scripts/run.sh --time-limit 120 --faults kill --kill-targets one --availability-window 30
+```
+
+The verdict uses only the success rate. Each window also reports successful payments per second and their latency (median, 95th percentile, maximum), which depend on the machine, so they are only reported, and the unsuccessful payments by sender and by error (numbers taken out, so errors of one kind count together). Not every failure is a fault: on `line` the acceptor of each channel starts with nothing on it, so n3 can't pay anyone until it has been paid, and in a run without faults most failures are n3's payments with "no path found" or "Insufficient balance". Such failures fall on both windows, and the tolerance has to absorb how they differ. The recovery starts after `--quiesce` rather than right after healing, so that restarted nodes are up and channels have reestablished: the check asks whether the network recovered, not how long that took. Both windows draw their payments from streams of their own, so the fault window's payments and faults for a seed are the same with or without the option, and their payments go through every other check (`--ledger` included). The option does nothing with `--close`, after which every channel is closed. `repeat.sh` and the CI summary print the two rates, baseline first.
 
 ### Cross-chain swaps (`--cch`)
 
