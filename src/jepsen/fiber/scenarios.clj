@@ -129,7 +129,7 @@
              :plan     (str "A-B-C, large MPP payments, tc netem delay of 500 ms-3 s plus 10% loss."
                             " Each MPP payment fully succeeds or fully fails; money is conserved.")
              :args     ["--nodes" "n1,n2,n3,n4" "--topology" "mesh" "--acceptor-funding" "1000"
-                        "--pay-kinds" "mpp" "--mpp-amount" "1000-1600" "--faults" "packet"
+                        "--pay-kinds" "mpp" "--mpp-amount" "1000-1600" "--rate" "1" "--faults" "packet"
                         "--packet-delay" "500-3000" "--packet-loss" "10" "--nemesis-interval" "30"
                         "--time-limit" "300" "--quiesce" "150" "--ledger"]
              :differs  (str "Four nodes, every two joined by a channel (the mesh of four), rather"
@@ -139,9 +139,11 @@
                             " does (--acceptor-funding 1000), so every node starts with about 900"
                             " CKB to send on each of its three channels. Every payment is MPP, of"
                             " 1000-1600 CKB, above any one channel's balance on either side, to a"
-                            " node drawn uniformly; Fiber splits it into up to 12 parts. The packet"
-                            " fault delays the traffic of one node, or of all, by 500-3000 ms"
-                            " (drawn per fault, a tenth of it as jitter) and drops 10% of it,"
+                            " node drawn uniformly, one a second (--rate 1) rather than five, as a"
+                            " payment that waits on the delay holds liquidity the next ones need;"
+                            " Fiber splits it into up to 12 parts. The packet fault delays the"
+                            " traffic of one node, or of all, by 500-3000 ms (drawn per fault, a"
+                            " tenth of it as jitter) and drops 10% of it,"
                             " alternating with healing, each an exponential 30 s on average, capped"
                             " at 100 s. The quiesce, 150 s, outlasts the 120 s a receiver holds an"
                             " incomplete set of parts. A channel that ends force-closed fails the"

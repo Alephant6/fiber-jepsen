@@ -89,7 +89,11 @@
                                                1 {:channels [{:channel_id "0xc1", :pending_tlcs [(tlc 0 600)]}
                                                              {:channel_id "0xc2", :pending_tlcs [(tlc 3 500)]}]}
                                                2 {:channels [{:channel_id "0xc1", :pending_tlcs [(tlc 0 600)]}
-                                                             {:channel_id "0xc2", :pending_tlcs [(tlc 4 7 )]}]}
+                                                             {:channel_id "0xc2", :pending_tlcs
+                                                              [(tlc 4 7)
+                                                               ; Removed, still listed: not in flight.
+                                                               (assoc (tlc 3 500) :status {:Outbound "RemoveAckConfirmed"})
+                                                               (assoc (tlc 5 500) :status {:Inbound "RemoveAckConfirmed"})]}]}
                                                {:channels [{:channel_id "0xc1", :pending_tlcs []}]})
                              "get_payment"   {:payment_hash "0xab"
                                               :status (if (< 2 @polls) "Success" "Inflight")
@@ -110,7 +114,7 @@
                       :custom_records {(keyword "0xf1be") "0x0000000000000007"}}
                      (params "send_payment")))))
           (testing "the parts the sender's channels showed"
-            (is (= {:max-at-once 2, :max-amount 1100, :tlcs 3, :channels 2}
+            (is (= {:max-at-once 2, :max-amount 1100, :tlcs 4, :channels 2}
                    (get-in done [:value :parts])))
             (is (= "0xab" (get-in done [:value :invoice-hash] )))
             (is (= "0xab" (get-in done [:value :hash])))
@@ -166,7 +170,7 @@
 (deftest checker
   (let [split {:max-at-once 2, :max-amount 1100, :tlcs 2, :channels 2}
         one   {:max-at-once 1, :max-amount 1100, :tlcs 1, :channels 1}
-        base  [(pay :ok 1 split) (pay :ok 2 one) (pay :fail 3 nil) (pay :info 4 nil)
+        base  [(pay :ok 1 split) (pay :ok 2 one) (pay :fail 3 split) (pay :info 4 nil)
                {:type :fail, :f :pay, :value {:id 5, :kind :mpp}, :error [:new-invoice :receiver-down]}
                {:type :ok, :f :pay, :value {:id 6, :amount 5}}]
         read  (fn [rows] [{:type :ok, :f :read-invoices, :value rows}])
@@ -179,7 +183,8 @@
         (is (= 4 (:invoices r)))
         (is (= 1 (:no-invoice r)))
         (is (= {:paid 2, :unpaid 2} (:outcomes r)))
-        (is (= {:split 1, :one-part 1} (:split r)))))
+        (testing "a Failed payment that had parts in flight"
+          (is (= {:paid {:split 1, :one-part 1}, :unpaid {:split 1, :not-watched 1}} (:split r))))))
     (testing "the ends disagree"
       (let [r (mpp/analyze (concat base (read (assoc good 3 (row 4 "Paid" "Failed")))))]
         (is (false? (:valid? r)))

@@ -20,7 +20,9 @@
   and retries) and the distinct channels they left on. A set held at the receiver
   stays pending on the sender's channels until it settles, so a split payment
   is usually seen with two or more at once; a part that settles between two polls
-  is missed, so the counts are lower bounds.
+  is missed, so the counts are lower bounds. A TLC already removed
+  (RemoveAckConfirmed), which Fiber lists until the channel's next update, is
+  not counted as in flight.
 
   After the final read, :read-invoices reads every MPP invoice's status on its
   receiver and the payment's on its sender, and the checker here wants the two
@@ -62,24 +64,36 @@
     (let [[lo hi] (:mpp-amount opts default-amount-ckb)]
       {:mpp [(* lo 100000000) (* hi 100000000)]})))
 
+(defn removed?
+  "Whether a pending_tlcs entry is a TLC this end has already removed (status
+  RemoveAckConfirmed, inbound or outbound). Fiber lists such a TLC until the
+  channel's next commitment_signed, so a part that failed or settled can still
+  be listed next to the retry that replaced it."
+  [tlc]
+  (let [st (:status tlc)]
+    (= "RemoveAckConfirmed" (if (map? st) (first (vals st)) st))))
+
 (defn tlcs
   "The pending TLCs for payment `hash` on `channels` (list_channels), as
-  {:channel :id :amount}."
+  {:channel :id :amount :removed?}."
   [channels hash]
   (for [ch    channels
         t     (:pending_tlcs ch)
         :when (= hash (:payment_hash t))]
-    {:channel (:channel_id ch)
-     :id      (rpc/hex->int (:id t))
-     :amount  (rpc/hex->int (:amount t))}))
+    {:channel  (:channel_id ch)
+     :id       (rpc/hex->int (:id t))
+     :amount   (rpc/hex->int (:amount t))
+     :removed? (removed? t)}))
 
 (defn add-sample
-  "The parts seen so far, `parts`, with one poll's TLCs `ts` added."
+  "The parts seen so far, `parts`, with one poll's TLCs `ts` added. A removed TLC
+  counts as a part seen, but not as one in flight."
   [parts ts]
-  (let [seen (into (:seen parts #{}) (map (juxt :channel :id)) ts)]
+  (let [seen (into (:seen parts #{}) (map (juxt :channel :id)) ts)
+        live (remove :removed? ts)]
     {:seen        seen
-     :max-at-once (max (:max-at-once parts 0) (count ts))
-     :max-amount  (max (:max-amount parts 0) (reduce + 0 (map :amount ts)))}))
+     :max-at-once (max (:max-at-once parts 0) (count live))
+     :max-amount  (max (:max-amount parts 0) (reduce + 0 (map :amount live)))}))
 
 (defn summary
   "What :parts records: the most TLCs pending at once and their largest summed
@@ -198,23 +212,30 @@
 
 (def disagreements #{:paid-but-failed :success-but-unpaid})
 
+(defn part-kind
+  "What a client saw of a payment's `parts`: :split (two or more TLCs pending at
+  once, or TLCs on two or more channels), :one-part, :not-seen (it settled or
+  failed between polls) or :not-watched (no payment hash came back)."
+  [parts]
+  (cond (nil? parts)                                              :not-watched
+        (or (<= 2 (:max-at-once parts)) (<= 2 (:channels parts))) :split
+        (pos? (:tlcs parts))                                      :one-part
+        :else                                                     :not-seen))
+
 (defn split
-  "What the clients saw of the successful payments' parts: how many were seen
-  with two or more TLCs pending at once or leaving on two or more channels, with
-  one only, or with none (they settled between polls, or the client stopped
-  watching first)."
-  [history paid-ids]
-  (let [parts (for [op    history
-                    :when (and (= :pay (:f op))
-                               (= :mpp (get-in op [:value :kind]))
-                               (#{:ok :fail :info} (:type op))
-                               (paid-ids (get-in op [:value :id])))]
-                (get-in op [:value :parts]))]
-    (frequencies (for [p parts]
-                   (cond (nil? p)                                      :not-watched
-                         (or (<= 2 (:max-at-once p)) (<= 2 (:channels p))) :split
-                         (pos? (:tlcs p))                              :one-part
-                         :else                                         :not-seen)))))
+  "{outcome {part-kind count}}: what the clients saw of the parts of the payments
+  that ended `outcomes` ({attempt-id outcome}). A Failed payment seen :split had
+  parts in flight before it failed, the case all or nothing is about."
+  [history outcomes]
+  (let [seen (for [op    history
+                   :when (and (= :pay (:f op))
+                              (= :mpp (get-in op [:value :kind]))
+                              (#{:ok :fail :info} (:type op)))
+                   :let  [o (get outcomes (get-in op [:value :id]))]
+                   :when (#{:paid :unpaid} o)]
+               [o (part-kind (get-in op [:value :parts]))])]
+    (into (sorted-map)
+          (update-vals (group-by first seen) #(frequencies (map second %))))))
 
 (defn analyze
   [history]
@@ -230,7 +251,6 @@
         by       (group-by :outcome rows)
         brief    #(select-keys % [:id :from :to :amount :hash :invoice-status :payment-status
                                   :payment-error :invoice-error :invoice-unread :payment-unread])
-        paid-ids (set (map :id (:paid by)))
         bad      (mapcat by disagreements)
         open     (mapcat by [:unfinished :held :unread])]
     {:valid?      (cond (seq bad)   false
@@ -243,7 +263,7 @@
      ; Attempts whose receiver made no invoice: nothing was sent.
      :no-invoice  (- (count attempts) (count rows))
      :outcomes    (into (sorted-map) (update-vals by count))
-     :split       (split history paid-ids)
+     :split       (split history (into {} (map (juxt :id :outcome)) rows))
      :disagree    (mapv brief bad)
      :not-final   (mapv brief open)}))
 
