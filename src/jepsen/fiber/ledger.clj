@@ -141,6 +141,13 @@
       (empty? initial)
       {:valid? :unknown, :outcome :incomplete, :error "no channels recorded at setup"}
 
+      ; The balances are summed over the setup channels, and payments may have
+      ; used a channel the workload opened.
+      (some #(and (= :open-channel (:f %)) (= :ok (:type %))) history)
+      {:valid?  :unknown
+       :outcome :incomplete
+       :error   "channels were opened during the run (--channel-ops); the ledger counts only setup channels"}
+
       (or (nil? listed) (seq broken))
       {:valid?  :unknown
        :outcome :incomplete

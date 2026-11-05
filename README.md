@@ -27,6 +27,8 @@ With `--force-close-ok`, a channel that ended closed (every end `Closed`) doesn'
 
 With `--onchain`, after the final read it closes every channel and checks on chain that each party got its last balance (see [below](#on-chain-settlement---onchain)).
 
+With `--channel-ops open,close,force-close`, the clients also open, cooperatively close and force-close channels on the topology's edges while payments run (`src/jepsen/fiber/channels.clj`), about every `--channel-interval` seconds, so that faults land in the middle of opening and closing. A close takes one of the edge's channels that both ends report ready, and leaves at least `--channel-keep` of them (default 1), so payments and the probe keep a route. The test then also checks that every end of every channel is `ChannelReady` or `Closed`, never in between, and that both ends agree on which. Fiber notices a counterparty's force close only in a check every 300 s (`CHECK_CHANNELS_SHUTDOWN_INTERVAL`), so after the quiet period the test waits up to `--channel-settle-timeout` seconds (default 360) for that, before the probe, and reports how long it waited. Setup channels the workload closed are left out of the checks above, and a payment whose TLC is still pending on such a channel isn't counted as unfinished, nor are its TLCs upstream on ready channels: it settles on chain, by preimage or once it expires (hours, in a release build). `--ledger` reports `incomplete` once a channel was opened during the run, since it sums only the setup channels.
+
 With `--availability-window`, it also checks that the payment success rate after healing is back to what it was before the first fault (see [below](#availability-after-healing---availability-window)).
 
 ## Faults
@@ -52,6 +54,7 @@ Planned: **clock skew**. Fiber expires TLCs by wall-clock timestamp (off-chain c
   - `db.clj` (process lifecycle)
   - `topology.clj` (opens the channels of a named graph, `--topology`, over `--nodes`: `line` is n1 - n2 - n3; `ring` closes the line; `mesh` adds a channel from each node to the one opposite it on the ring, so six nodes get three channels each)
   - `client.clj` (keysend payments, final read; workloads add payment kinds with `send-payment!` and operations with `invoke-op`)
+  - `channels.clj` (opening and closing channels during the run, with `--channel-ops`)
   - `invoice.clj` (invoice payments, with `--pay-kinds invoice`)
   - `checker.clj` (invariants)
   - `ledger.clj` (per-node money check, with `--ledger`)
