@@ -235,8 +235,8 @@ jobs:
             echo "- Restored from cache: fnn ${FNN_HIT}${DEPS_HIT:+ (compiled dependencies: exact match ${DEPS_HIT})}, devnet snapshot ${SNAPSHOT_HIT}"
             echo "- To run a run's payments and faults again, add \`--seed <its seed>\` to the arguments, with the same Fiber commit. Timing still differs, so a failure may take several runs to come back."
             echo
-            echo "| Run | Seed | Exit | Verdict | Ledger | Post-heal probe | Channels | Store |"
-            echo "| --- | --- | --- | --- | --- | --- | --- | --- |"
+            echo "| Run | Seed | Exit | Verdict | Ledger | Post-heal probe | Success rate | Channels | Store |"
+            echo "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"
             [ -f runs.txt ] || : >runs.txt
             while read -r i code store; do
               log="run-$i.log"
@@ -248,7 +248,9 @@ jobs:
               else probe="failed"; fi
               # pprint may put the map on the line after its key.
               channels="$(tr '\n' ' ' <"$log" | grep -oE ':channel-summary +\{[^}]*\}' | tail -1 | sed -E 's/:channel-summary +//' | tr -s ' ' || true)"
-              echo "| $i | \`${seed:--}\` | $code | ${verdict:-none} | ${ledger:--} | $probe | ${channels:--} | \`${store}\` |"
+              # With --availability-window: the baseline's success rate, then the recovery's.
+              rates="$(tr '\n' ' ' <"$log" | grep -oE ':success-rates +"[^"]*"' | tail -1 | sed -E 's/^:success-rates +"//; s/"$//; s/->/→/' || true)"
+              echo "| $i | \`${seed:--}\` | $code | ${verdict:-none} | ${ledger:--} | $probe | ${rates:--} | ${channels:--} | \`${store}\` |"
             done <runs.txt
           } >>"$GITHUB_STEP_SUMMARY"
 
