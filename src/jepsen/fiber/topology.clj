@@ -16,6 +16,15 @@
 
 (def shannons-per-ckb 100000000)
 
+(defn fnn-env
+  "With --acceptor-funding, the environment that makes fnn put that much CKB into
+  each channel it accepts: Fiber's auto_accept_channel_ckb_funding_amount, whose
+  default (100 CKB) is all reserve. Then both ends of a channel start with a
+  balance to send, as an MPP payment needs to have more than one route."
+  [opts]
+  (when-let [ckb (:acceptor-funding opts)]
+    {:FIBER_AUTO_ACCEPT_CHANNEL_CKB_FUNDING_AMOUNT (str (* ckb shannons-per-ckb))}))
+
 (def known-peer-ids
   "Peer IDs of the devnet test keys (tests/bruno/environments/test.bru), used if
   node_info doesn't report a full multiaddr. The keys of n4 and up are made by

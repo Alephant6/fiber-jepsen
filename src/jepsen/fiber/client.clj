@@ -108,7 +108,9 @@
 (defmulti send-payment!
   "Sends the payment in `op` from `node` to `to`, and returns as send-keysend!
   does. Dispatches on the payment's :kind, keysend when it has none, so that a
-  workload can add a kind (invoice, MPP) with a method in its own namespace."
+  workload can add a kind (invoice, MPP) with a method in its own namespace. A
+  method may add ::value, a map merged into the completed op's :value (the MPP
+  kind records there the parts it saw)."
   (fn [_test _node _to op] (get-in op [:value :kind] :keysend)))
 
 (defmethod send-payment! :keysend
@@ -118,8 +120,8 @@
 (defn pay!
   [test node op]
   (let [to     (destination test node op)
-        value  (-> (:value op) (dissoc :to-index) (assoc :from node :to to))
-        res    (send-payment! test node to op)]
+        res    (send-payment! test node to op)
+        value  (-> (:value op) (dissoc :to-index) (assoc :from node :to to) (merge (::value res)))]
     (cond
       (::definite res)
       (assoc op :type :fail, :value value, :error (::definite res))

@@ -68,6 +68,7 @@ Why a clock fault: Fiber expires TLCs by wall-clock timestamp (off-chain checks 
   - `client.clj` (keysend payments, final read; workloads add payment kinds with `send-payment!` and operations with `invoke-op`)
   - `channels.clj` (opening and closing channels during the run, with `--channel-ops`)
   - `invoice.clj` (invoice payments, with `--pay-kinds invoice`)
+  - `mpp.clj` (multi-part payments and their all-or-nothing check, with `--pay-kinds mpp`)
   - `checker.clj` (invariants)
   - `health.clj` (process health: panics, and a sample of every node after healing)
   - `ledger.clj` (per-node money check, with `--ledger`)
@@ -166,6 +167,8 @@ scripts/nonce_report.py store/fiber-kill/<run> ...    # per node: restarts, repl
 ### Payment kinds (`--pay-kinds`)
 
 By default every payment is a keysend. `--pay-kinds keysend,invoice` draws each payment's kind from the list, uniformly; a kind listed twice is drawn twice as often, and `--pay-kinds invoice` makes every payment an invoice payment. For an invoice payment the receiver creates an invoice with `new_invoice` (devnet currency `Fibd`, an hour's expiry, a preimage derived from the attempt id), and the sender pays it with `send_payment`. Unlike a keysend, it needs the receiver up: when `new_invoice` fails, the payment fails without being sent (`[:new-invoice :receiver-down]`). The kinds come from a stream of their own, so the payments' amounts, destinations and ids for a seed are the same whatever the kinds; with keysend alone nothing is drawn. Invoice payments carry their attempt id like keysends, so `--ledger` counts them. A workload adds a kind with a `client/send-payment!` method; `--pay-kinds` accepts every kind that has one.
+
+`--pay-kinds mpp` (C-07) makes multi-part payments: the invoice allows MPP (`allow_mpp`), and `send_payment` may split the amount into up to `--mpp-max-parts` parts (Fiber's default, 12). Fiber splits only when no single route carries the amount, so MPP payments take their amounts from `--mpp-amount MIN-MAX` CKB (default 1000-1600), spread over the range by the same draw as other payments' amounts, so that a seed's other values stay the same. On the default line no amount above one channel's balance has a route at all: use a graph with several routes (`--topology mesh`), and `--acceptor-funding CKB` so that the acceptor of each channel puts in CKB too and both ends start with something to send. Fiber reports a payment's parts only in debug builds, so while a payment is in flight the client samples the sender's pending TLCs for its hash and records `:parts` (most TLCs at once, distinct TLCs, distinct channels), lower bounds. After the final read, every MPP invoice's status is read on its receiver and its payment's on its sender, and the `:mpp` check wants Success with the invoice Paid, or Failed with it unpaid; `:unknown` while a payment is unfinished or a receiver holds a set it hasn't settled. `--ledger` checks that the receiver got the full amount.
 
 ### Per-node ledger (`--ledger`)
 
