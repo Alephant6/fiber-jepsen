@@ -60,14 +60,21 @@
 
 (defn call-send-payment!
   "Calls send_payment on `node` with `params`; with --ledger the payment carries
-  attempt `id`. Returns send_payment's result, or
+  attempt `id`, with --final-tlc-expiry-delta the last hop's TLC expires that
+  many ms after it is sent, and with --tlc-expiry-limit no TLC of the payment
+  expires more than that many ms after it is sent. Returns send_payment's
+  result, or
     {::definite error}    the node certainly created no payment;
     {::indefinite error}  it may have: the call timed out or the connection dropped."
   [test node params id]
   (try
     (rpc/call node "send_payment"
               (cond-> params
-                (and (:ledger test) id) (assoc :custom_records (attempt-records id))))
+                (and (:ledger test) id)        (assoc :custom_records (attempt-records id))
+                (:final-tlc-expiry-delta test) (assoc :final_tlc_expiry_delta
+                                                      (rpc/int->hex (:final-tlc-expiry-delta test)))
+                (:tlc-expiry-limit test)       (assoc :tlc_expiry_limit
+                                                      (rpc/int->hex (:tlc-expiry-limit test)))))
     ; Nothing reached the node, so the payment definitely wasn't created.
     (catch ConnectException _ {::definite :node-down})
     (catch ConnectTimeoutException _ {::definite :node-unreachable})
@@ -132,17 +139,18 @@
 
 (defn probe!
   "After the network has healed, sends one small keysend each way over every
-  channel. A healthy network completes them; a wedged channel leaves them stuck.
-  Status is Rejected when the node certainly created no payment, and Unknown when
-  the call got no reply."
+  channel, and with --probe-routes one between every two nodes without a channel
+  (marked :route? true; see topology/probe-pairs). A healthy network completes
+  them; a wedged channel leaves them stuck. Status is Rejected when the node
+  certainly created no payment, and Unknown when the call got no reply."
   [test]
-  (vec (for [[a b]     (topology/edges test)
-             [from to] [[a b] [b a]]
-             :let      [amount 1000000
-                        id     (attempt-id)]]
+  (vec (for [[from to route?] (topology/probe-pairs test)
+             :let             [amount 1000000
+                               id     (attempt-id)]]
          (let [res   (try (send-keysend! test from to amount id)
                           (catch Exception e {::indefinite (ex-message e)}))
-               entry {:from from, :to to, :amount amount, :id id}
+               entry (cond-> {:from from, :to to, :amount amount, :id id}
+                       route? (assoc :route? true))
                ; The checker matches errors as strings.
                err   #(if (string? %) % (pr-str %))]
            (cond
@@ -234,18 +242,23 @@
             {:log-message (str "Waiting to list payments on " node)
              :timeout     120000}))
 
+(defn payment-statuses
+  "The status of every payment the clients got a hash for, as its sender reports it."
+  [test]
+  (vec (for [{:keys [node hash]} @(:payments test)]
+         (let [res (try (rpc/call node "get_payment" {:payment_hash hash})
+                        (catch Exception e
+                          (warn e "Couldn't read payment" hash "from" node)
+                          nil))]
+           {:node   node
+            :hash   hash
+            :status (:status res)
+            :error  (:failed_error res)}))))
+
 (defn read-all
   [test]
   (cond-> {:channels (into {} (for [n (:nodes test)] [n (read-node n)]))
-           :payments (vec (for [{:keys [node hash]} @(:payments test)]
-                            (let [res (try (rpc/call node "get_payment" {:payment_hash hash})
-                                           (catch Exception e
-                                             (warn e "Couldn't read payment" hash "from" node)
-                                             nil))]
-                              {:node   node
-                               :hash   hash
-                               :status (:status res)
-                               :error  (:failed_error res)})))}
+           :payments (payment-statuses test)}
     ; With --ledger: every payment each node holds, including ones the client never
     ; got a hash for.
     (:ledger test) (assoc :listed (into {} (for [n (:nodes test)] [n (read-payments n)])))))
