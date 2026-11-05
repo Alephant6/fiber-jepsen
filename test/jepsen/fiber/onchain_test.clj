@@ -233,3 +233,69 @@
       (is (= [] (:txs t)))
       (is (= [{:tx "0xfund", :index 0, :capacity 1000, :lock (chain/lock-key (script "F"))}]
              (:live t))))))
+
+(def revocation-witness
+  "A revocation witness of commitment 3, as Fiber's watchtower builds it."
+  (str "0x10000000100000001000000010000000" "00" (format "%016x" 3)
+       (apply str (repeat 64 "b")) (apply str (repeat 128 "c"))))
+
+(deftest witnesses-and-lock-args
+  (testing "a revocation witness gives the commitment number it revokes"
+    (is (= 3 (oc/revoked-number revocation-witness))))
+  (testing "a settlement (unlock count 1) or a wallet's witness isn't a revocation"
+    (is (nil? (oc/revoked-number (str "0x10000000100000001000000010000000" "01"
+                                      (subs revocation-witness 36)))))
+    (is (nil? (oc/revoked-number (str "0x55000000100000005500000055000000" (apply str (repeat 138 "0"))))))
+    (is (nil? (oc/revoked-number nil))))
+  (testing "a commitment lock's args carry the commitment number at bytes 28-36"
+    (is (= 7 (oc/commitment-number (str "0x" (apply str (repeat 56 "1")) (format "%016x" 7) "ffff")))))
+  (testing "a wallet lock's 20-byte args don't"
+    (is (nil? (oc/commitment-number (str "0x" (apply str (repeat 40 "1"))))))))
+
+; n1 came back with an old state (800 / 0) and force-closed with it: its revoked
+; commitment C1 (996) went on chain, and n2's watchtower revoked it, paying the
+; whole cell to n2 and its fee (3) from a wallet cell of 50.
+(def revoked
+  (channel-trace [(tx "0xcommit" 20 [["F" 1000]] [["C1" 996]])
+                  (assoc (tx "0xrevoke" 22 [["C1" 996] ["L2" 50]] [["L2" 996] ["L2" 47]])
+                         :revokes 3)]))
+
+(deftest punished
+  (testing "the punisher got at least what it was owed: punished, not a mismatch"
+    (let [c (oc/check-channel ends revoked locks 0)]
+      (is (= :punished (:status c)))
+      (is (= {:tx "0xrevoke", :revokes 3, :punisher "n2"} (:revocation c)))
+      (is (= 993 (get-in c [:parties "n2" :received])))
+      (is (= 0 (get-in c [:parties "n1" :received])))))
+  (testing "a revocation that left the punisher short is a mismatch"
+    (let [t (channel-trace [(tx "0xcommit" 20 [["F" 1000]] [["C1" 996]])
+                            (assoc (tx "0xrevoke" 22 [["C1" 996] ["L2" 50]] [["L2" 100] ["L1" 943]])
+                                   :revokes 3)])]
+      (is (= :mismatch (:status (oc/check-channel ends t locks 0)))))))
+
+(deftest stale-records
+  (let [old      {"n1" (record "0xc1" 800 0)
+                  "n2" (record "0xc1" 100 700 :acceptor? true)}
+        settle   {:time 0, :waited-s 10, :locks locks
+                  :channels {"n1" [(get old "n1")], "n2" [(get old "n2")], "n3" []}
+                  :traces   {"0xc1" coop}}]
+    (testing "a restored node's old record makes the latest payout look wrong"
+      (is (= :mismatch (get-in (oc/analyze nil settle) [:problems "0xc1" :status]))))
+    (testing "judged by its peer's record instead, the payout is right"
+      (let [r (oc/analyze nil settle #{"n1"})]
+        (is (= {:ok 1} (:statuses r)))
+        (is (= ["n1"] (:stale-records r)))))
+    (testing "the mirror swaps balances and TLC totals and keeps the stale end's state"
+      (let [t (oc/trusted-ends (assoc-in old ["n1" :state] {:state_name "Stale"}) #{"n1"})]
+        (is (= (get-in ends ["n1" :local_balance]) (get-in t ["n1" :local_balance])))
+        (is (= (get-in ends ["n1" :remote_balance]) (get-in t ["n1" :remote_balance])))
+        (is (= "Stale" (get-in t ["n1" :state :state_name])))))
+    (testing "stale nodes come from the nemesis ops that list them"
+      (is (= #{"n1"} (oc/stale-nodes [{:process :nemesis, :f :restore-state
+                                       :value {:node "n1", :stale-store ["n1"]}}
+                                      {:process 0, :f :pay, :value {:stale-store ["n2"]}}])))
+      (testing "and from no other op: a sorted map with string keys throws on a keyword lookup"
+        (is (= #{} (oc/stale-nodes [{:process :nemesis, :f :reconnect
+                                     :value (sorted-map "n1->n2" :ok)}
+                                    {:process :nemesis, :f :old-state-heal
+                                     :value (sorted-map "n1" :started)}])))))))

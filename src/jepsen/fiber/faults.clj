@@ -36,6 +36,7 @@
                                  [disconnect :as disconnect]
                                  [disk :as disk]
                                  [lnd-disconnect :as lnd-disconnect]
+                                 [old-state :as old-state]
                                  [outage :as outage]
                                  [packet :as packet]
                                  [partition :as partition]
@@ -56,7 +57,8 @@
    disk/fault
    power/fault
    cch-kill/fault
-   lnd-disconnect/fault])
+   lnd-disconnect/fault
+   old-state/fault])
 
 (def supported
   "Every name --faults accepts."

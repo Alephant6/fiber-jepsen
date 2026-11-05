@@ -185,6 +185,29 @@
                             " each wallet. A TLC still pending on a force-closed channel settles"
                             " only once it expires, hours later in a release build, so that"
                             " channel's verdict is unknown rather than valid.")}
+    "c-11"  {:priority :p1
+             :plan     (str "With a watchtower; kill and restart the watchtower node; funds on chain"
+                            " are right after closing. Amended (gist comment): restart a node from an"
+                            " old copy of its data directory instead. It must never broadcast the"
+                            " revoked state, and if it does, the peer's watchtower punishes it.")
+             :args     ["--faults" "old-state" "--old-state-targets" "one" "--old-state-restore" "raw"
+                        "--old-state-after" "20" "--old-state-hold" "40" "--old-state-force-close"
+                        "--time-limit" "150" "--onchain" "--force-close-ok"]
+             :differs  (str "Three nodes in a line; every node runs Fiber's built-in watchtower, which"
+                            " checks the chain every second on the devnet, and none is killed. 20 s"
+                            " into the run one node's store is copied while fnn is stopped by"
+                            " SIGSTOP; 40 s of payments later fnn is crashed, the copy put back over"
+                            " the store and fnn started: a disk rollback, which Fiber can't tell from"
+                            " a restart (--old-state-restore fiber restores fnn's own newest backup"
+                            " with fnn --restore instead, which marks the channels Stale). Once its peers have reconnected the restored"
+                            " node is asked to force-close every channel, which broadcasts the"
+                            " revoked commitments it holds: that is what tests the watchtowers. Its"
+                            " channels close by design, so --force-close-ok excuses them, and what"
+                            " the restored node forgot (its later payments, its channels' old"
+                            " balances) is excused from the fiber check; --onchain judges its"
+                            " channels by its peers' records, and the old-state check fails a"
+                            " channel that paid out by the revoked balances. No --ledger: the"
+                            " closes end every channel on chain.")}
     "c-12"  {:priority :p1
              :plan     (str "A-B-C under high load; limit a node's CPU or memory with cgroups;"
                             " no OOM, no disconnect loop, recovers once the limit is lifted")
