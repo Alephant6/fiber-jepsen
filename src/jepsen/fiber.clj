@@ -31,6 +31,7 @@
             [jepsen.fiber.faults [chain-partition :as chain-partition]
                                  [clock :as clock]
                                  [lnd-disconnect :as lnd-disconnect]
+                                 [old-state :as old-state]
                                  [outage :as outage]
                                  [packet :as packet]
                                  [partition :as partition]
@@ -152,9 +153,12 @@
                                                     :timeline   (timeline/html)
                                                     :health     (health/checker)})
                                       (seq (faults/in-use opts)) (assoc :faults (faults/fired-checker opts))
-                                      (not (:close opts)) (assoc :fiber (if (:force-close-ok opts)
-                                                                          (closes/checker)
-                                                                          (fiber-checker/checker)))
+                                      (not (:close opts)) (assoc :fiber (cond-> (if (:force-close-ok opts)
+                                                                                  (closes/checker)
+                                                                                  (fiber-checker/checker))
+                                                                          ; What a restored node forgot.
+                                                                          (some #{:old-state} (:faults opts))
+                                                                          old-state/excused))
                                       (:close opts)       (assoc :close (fiber-checker/close-checker))
                                       (:nonce-check opts) (assoc :nonce (nonce/checker))
                                       (:ledger opts)      (assoc :ledger (ledger/checker))
@@ -402,6 +406,33 @@
                                         " default (false).")
     :parse-fn #(case % "true" true "false" false nil)
     :validate [boolean? "Must be true or false"]]
+   [nil "--old-state-targets TARGETS" (str "With --faults old-state, comma-separated target specs to"
+                                           " choose from: one (any node), middle (a node that forwards"
+                                           " payments, n2 in line).")
+    :default  [:one]
+    :parse-fn keywords
+    :validate [#(every? old-state/target-specs %) (str "Must be a subset of " old-state/target-specs)]]
+   [nil "--old-state-restore MODE" (str "With --faults old-state, how the saved store comes back: raw"
+                                        " (the store directory is replaced with the copy, as a disk"
+                                        " or snapshot rollback would) or fiber (fnn --restore, which"
+                                        " marks the restored channels Stale).")
+    :default  :raw
+    :parse-fn keyword
+    :validate [old-state/restore-modes (str "Must be one of " old-state/restore-modes)]]
+   [nil "--old-state-after SECONDS" (str "With --faults old-state, how long into the fault window the"
+                                         " first save waits, so that payments flow before it.")
+    :default  20
+    :parse-fn parse-long
+    :validate [#(and % (<= 0 %)) "Must be 0 or more"]]
+   [nil "--old-state-hold SECONDS" (str "With --faults old-state, seconds from a save of a node's store"
+                                        " to its restore, while payments move the node's channels on.")
+    :default  40
+    :parse-fn parse-long
+    :validate [#(and % (pos? %)) "Must be positive"]]
+   [nil "--old-state-force-close" (str "With --faults old-state, have the restored node force-close every"
+                                       " channel it still has, once its peers have reconnected: with"
+                                       " --old-state-restore raw it broadcasts the revoked commitments it"
+                                       " holds, which its peers' watchtowers should punish.")]
    [nil "--nonce-check" (str "Check MuSig2 nonce use. Needs an fnn built with the nonce-oracle"
                              " feature (scripts/build-fnn-nonce-oracle.sh).")]
    [nil "--close" (str "Halfway through the faults, ask every channel to close cooperatively, and"

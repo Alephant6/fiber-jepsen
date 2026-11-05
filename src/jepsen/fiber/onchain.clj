@@ -33,6 +33,13 @@
   (funding capacity - local - remote). Balances and TLCs come from the party's
   own record of the closed channel.
 
+  A channel whose commitment a watchtower revoked (a revocation transaction,
+  revoked-number, spent its commitment cell) is :punished rather than
+  :mismatch when the punisher got at least what it was owed: the revocation
+  pays it the whole cell. The records of a node whose store was put back to an
+  older copy (jepsen.fiber.faults.old-state) are older than the chain, so its
+  channels are judged by its peers' records (trusted-ends).
+
   Invalid when a receipt is outside its range, when any other wallet received
   something from the channel, when a channel is still open or its cells are
   still unspent after the wait (:unknown instead while one of its TLCs hasn't
@@ -83,29 +90,64 @@
   [s]
   (some-> s rpc/hex->int long))
 
+(def ^:private empty-witness-args
+  "An empty WitnessArgs, 16 bytes in hex: Fiber's commitment-lock witnesses
+  start with it (XUDT_COMPATIBLE_WITNESS, channel.rs)."
+  "10000000100000001000000010000000")
+
+(defn revoked-number
+  "The commitment number that witness `w` (hex) revokes, or nil when it isn't a
+  revocation. Fiber's watchtower (build_revocation_tx, watchtower/actor.rs)
+  unlocks a revoked commitment cell with the empty WitnessArgs, an unlock count
+  of 0, the commitment number (u64, big-endian), the x-only aggregated pubkey
+  (32 bytes) and a signature (64 bytes): 121 bytes. Settlements have an unlock
+  count of 1 or more."
+  [w]
+  (when (and (string? w)
+             (= (+ 2 (* 2 121)) (count w))
+             (= empty-witness-args (subs w 2 34))
+             (= "00" (subs w 34 36)))
+    (Long/parseUnsignedLong (subs w 36 52) 16)))
+
+(defn commitment-number
+  "The commitment number in lock args `args` (hex) of a commitment cell: bytes
+  28 to 36, big-endian, where the watchtower reads it. Nil for args shorter than
+  36 bytes, which no commitment lock has (wallet locks have 20)."
+  [args]
+  (when (and (string? args) (<= (+ 2 72) (count args)))
+    (Long/parseUnsignedLong (subs args 58 74) 16)))
+
 (defn traced-tx
   "Transaction `hash` as the check needs it: its status and block, its inputs
-  with the capacity and lock of the cells they spend, and its outputs. Outputs
-  keep their :script, which tracing needs and strip removes."
+  with the capacity and lock of the cells they spend, and its outputs, each with
+  the commitment number in its lock args if it has one. :revokes is the
+  commitment number it revokes when it is a watchtower's revocation of a
+  revoked commitment (revoked-number). Outputs keep their :script, which
+  tracing needs and strip removes."
   [cache hash]
-  (let [res (fetch-tx cache hash)
-        tx  (:transaction res)]
-    {:hash    hash
-     :status  (get-in res [:tx_status :status])
-     :block   (hex-long (get-in res [:tx_status :block_number]))
-     :inputs  (vec (for [in (:inputs tx)
-                         :let [po (:previous_output in)
-                               op {:tx (:tx_hash po), :index (hex-long (:index po))}
-                               o  (get-in (fetch-tx cache (:tx op)) [:transaction :outputs (:index op)])]]
-                     (assoc op
-                            :capacity (hex-long (:capacity o))
-                            :lock     (some-> (:lock o) chain/lock-key))))
-     :outputs (vec (map-indexed (fn [i o]
-                                  {:index    i
-                                   :capacity (hex-long (:capacity o))
-                                   :lock     (chain/lock-key (:lock o))
-                                   :script   (:lock o)})
-                                (:outputs tx)))}))
+  (let [res     (fetch-tx cache hash)
+        tx      (:transaction res)
+        revokes (first (keep revoked-number (:witnesses tx)))]
+    (cond-> {:hash    hash
+             :status  (get-in res [:tx_status :status])
+             :block   (hex-long (get-in res [:tx_status :block_number]))
+             :inputs  (vec (for [in (:inputs tx)
+                                 :let [po (:previous_output in)
+                                       op {:tx (:tx_hash po), :index (hex-long (:index po))}
+                                       o  (get-in (fetch-tx cache (:tx op)) [:transaction :outputs (:index op)])]]
+                             (assoc op
+                                    :capacity (hex-long (:capacity o))
+                                    :lock     (some-> (:lock o) chain/lock-key))))
+             :outputs (vec (map-indexed (fn [i o]
+                                          (cond-> {:index    i
+                                                   :capacity (hex-long (:capacity o))
+                                                   :lock     (chain/lock-key (:lock o))
+                                                   :script   (:lock o)}
+                                            (commitment-number (get-in o [:lock :args]))
+                                            (assoc :commitment-number
+                                                   (commitment-number (get-in o [:lock :args])))))
+                                        (:outputs tx)))}
+      revokes (assoc :revokes revokes))))
 
 (defn- strip
   [tx]
@@ -257,15 +299,28 @@
             stray    (into (sorted-map)
                            (for [[n k] locks
                                  :when (and (not (ours k)) (not (zero? (get net k 0))))]
-                             [n (get net k)]))]
+                             [n (get net k)]))
+            revoke   (first (filter :revokes (:txs trace)))
+            punisher (when revoke
+                       (some (fn [n] (when (= (get locks n) (:lock (first (:outputs revoke)))) n))
+                             (keys ends)))
+            ; A revocation hands the whole commitment cell to the punisher: it
+            ; must get at least what it was owed, and the other party gets nothing.
+            punished? (and punisher
+                           (let [{:keys [received range]} (get parties punisher)]
+                             (<= (first range) received)))]
         (summary (cond-> {:status   (cond (seq stray)                      :misdirected
                                           (every? :ok? (vals parties))     :ok
+                                          punished?                        :punished
                                           :else                            :mismatch)
                           :capacity (:capacity trace)
                           :fee      fee
                           :txs      (count (:txs trace))
                           :parties  parties}
-                   (seq stray) (assoc :stray stray)))))))
+                   (seq stray) (assoc :stray stray)
+                   revoke      (assoc :revocation {:tx       (:hash revoke)
+                                                   :revokes  (:revokes revoke)
+                                                   :punisher punisher})))))))
 
 (defn wallet-check
   "Each node's wallet change from the baseline to the settle read, against the
@@ -291,39 +346,76 @@
                      :txs       (count in-range)
                      :diff      (- change explained)}])))))
 
+(defn mirror
+  "`record`, one end's record of a channel, as the other end's would read:
+  balances and TLC totals swapped."
+  [record]
+  (assoc record
+         :local_balance        (:remote_balance record)
+         :remote_balance       (:local_balance record)
+         :offered_tlc_balance  (:received_tlc_balance record)
+         :received_tlc_balance (:offered_tlc_balance record)))
+
+(defn trusted-ends
+  "A channel's `ends` {node record}, with the record of an end in `stale` (a
+  node whose store was put back to an older copy; see stale-nodes) replaced by
+  the mirror of its peer's, which holds the latest state. Its :state stays."
+  [ends stale]
+  (let [[a b] (keys ends)]
+    (cond-> ends
+      (and b (stale a) (not (stale b))) (assoc a (assoc (mirror (get ends b)) :state (:state (get ends a))))
+      (and b (stale b) (not (stale a))) (assoc b (assoc (mirror (get ends a)) :state (:state (get ends b)))))))
+
+(defn stale-nodes
+  "Nodes whose store a fault put back to an older copy during the run
+  (jepsen.fiber.faults.old-state): a completed nemesis op lists them under
+  :stale-store in its value. Their records of their channels are older than the
+  chain."
+  [history]
+  (set (for [op    history
+             :when (and (= :nemesis (:process op)) (map? (:value op)))
+             n     (:stale-store (:value op))]
+         n)))
+
 (defn analyze
-  "The verdict from the :chain-baseline and :settle op values."
-  [baseline settle]
-  (cond
-    (nil? settle)
-    {:valid? :unknown, :error "no settle read"}
+  "The verdict from the :chain-baseline and :settle op values. Channels of
+  `stale` nodes are judged by their peers' records (trusted-ends)."
+  ([baseline settle]
+   (analyze baseline settle #{}))
+  ([baseline settle stale]
+   (cond
+     (nil? settle)
+     {:valid? :unknown, :error "no settle read"}
 
-    (:error settle)
-    {:valid? :unknown, :error (:error settle)}
+     (:error settle)
+     {:valid? :unknown, :error (:error settle)}
 
-    :else
-    (let [ends     (fc/by-channel (:channels settle))
-          channels (into (sorted-map)
-                         (for [[id e] ends
-                               :let [op (some (comp parse-outpoint :channel_outpoint) (vals e))]]
-                           [id (check-channel e (when op (get (:traces settle) id))
-                                              (:locks settle) (:time settle))]))
-          by       (group-by (comp :status val) channels)
-          wallets  (when baseline (wallet-check baseline settle))
-          bad      (vec (for [[n w] wallets :when (not (zero? (:diff w)))] n))
-          failed   (select-keys by [:open :unsettled :mismatch :misdirected])
-          pending  (select-keys by [:awaiting-expiry :unknown])]
-      {:valid?         (cond (or (seq failed) (seq bad))     false
-                             (or (seq pending) (nil? wallets)) :unknown
-                             :else                           true)
-       :statuses       (into (sorted-map) (update-vals by count))
-       :settled-in-s   (:waited-s settle)
-       :closes         (:closes settle)
-       :problems       (into (sorted-map) (for [[_ cs] (merge failed pending), [id c] cs] [id c]))
-       :channels       (into (sorted-map) (for [[id c] channels :when (= :ok (:status c))]
-                                            [id (select-keys c [:fee :txs :parties])]))
-       :wallets        wallets
-       :unbalanced-wallets bad})))
+     :else
+     (let [ends     (cond-> (fc/by-channel (:channels settle))
+                      (seq stale) (update-vals #(trusted-ends % stale)))
+           channels (into (sorted-map)
+                          (for [[id e] ends
+                                :let [op (some (comp parse-outpoint :channel_outpoint) (vals e))]]
+                            [id (check-channel e (when op (get (:traces settle) id))
+                                               (:locks settle) (:time settle))]))
+           by       (group-by (comp :status val) channels)
+           wallets  (when baseline (wallet-check baseline settle))
+           bad      (vec (for [[n w] wallets :when (not (zero? (:diff w)))] n))
+           failed   (select-keys by [:open :unsettled :mismatch :misdirected])
+           pending  (select-keys by [:awaiting-expiry :unknown])]
+       (cond-> {:valid?         (cond (or (seq failed) (seq bad))     false
+                                      (or (seq pending) (nil? wallets)) :unknown
+                                      :else                           true)
+                :statuses       (into (sorted-map) (update-vals by count))
+                :settled-in-s   (:waited-s settle)
+                :closes         (:closes settle)
+                :problems       (into (sorted-map) (for [[_ cs] (merge failed pending), [id c] cs] [id c]))
+                :channels       (into (sorted-map) (for [[id c] channels :when (= :ok (:status c))]
+                                                     [id (select-keys c [:fee :txs :parties])]))
+                :wallets        wallets
+                :unbalanced-wallets bad}
+         (seq (:punished by)) (assoc :punished (into (sorted-map) (:punished by)))
+         (seq stale)          (assoc :stale-records (vec (sort stale))))))))
 
 ;; Operations
 
@@ -399,9 +491,13 @@
              (pending id) (assoc :forced (request-close! id (get open id) true)))))))
 
 (defn- settling?
-  "Whether a funded channel end still waits for its close to settle on chain."
+  "Whether a funded channel end still waits for its close to settle on chain. A
+  Stale end (restored from a backup, jepsen.fiber.faults.old-state) never
+  learns of a close (Fiber's shutdown check skips Stale channels), so it doesn't
+  hold up the wait; the trace still has to settle."
   [ch]
   (and (:channel_outpoint ch)
+       (not= "stale" (fc/state-name ch))
        (or (not (closed? ch))
            (str/includes? (str (get-in ch [:state :state_flags])) "WAITING_ONCHAIN_SETTLEMENT"))))
 
@@ -494,4 +590,4 @@
                                (filter #(and (= :ok (:type %)) (= f (:f %))))
                                last
                                :value))]
-        (analyze (value :chain-baseline) (value :settle))))))
+        (analyze (value :chain-baseline) (value :settle) (stale-nodes history))))))
