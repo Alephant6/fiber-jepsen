@@ -28,6 +28,19 @@
          (warn "disconnect nemesis:" node method (.getMessage e))
          (str "failed: " (.getMessage e)))))
 
+(defn- connect!
+  "connect_peer from `a` to `b`, at the address in `b`'s node_info `info`, or a
+  short failure string. The address can be missing when node_info failed (b
+  down or paused, with other faults), and then the op records that rather than
+  throwing: a thrown :reconnect fails the run's :faults check, though nothing
+  is wrong with the fault."
+  [a b info]
+  (let [addr (try (topology/p2p-address b info)
+                  (catch Exception e (str "failed: " (.getMessage e))))]
+    (if (str/starts-with? addr "failed")
+      addr
+      (try-call a "connect_peer" {:address addr}))))
+
 (defn disconnect-nemesis
   []
   (reify
@@ -57,7 +70,7 @@
                 seen (try (boolean (some #(= (pubkeys b) (:pubkey %))
                                          (:peers (rpc/call a "list_peers"))))
                           (catch Exception e (str "failed: " (.getMessage e))))
-                up   (try-call a "connect_peer" {:address (topology/p2p-address b info)})]
+                up   (connect! a b info)]
             (assoc op :value {:from a, :to b, :down-ms down-ms, :disconnect down
                               :peer-before-reconnect seen, :reconnect up}))
 
@@ -66,8 +79,7 @@
                  (into (sorted-map)
                        (for [[a b] edges]
                          (let [info (try (rpc/call b "node_info") (catch Exception _ nil))]
-                           [(str a "->" b)
-                            (try-call a "connect_peer" {:address (topology/p2p-address b info)})])))))))
+                           [(str a "->" b) (connect! a b info)])))))))
 
     (teardown! [_ _test])))
 

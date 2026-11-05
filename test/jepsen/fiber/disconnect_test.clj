@@ -54,3 +54,21 @@
     (is (nil? (:disconnect-flash (:options (parse [])))))
     (is (= [100 5000] (:disconnect-flash (:options (parse ["--disconnect-flash" "100-5000"])))))
     (is (seq (:errors (parse ["--disconnect-flash" "5000-100"]))))))
+
+(deftest reconnect-to-a-node-that-is-down
+  (testing "a node whose node_info fails (down or paused) is recorded, not thrown"
+    (let [nem  (disconnect/disconnect-nemesis)
+          test {:nodes ["n1" "n2" "n3" "n4"], :topology :ring
+                :pubkeys (atom {"n1" "pk1", "n2" "pk2", "n3" "pk3", "n4" "pk4"})}]
+      (with-redefs [rpc/call (fn [node method & [_params]]
+                               (case method
+                                 "node_info" (if (= "n4" node)
+                                               (throw (java.net.ConnectException. "Connection refused"))
+                                               {:addresses [(str "/ip4/10.77.0.1" (subs node 1) "/tcp/8228/p2p/Qm")]})
+                                 nil))]
+        (let [v (:value (n/invoke! nem test {:type :info, :f :reconnect}))]
+          (is (= :ok (v "n1->n2")))
+          (is (re-find #"^failed: node_info of n4 has no p2p address" (v "n3->n4"))))
+        (let [v (:value (n/invoke! nem test {:type :info, :f :flash-disconnect
+                                              :value {:edge ["n3" "n4"], :down-ms 1}}))]
+          (is (re-find #"^failed: node_info of n4" (:reconnect v))))))))
