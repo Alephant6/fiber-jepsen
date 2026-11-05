@@ -67,21 +67,34 @@
   [host key]
   (boolean (some #(= key (:pub_key %)) (:peers (cch/lnd-get host "/v1/peers")))))
 
+(def drop-wait-ms
+  "How long drop-peers! waits for both LNDs to stop listing each other. LND
+  removes a disconnected peer asynchronously, about 100 ms after the call."
+  5000)
+
 (defn drop-peers!
   "Disconnects lnd-ingrid and lnd-bob from each other, each through its own
-  REST API, and then reads whether each still lists the other: {host
-  connected?}. Called after the rules are in, so neither can reconnect."
+  REST API, and then reads, until neither lists the other or drop-wait-ms has
+  passed, whether each still does: {host connected?}. Called after the rules
+  are in, so neither can reconnect."
   []
-  (let [hosts [cch/hub-lnd cch/user-lnd]
-        pks   (zipmap hosts (map pubkey hosts))
-        other {cch/hub-lnd cch/user-lnd, cch/user-lnd cch/hub-lnd}]
+  (let [hosts    [cch/hub-lnd cch/user-lnd]
+        pks      (zipmap hosts (map pubkey hosts))
+        other    {cch/hub-lnd cch/user-lnd, cch/user-lnd cch/hub-lnd}
+        deadline (+ (System/currentTimeMillis) drop-wait-ms)]
     (doseq [h hosts]
       (try (cch/lnd-delete h (str "/v1/peers/" (pks (other h))))
            (catch clojure.lang.ExceptionInfo e
              ; Already gone is what we want.
              (when-not (re-find #"not connected" (str (ex-message e)))
                (throw e)))))
-    (into (sorted-map) (for [h hosts] [h (peer? h (pks (other h)))]))))
+    (loop []
+      (let [connected (into (sorted-map) (for [h hosts] [h (peer? h (pks (other h)))]))]
+        (if (or (not-any? true? (vals connected))
+                (< deadline (System/currentTimeMillis)))
+          connected
+          (do (Thread/sleep 200)
+              (recur)))))))
 
 (defn- heal-host!
   "Deletes every rule this fault may have added on the bound host, as often as
