@@ -23,7 +23,8 @@
                           [schedule :as schedule]
                           [topology :as topology]]
             [jepsen.fiber.faults [packet :as packet]
-                                 [power :as power]])
+                                 [power :as power]
+                                 [process :as process]])
   (:gen-class))
 
 (def supported-faults
@@ -189,9 +190,20 @@
     :validate [#(and % (<= 0 % 100)) "Must be 0 to 100"]]
    [nil "--log-level FILTER" "RUST_LOG filter for fnn."
     :default  "info"]
-   [nil "--kill-targets TARGETS" "Comma-separated kill targets: one, all."
+   [nil "--kill-targets TARGETS" (str "Comma-separated kill targets: one, all, middle (a node on more"
+                                      " than one channel, which forwards payments: n2 in line).")
     :default  [:one :all]
     :parse-fn keywords]
+   [nil "--kill-signal SIGNAL" (str "How a kill stops fnn: kill (SIGKILL, a crash) or term (SIGTERM, a"
+                                    " graceful shutdown, checked to finish within --term-grace).")
+    :default  :kill
+    :parse-fn keyword
+    :validate [process/kill-signals (str "Must be one of " process/kill-signals)]]
+   [nil "--term-grace SECONDS" (str "With --kill-signal term, seconds fnn has to exit after SIGTERM"
+                                    " before it gets SIGKILL and the run fails.")
+    :default  30
+    :parse-fn parse-long
+    :validate [#(and % (pos? %)) "Must be positive"]]
    [nil "--packet-targets TARGETS" (str "With --faults packet, comma-separated target specs to choose"
                                         " from: one, all, chain (the CKB node).")
     :default  [:one :all]
@@ -205,6 +217,12 @@
     :default  0
     :parse-fn parse-long
     :validate [#(and % (<= 0 % 100)) "Must be 0 to 100"]]
+   [nil "--disconnect-flash MS" (str "With --faults disconnect, make each fault a flash: disconnect a pair"
+                                     " and connect it again after MS milliseconds, or after a time drawn"
+                                     " from MIN-MAX (C-05: 100-5000). Without it, a pair stays"
+                                     " disconnected until the next fault op.")
+    :parse-fn packet/parse-delay
+    :validate [(fn [[lo hi]] (and lo hi (<= 0 lo hi))) "Must be MS or MIN-MAX, 0 <= MIN <= MAX"]]
    [nil "--power-targets TARGETS" (str "With --faults power, comma-separated target specs to choose"
                                        " from: one (a node), all (every node at once).")
     :default  [:one :all]
