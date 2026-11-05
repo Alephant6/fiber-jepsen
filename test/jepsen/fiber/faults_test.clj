@@ -36,7 +36,8 @@
   (testing "no two faults share a --faults name or a stream"
     (is (apply distinct? (mapcat :faults faults/registry)))
     (is (apply distinct? (map :stream faults/registry))))
-  (is (= #{:kill :pause :partition :disconnect :packet :chain-partition :cch-kill :lnd-disconnect}
+  (is (= #{:kill :pause :partition :disconnect :packet :chain-partition :clock :cch-kill
+           :lnd-disconnect}
          faults/supported))
   (testing "only the faults asked for"
     (is (= [:partition :db] (map :stream (faults/in-use {:faults [:kill :partition]}))))

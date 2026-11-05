@@ -13,13 +13,16 @@
               for a fault that sets how long each fault lasts. Without it, gaps
               average :nemesis-interval seconds, from the fault's gap stream.
     :checker  optional, (fn [opts]) -> nil or {name checker}: checks of its own
-              that the test adds to its checker when the fault is in use.
+              that the test adds to its checker when the fault is in use;
+    :env      optional, (fn [opts]) -> environment variables fnn starts with
+              when the fault is in use (jepsen.fiber.db).
   Adding a fault is a new namespace and a line in `registry`."
   (:require [jepsen.generator :as gen]
             [jepsen.nemesis.combined :as nc]
             [jepsen.fiber.schedule :as schedule]
             [jepsen.fiber.faults [cch-kill :as cch-kill]
                                  [chain-partition :as chain-partition]
+                                 [clock :as clock]
                                  [disconnect :as disconnect]
                                  [lnd-disconnect :as lnd-disconnect]
                                  [packet :as packet]
@@ -33,6 +36,7 @@
    disconnect/fault
    packet/fault
    chain-partition/fault
+   clock/fault
    cch-kill/fault
    lnd-disconnect/fault])
 
@@ -71,6 +75,13 @@
   (into {} (for [{:keys [checker]} (in-use opts)
                  :when checker]
              (checker opts))))
+
+(defn fnn-env
+  "The environment variables the faults in use start fnn with (their :env)."
+  [opts]
+  (into {} (for [{:keys [env]} (in-use opts)
+                 :when env]
+             (env opts))))
 
 (defn generator
   "The faults in use, each a stream of operations drawn from the seed and paced

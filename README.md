@@ -15,7 +15,8 @@ After all faults are healed and the network has had time to converge:
 - no channel's total (local + remote) changed: payments move money within a channel, they never create or destroy it;
 - every payment reached `Success` or `Failed`;
 - no payment the client saw succeed reports a different status later;
-- a fresh payment each way over every channel (the probe) succeeds, unless the sender's balance on that channel is below the probe amount; with `--probe-routes`, so does one between every two nodes without a channel, which only multi-hop routing can deliver.
+- a fresh payment each way over every channel (the probe) succeeds, unless the sender's balance on that channel is below the probe amount; with `--probe-routes`, so does one between every two nodes without a channel, which only multi-hop routing can deliver;
+- every node is healthy (assertion 7 of the [chaos-test plan](https://gist.github.com/quake/c73bba93b5b1928391063038fc9fe34a)): no fnn panicked (`panicked at` in its log), and after the probe every fnn is running, answers `node_info` and can still write to its store (`new_invoice`, an invoice that is never paid). A node whose `node_info` answers but whose `new_invoice` doesn't is alive but not working. The run also fails if the kernel killed a process in a node's container for memory, or if a restart by the harness found fnn already gone although nothing had stopped it (it exited on its own, and the restart would otherwise hide that). The `:health` result lists each node's ERROR lines by kind, how many times fnn started, and its peak memory.
 
 With `--nonce-check` and an instrumented fnn, it also checks that no MuSig2 nonce signed two different contexts, across restarts (see [below](#musig2-nonce-reuse---nonce-check)).
 
@@ -41,12 +42,13 @@ With `--availability-window`, it also checks that the payment success rate after
 | `disconnect` | `disconnect_peer` over RPC closes the connection between two neighbours; a later `connect_peer` reconnects them. Channels reestablish while both processes keep running, which a partition rarely causes (TCP keeps the connection and retransmits). With `--disconnect-flash MIN-MAX`, each fault is a flash instead: one op disconnects a pair, waits a time drawn from MIN-MAX ms and reconnects it (C-05 uses 100-5000), and records whether the pair was already connected again before the reconnect. |
 | `packet` | tc netem delays traffic, and with `--packet-loss` drops some of it: to and from one node, between all nodes, or from the nodes to the CKB node (`--packet-targets one,all,chain`). Each fault draws its delay from `--packet-delay MIN-MAX` (ms; default 500-3000), with a jitter of a tenth of it. One shaping is active at a time. |
 | `chain-partition` | iptables on the fnn hosts cuts one node, or all of them, off the CKB node, while they keep talking to each other: `drop` (requests time out) or `reject` (TCP reset, they fail at once), with `--chain-partition-targets one,all` and `--chain-partition-mode drop\|reject`. fnn can't submit or follow funding, closing and settlement transactions until it heals. |
+| `clock` | fnn's wall clock jumps forward or back by `--clock-jump MIN-MAX` seconds (default 60-1800), on one node or on every node by the same offset (`--clock-targets one,all`), then returns to the real time. fnn runs under libfaketime, which reads the offset from a file the fault rewrites; only `CLOCK_REALTIME` moves, as when NTP steps a clock, so fnn's timers and its 30 s peer deadline don't. The CKB devnet keeps real time. After each change the op compares the timestamp of a fresh invoice, from fnn's clock, with the control node's time, and the run fails if fnn's clock didn't move (`:clock`). |
 | `cch-kill` | With `--cch` only: `SIGKILL` on the cross-chain hub (CCH), then a restart. The op records the pid and whether it is gone. |
 | `lnd-disconnect` | With `--cch` only: iptables cuts CCH from the hub's LND, or the hub's LND from the user's (`--lnd-disconnect-targets cch,peer`), dropping packets or resetting connections (`--lnd-disconnect-mode drop` or `reject`). Healing removes the rules and reconnects the two LNDs. |
 
 Each fault is a namespace under `src/jepsen/fiber/faults/` that defines `fault`: the `--faults` names it handles, its nemesis package, and its operations, drawn from a random stream of its own so that the seed fixes them. `faults.clj` lists them; adding a fault is a new namespace and a line there, and changes no other fault's operations for a given seed (`test/jepsen/fiber/faults_test.clj` checks this).
 
-Planned: **clock skew**. Fiber expires TLCs by wall-clock timestamp (off-chain checks use each node's local clock; on-chain claims use timestamp `since`), rather than by block height as in Lightning. Jepsen's built-in clock nemesis changes the host clock, which Docker containers share, so skew will be injected per process with libfaketime.
+Why a clock fault: Fiber expires TLCs by wall-clock timestamp (off-chain checks use each node's local clock; on-chain claims use timestamp `since`), rather than by block height as in Lightning. Jepsen's built-in clock nemesis changes the host clock, which Docker containers share, so the skew is injected per process with libfaketime.
 
 ## Layout
 
@@ -60,11 +62,12 @@ Planned: **clock skew**. Fiber expires TLCs by wall-clock timestamp (off-chain c
   - `channels.clj` (opening and closing channels during the run, with `--channel-ops`)
   - `invoice.clj` (invoice payments, with `--pay-kinds invoice`)
   - `checker.clj` (invariants)
+  - `health.clj` (process health: panics, and a sample of every node after healing)
   - `ledger.clj` (per-node money check, with `--ledger`)
   - `closes.clj` (what `--force-close-ok` excuses)
   - `nonce.clj` (MuSig2 nonce reuse, with `--nonce-check`)
   - `onchain.clj` and `chain.clj` (on-chain settlement, with `--onchain`; reading the CKB node)
-  - `faults.clj` and `faults/` (one namespace per fault: `process` for kill and pause, `partition`, `disconnect`, `packet`, `chain-partition`, `cch-kill`, `lnd-disconnect`)
+  - `faults.clj` and `faults/` (one namespace per fault: `process` for kill and pause, `partition`, `disconnect`, `packet`, `chain-partition`, `clock`, `cch-kill`, `lnd-disconnect`)
   - `cch.clj` and `swap.clj` (cross-chain swaps, with `--cch`: the Lightning side, CCH, the swap workload and its checker)
   - `scenarios.clj` (named scenarios of the chaos-test plan, `--scenario`)
   - `schedule.clj` (payments, and the random streams faults draw from, fixed in advance by the run's seed)

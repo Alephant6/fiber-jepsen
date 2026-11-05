@@ -115,6 +115,33 @@
                             " ready channel per edge. After the quiet period the test waits up to"
                             " 360 s for both ends of every channel to settle, since Fiber checks for"
                             " a counterparty's force close every 300 s.")}
+    "c-10"  {:priority :p0
+             :plan     (str "Any topology; continuous payments plus force closes; CKB delay of 1-10 s"
+                            " with jitter. On-chain transactions confirm and balances reconcile.")
+             :args     ["--faults" "packet" "--packet-targets" "chain" "--packet-delay" "1000-10000"
+                        "--nemesis-interval" "30" "--channel-ops" "open,force-close"
+                        "--channel-interval" "20" "--onchain" "--time-limit" "300"]
+             :differs  (str "Three nodes in a line. The delay applies to the nodes' traffic to the"
+                            " CKB node, not the replies, with a tenth of it as jitter, and alternates"
+                            " with healing, each phase an exponential 30 s on average. Every 20 s on"
+                            " average a client opens a channel or force-closes one on an edge,"
+                            " keeping one ready channel per edge. After the final read every channel"
+                            " still open is closed and --onchain checks each party's receipt and"
+                            " each wallet. A TLC still pending on a force-closed channel settles"
+                            " only once it expires, hours later in a release build, so that"
+                            " channel's verdict is unknown rather than valid.")}
+    "c-14"  {:priority :p2
+             :plan     "A-B, payments and invoices; a node's clock jumps forward or back"
+             :args     ["--faults" "clock" "--clock-targets" "one,all" "--clock-jump" "60-1800"
+                        "--pay-kinds" "keysend,invoice" "--nemesis-interval" "30" "--time-limit" "300"]
+             :differs  (str "Three nodes in a line rather than A-B; half the payments keysend, half"
+                            " invoices. Only fnn's clock moves, with libfaketime; the CKB devnet"
+                            " keeps real time. One node's clock, or every node's by the same offset,"
+                            " jumps 1-30 minutes forward or back and returns after an exponential"
+                            " 30 s on average, capped at 100 s: well short of a TLC's expiry (hours)"
+                            " and of an invoice's (1 h, so one made on a node 30 minutes ahead is"
+                            " still unexpired on a node 30 minutes behind), so a force close or a"
+                            " stuck payment is a failure.")}
     "c-15"  {:priority :p1
              :plan     (str "CCH + LND, cross-chain swaps; kill CCH or disconnect LND at random."
                             " Every order ends completed or refunded, and both sides' funds agree")
