@@ -9,7 +9,8 @@
   :flash-disconnect op disconnects the pair, waits a drawn MIN-MAX milliseconds and
   connects it again (C-05's network blips of 100 ms to 5 s, as a real disconnect:
   packet loss that short never breaks TCP)."
-  (:require [clojure.tools.logging :refer [warn]]
+  (:require [clojure.string :as str]
+            [clojure.tools.logging :refer [warn]]
             [jepsen [generator :as gen]
                     [nemesis :as n]
                     [random :as rand]]
@@ -112,8 +113,23 @@
                  {:type :info, :f :reconnect}])
               (repeatedly #(schedule/pick r edges))))))
 
+(defn effect
+  "Whether a :disconnect or :flash-disconnect completion took effect (see
+  jepsen.fiber.faults): not when its disconnect_peer call failed, which it
+  records as a \"failed: ...\" string rather than throwing, since the node may
+  be down when this fault runs with kills or pauses."
+  [op]
+  (let [r (case (:f op)
+            :disconnect       (get-in op [:value :result])
+            :flash-disconnect (get-in op [:value :disconnect])
+            nil)]
+    (when (and (string? r) (str/starts-with? r "failed"))
+      (str "disconnect_peer " r))))
+
 (def fault
   {:faults  #{:disconnect}
    :stream  :disconnect
    :package package
-   :ops     ops})
+   :ops     ops
+   :fired   {:disconnect #{:disconnect :flash-disconnect}}
+   :effect  effect})

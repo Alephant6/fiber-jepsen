@@ -41,7 +41,7 @@
       (is (= 30 (:nemesis-interval options)))
       (is (= 60 (:time-limit options))))
     (is (= ["--rate" "9" "--scenario=c-08" "--faults" "pause" "--nemesis-interval" "30"
-            "--time-limit" "300"]
+            "--time-limit" "300" "--ledger"]
            (scenarios/expand ["--rate" "9" "--scenario=c-08"]))))
   (testing "other arguments pass through"
     (is (= ["test" "--faults" "kill"] (scenarios/expand ["test" "--faults" "kill"]))))
@@ -49,3 +49,10 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Unknown scenario"
                           (scenarios/expand ["--scenario" "c-99"])))
     (is (thrown? clojure.lang.ExceptionInfo (scenarios/expand ["--scenario"])))))
+
+(deftest ledger-coverage
+  (testing "every scenario checks the ledger, except where on-chain closes or swaps move the balances"
+    (is (= #{"c-03" "c-09" "c-10" "c-15"}
+           (set (for [[name s] scenarios/scenarios
+                      :when (not (:ledger (:options (parse ["--scenario" name]))))]
+                  name))))))

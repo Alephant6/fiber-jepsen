@@ -64,4 +64,5 @@
   {:faults  #{:packet}
    :stream  :packet
    :package nc/packet-package
-   :ops     ops})
+   :ops     ops
+   :fired   {:packet #{:start-packet}}})

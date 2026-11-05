@@ -308,4 +308,5 @@
    :package package
    :ops     ops
    :env     (fn [opts] (when (pos? (:outage-jump opts 0)) (clock/env opts)))
-   :checker (fn [opts] {:outage (checker (:outage-jump opts 0))})})
+   :checker (fn [opts] {:outage (checker (:outage-jump opts 0))})
+   :fired   {:outage #{:outage}}})

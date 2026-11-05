@@ -15,9 +15,19 @@
     :checker  optional, (fn [opts]) -> nil or {name checker}: checks of its own
               that the test adds to its checker when the fault is in use;
     :env      optional, (fn [opts]) -> environment variables fnn starts with
-              when the fault is in use (jepsen.fiber.db).
+              when the fault is in use (jepsen.fiber.db);
+    :fired    {--faults name, the set of op :f's that inject it, or a
+              predicate on a completed op}: the ops the :faults check
+              (`fired`) counts for that name;
+    :effect   optional, (fn [op]) -> nil when a completed op of this fault
+              took effect, :skipped when it couldn't (its node was down, say),
+              or a string saying why it didn't. Without it, an op that didn't
+              crash took effect;
+    :strict?  optional, true when a single op without effect means the fault
+              is broken (a local signal, say), not just unlucky.
   Adding a fault is a new namespace and a line in `registry`."
-  (:require [jepsen.generator :as gen]
+  (:require [jepsen.checker :as checker]
+            [jepsen.generator :as gen]
             [jepsen.nemesis.combined :as nc]
             [jepsen.fiber.schedule :as schedule]
             [jepsen.fiber.faults [cch-kill :as cch-kill]
@@ -76,6 +86,82 @@
   [db opts]
   (let [popts (package-opts db opts)]
     (nc/compose-packages (mapv #((:package %) popts) (in-use opts)))))
+
+(defn fault-completions
+  "The completions of the faults' ops in `history`. A nemesis op is :info both
+  when invoked and when it completes, and the one nemesis thread runs its ops
+  one at a time, so its ops alternate: invocation, completion. The health
+  sample (jepsen.fiber.health) shares the nemesis, but isn't a fault."
+  [history]
+  (->> history
+       (filter #(= :nemesis (:process %)))
+       rest
+       (take-nth 2)
+       (remove #(= :health (:f %)))))
+
+(defn- why-not
+  "Why the completed `op` of `fault` didn't take effect: \"crashed\" when it
+  threw, else what the fault's :effect says (nil: it did)."
+  [fault op]
+  (if (:exception op)
+    "crashed"
+    (when-let [effect (:effect fault)]
+      (effect op))))
+
+(defn fired
+  "The :faults check on `history`, for the faults in use: did each fault the
+  test asked for take effect?
+
+  Jepsen records a fault op that throws as :info with an :exception, and no
+  stock checker fails a run for it, so a fault that never worked (a typo in a
+  target, a signal that stopped nothing) would leave a valid run that tested
+  nothing. Invalid when a fault op crashed, when an op of a :strict? fault
+  didn't take effect, or when a fault was tried and never took effect;
+  :unknown when a fault in use was never tried (a run shorter than its first
+  gap) or every op of it was skipped."
+  [opts history]
+  (let [ops     (vec (fault-completions history))
+        crashed (vec (for [op ops :when (:exception op)]
+                       {:f (:f op), :time (:time op), :error (:error op)}))
+        names   (set (:faults opts))
+        faults  (for [fault (in-use opts)
+                      [nm fs] (:fired fault)
+                      :when (names nm)]
+                  (let [mine    (filter (if (set? fs) (comp fs :f) fs) ops)
+                        whys    (map #(why-not fault %) mine)
+                        failed  (vec (for [[op why] (map vector mine whys)
+                                           :when (string? why)]
+                                       {:f (:f op), :time (:time op), :why why}))]
+                    {:fault       nm
+                     :strict?     (boolean (:strict? fault))
+                     :ops         (count mine)
+                     :took-effect (count (filter nil? whys))
+                     :skipped     (count (filter #{:skipped} whys))
+                     :no-effect   failed}))
+        tried   #(- (:ops %) (:skipped %))
+        broken  (filter #(or (and (:strict? %) (seq (:no-effect %)))
+                             (and (pos? (tried %)) (zero? (:took-effect %))))
+                        faults)
+        untried (filter #(zero? (tried %)) faults)]
+    {:valid?  (cond (seq crashed) false
+                    (seq broken)  false
+                    (seq untried) :unknown
+                    :else         true)
+     :faults  (into (sorted-map)
+                    (for [f faults]
+                      [(:fault f) (cond-> (select-keys f [:ops :took-effect])
+                                    (pos? (:skipped f))   (assoc :skipped (:skipped f))
+                                    (seq (:no-effect f))  (assoc :no-effect-count (count (:no-effect f))
+                                                                 :no-effect (vec (take 5 (:no-effect f)))))]))
+     :crashed (vec (take 5 crashed))
+     :crashed-count (count crashed)}))
+
+(defn fired-checker
+  "See `fired`."
+  [opts]
+  (reify checker/Checker
+    (check [_ _test history _opts]
+      (fired opts history))))
 
 (defn checkers
   "{name checker} of the checks the faults in use add (their :checker)."

@@ -112,4 +112,5 @@
   {:faults  #{:chain-partition}
    :stream  :chain-partition
    :package package
-   :ops     ops})
+   :ops     ops
+   :fired   {:chain-partition #{:start-chain-partition}}})

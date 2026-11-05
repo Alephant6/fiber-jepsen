@@ -397,4 +397,10 @@
    :package package
    :ops     ops
    :checker (fn [_opts] {:disconnect-loops (checker)
-                         :resource-limits  (limits-checker)})})
+                         :resource-limits  (limits-checker)})
+   ; A completed limit's value holds the limit under :limit; a crashed one's is the limit.
+   :fired   {:cpu    (fn [op] (and (= :limit-resources (:f op))
+                                   (some? (or (get-in op [:value :limit :cpus]) (get-in op [:value :cpus])))))
+             :memory (fn [op] (and (= :limit-resources (:f op))
+                                   (some? (or (get-in op [:value :limit :memory-mib])
+                                              (get-in op [:value :memory-mib])))))}})

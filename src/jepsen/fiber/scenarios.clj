@@ -29,7 +29,7 @@
     "c-01b" {:priority :p0
              :plan     "kill -9 (SIGKILL) A or B at random every 30 to 120 s, then restart"
              :args     ["--faults" "kill" "--kill-targets" "one" "--nemesis-interval" "75"
-                        "--time-limit" "300"]
+                        "--time-limit" "300" "--ledger"]
              :differs  (str "Three nodes in a line rather than A-B. The gap between a kill and"
                             " the restart, and between restarts and kills, is exponential with a"
                             " 75 s mean, capped at 100 s, rather than uniform over 30-120 s.")}
@@ -82,7 +82,7 @@
              :args     ["--nodes" "n1,n2,n3,n4,n5,n6" "--topology" "mesh" "--faults" "kill"
                         "--kill-targets" "one" "--nemesis-interval" "30" "--time-limit" "300"
                         "--pay-kinds" "keysend,invoice" "--availability-window" "60"
-                        "--quiesce" "60" "--probe-routes"]
+                        "--quiesce" "60" "--probe-routes" "--ledger"]
              :differs  (str "Six nodes, each with channels to three others (the ring and its"
                             " diameters), as in c-06. A kill (SIGKILL) takes one node drawn"
                             " uniformly; the gap between a kill and the restart, and between a"
@@ -111,7 +111,7 @@
              :args     ["--nodes" "n1,n2,n3,n4,n5,n6" "--topology" "mesh" "--faults" "partition"
                         "--partition-targets" "half" "--partition-duration" "120-300"
                         "--nemesis-interval" "60" "--time-limit" "600" "--quiesce" "60"
-                        "--probe-routes"]
+                        "--probe-routes" "--ledger"]
              :differs  (str "Six nodes, each with channels to three others (the ring and its"
                             " diameters); 6 of the 15 node pairs are two hops apart, the rest"
                             " neighbours, and each payment goes to a node drawn uniformly. Each"
@@ -124,7 +124,7 @@
                             " channels and what they explain (open question 1).")}
     "c-08"  {:priority :p1
              :plan     "SIGSTOP a node for tens of seconds, then resume"
-             :args     ["--faults" "pause" "--nemesis-interval" "30" "--time-limit" "300"]
+             :args     ["--faults" "pause" "--nemesis-interval" "30" "--time-limit" "300" "--ledger"]
              :differs  (str "Three nodes in a line rather than A-B. A pause lasts an exponential"
                             " 30 s on average, capped at 100 s, so some cross V2's 30 s"
                             " peer-response deadline.")}
@@ -163,7 +163,7 @@
                             " no OOM, no disconnect loop, recovers once the limit is lifted")
              :args     ["--faults" "cpu,memory" "--resource-targets" "one,all" "--rate" "20"
                         "--nemesis-interval" "30" "--time-limit" "300"
-                        "--log-level" "info,fnn::fiber::network=debug"]
+                        "--log-level" "info,fnn::fiber::network=debug" "--ledger"]
              :differs  (str "Limits are Docker's (docker update), on the node's whole container:"
                             " fnn and sshd. Each limit draws CPU (0.1-0.5 CPUs) or memory"
                             " (128-256 MiB, no swap) and one node or all of them, and lasts an"
@@ -174,7 +174,8 @@
     "c-13"  {:priority :p1
              :plan     (str "A-B under steady payments; fill the disk, then free it; the node"
                             " reports an error or stops, recovers once space is freed, loses no state")
-             :args     ["--faults" "disk" "--rate" "20" "--nemesis-interval" "30" "--time-limit" "300"]
+             :args     ["--faults" "disk" "--rate" "20" "--nemesis-interval" "30" "--time-limit" "300"
+                        "--ledger"]
              :differs  (str "Three nodes in a line rather than A-B. Only fnn's store (RocksDB) is"
                             " on the filled filesystem, a 256 MiB tmpfs per node; its log is not,"
                             " so the run can read what fnn said. Each fill takes one node at"
@@ -187,7 +188,8 @@
     "c-14"  {:priority :p2
              :plan     "A-B, payments and invoices; a node's clock jumps forward or back"
              :args     ["--faults" "clock" "--clock-targets" "one,all" "--clock-jump" "60-1800"
-                        "--pay-kinds" "keysend,invoice" "--nemesis-interval" "30" "--time-limit" "300"]
+                        "--pay-kinds" "keysend,invoice" "--nemesis-interval" "30" "--time-limit" "300"
+                        "--ledger"]
              :differs  (str "Three nodes in a line rather than A-B; half the payments keysend, half"
                             " invoices. Only fnn's clock moves, with libfaketime; the CKB devnet"
                             " keeps real time. One node's clock, or every node's by the same offset,"

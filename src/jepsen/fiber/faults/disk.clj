@@ -316,4 +316,5 @@
    :stream  :disk
    :package package
    :ops     ops
-   :checker (fn [_opts] {:disk (checker)})})
+   :checker (fn [_opts] {:disk (checker)})
+   :fired   {:disk #{:fill-disk}}})

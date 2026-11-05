@@ -83,4 +83,5 @@
    :stream  :partition
    :package nc/partition-package
    :ops     (fn [r opts] (ops r (vec (:nodes opts)) (:partition-targets opts [:one])))
-   :gaps    gaps})
+   :gaps    gaps
+   :fired   {:partition #{:start-partition}}})
