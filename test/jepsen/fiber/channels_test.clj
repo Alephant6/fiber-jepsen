@@ -70,6 +70,15 @@
                                 [])]
         (is (false? (:valid? r)))
         (is (= ["a"] (map :channel (:ends-disagree r))))))
+    (testing "the wait for the ends to agree is reported"
+      (let [settle {:waited-s 212, :settled? true
+                    :at-start {:between [], :disagree [{:channel "a"}]}}
+            r      (channels/analyze (read {"n1" [(ch "a" "Closed" :flags "UNCOOPERATIVE_LOCAL")]
+                                            "n2" [(ch "a" "Closed" :flags "UNCOOPERATIVE_REMOTE")]})
+                                     [{:type :invoke, :f :settle-channels}
+                                      {:type :ok, :f :settle-channels, :value settle}])]
+        (is (true? (:valid? r)))
+        (is (= settle (:settle-wait r)))))
     (testing "operation counts"
       (is (= {"force-close ok" 1, "open-channel fail" 1}
              (:ops (channels/analyze (read {})
@@ -92,3 +101,14 @@
                           :state {:state_name "Closed"}}]}]
         (is (= [:not-ready "Closed"] (first (:problems (first (fc/channel-problems init final))))))
         (is (empty? (fc/channel-problems init final #{"b"})))))))
+
+(deftest unsettled
+  (is (= {:between [], :disagree []}
+         (channels/unsettled {"n1" [(ch "a" "ChannelReady") (ch "b" "Closed" :flags "COOPERATIVE")]
+                              "n2" [(ch "a" "ChannelReady")]})))
+  (let [u (channels/unsettled {"n1" [(ch "a" "Closed" :flags "UNCOOPERATIVE_LOCAL")
+                                     (ch "b" "ShuttingDown" :flags "WAITING_COMMITMENT_CONFIRMATION")]
+                               "n2" [(ch "a" "ChannelReady")
+                                     (ch "b" "Closed" :flags "UNCOOPERATIVE_LOCAL")]})]
+    (is (= ["a"] (map :channel (:disagree u))))
+    (is (= [["b" "n1"]] (map (juxt :channel :node) (:between u))))))
