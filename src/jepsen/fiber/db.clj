@@ -1,8 +1,9 @@
 (ns jepsen.fiber.db
   "Runs fnn on each node. Node directories, keys and wallets are baked into the
   image from the devnet snapshot, so setup only wipes the Fiber store and starts
-  the daemon. Implements Kill (SIGKILL, so crashes can land mid-write) and Pause
-  (SIGSTOP/SIGCONT) for jepsen.nemesis.combined."
+  the daemon. Implements Kill (SIGKILL, so crashes can land mid-write, or with
+  --kill-signal term a graceful SIGTERM) and Pause (SIGSTOP/SIGCONT) for
+  jepsen.nemesis.combined."
   (:require [clojure.string :as str]
             [jepsen [control :as c]
                     [db :as db]
@@ -80,6 +81,63 @@
         (catch [:type :jepsen.control/nonzero-exit] _ :not-running))
       :not-running)))
 
+(defn- exited?
+  "Whether a process in ps state `state` has exited: gone, or a zombie its new
+  parent hasn't reaped yet."
+  [state]
+  (or (nil? state) (str/starts-with? state "Z")))
+
+(defn- term-log-count
+  "How many times fnn's log says it received SIGTERM (the log is kept across
+  restarts)."
+  []
+  (try+ (or (parse-long (str/trim (c/exec :grep :-c "SIGTERM received" logfile))) 0)
+        ; grep exits 1 when nothing matches, and 2 without a log.
+        (catch [:type :jepsen.control/nonzero-exit] _ 0)))
+
+(defn terminate!
+  "Stops fnn as an operator or `docker stop` would: SIGTERM, then up to
+  `grace-s` seconds for it to exit, then SIGKILL. fnn handles SIGTERM by stopping
+  its RPC server and cancelling its tasks and waiting for them, a path SIGKILL
+  never reaches. SIGCONT follows the TERM, as systemd sends it, so that a paused
+  fnn handles the TERM instead of sitting out the grace period.
+
+  Returns, for the nemesis op, {:signal \"TERM\", :exit-ms ms, :logged? l} once fnn
+  has exited, {:signal \"TERM\", :exit-ms nil, :killed-after-ms ms, :logged? l}
+  when it was still running after the grace period and got SIGKILL, or
+  :not-running when it wasn't running. :logged? says whether fnn logged that it
+  received the SIGTERM. Times are measured from the control node, polling every
+  100 ms."
+  [grace-s]
+  (c/su
+    (let [pid (fnn-pid)]
+      (if (or (nil? pid) (exited? (process-state pid)))
+        (do (cu/stop-daemon! binary pidfile)
+            :not-running)
+        (let [before  (term-log-count)
+              t0      (System/nanoTime)
+              elapsed #(long (/ (- (System/nanoTime) t0) 1e6))
+              grace   (* 1000 grace-s)
+              logged? #(< before (term-log-count))]
+          (try+ (c/exec :kill :-TERM pid)
+                (c/exec :kill :-CONT pid)
+                (catch [:type :jepsen.control/nonzero-exit] _ nil))
+          (loop []
+            (let [state (process-state pid)
+                  ms    (elapsed)]
+              (cond (exited? state)
+                    (do (c/exec :rm :-f pidfile)
+                        {:signal "TERM", :exit-ms ms, :logged? (logged?)})
+
+                    (< grace ms)
+                    (let [l (logged?)]
+                      (cu/stop-daemon! binary pidfile)
+                      {:signal "TERM", :exit-ms nil, :killed-after-ms ms, :logged? l})
+
+                    :else
+                    (do (Thread/sleep 100)
+                        (recur))))))))))
+
 (defn await-rpc!
   [node]
   (await-fn #(rpc/call node "node_info")
@@ -105,8 +163,10 @@
     (topology/setup! test))
 
   db/Kill
-  (kill! [_ _test _node]
-    (c/su (cu/stop-daemon! binary pidfile)))
+  (kill! [_ test _node]
+    (if (= :term (:kill-signal test))
+      (terminate! (:term-grace test 30))
+      (c/su (cu/stop-daemon! binary pidfile))))
 
   (start! [_ test node]
     (start-fnn! test node))
