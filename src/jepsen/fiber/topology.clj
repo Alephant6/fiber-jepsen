@@ -1,7 +1,8 @@
 (ns jepsen.fiber.topology
-  "Builds the channel graph before the workload starts: a line n1 - n2 - n3 of
-  public channels, so payments between the ends are forwarded by the middle
-  node. Records each node's starting channels for the conservation check."
+  "Builds the channel graph before the workload starts. The graph is chosen by
+  name (--topology); the default, line, is n1 - n2 - n3 of public channels, so
+  payments between the ends are forwarded by the middle node. Records each
+  node's starting channels for the conservation check."
   (:require [clojure.string :as str]
             [clojure.tools.logging :refer [info]]
             [jepsen.util :refer [await-fn]]
@@ -20,10 +21,16 @@
    "n2" "QmSRcPqUn4aQrKHXyCDjGn2qBVf43tWBDS2Wj9QDUZXtZp"
    "n3" "QmaFDJb9CkMrXy7nhTWBY5y9mvuykre3EzzRsCJUAVXprZ"})
 
+(def topologies
+  "Channel graphs by name. Each takes the test's nodes and returns the channels to
+  open, as [opener acceptor] pairs."
+  {:line (fn [nodes] (map vec (partition 2 1 nodes)))})
+
 (defn edges
-  "Channels to open, as [opener acceptor] pairs: a line through all nodes."
-  [nodes]
-  (map vec (partition 2 1 nodes)))
+  "The channels of the test (or test options) `test`: its :topology's graph over
+  its :nodes."
+  [test]
+  ((topologies (:topology test :line)) (:nodes test)))
 
 (defn node-ip
   [node]
@@ -55,7 +62,7 @@
   [test]
   (let [nodes (:nodes test)
         infos (into {} (map (fn [n] [n (rpc/call n "node_info")]) nodes))
-        edges (edges nodes)]
+        edges (edges test)]
     (reset! (:pubkeys test) (update-vals infos :pubkey))
     (doseq [[a b] edges]
       (let [pubkey-b (:pubkey (infos b))]

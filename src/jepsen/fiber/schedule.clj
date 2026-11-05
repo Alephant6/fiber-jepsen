@@ -19,9 +19,7 @@
   the same operations in the same order. Timing still decides when each operation
   runs, how the streams interleave, which client sends each payment (the first one
   free), and everything inside Fiber and ckb."
-  (:require [jepsen.generator :as gen]
-            [jepsen.nemesis :as n]
-            [jepsen.fiber.topology :as topology])
+  (:require [jepsen.generator :as gen])
   (:import (java.util SplittableRandom)))
 
 (def max-gap-s
@@ -34,18 +32,44 @@
   (.nextLong (SplittableRandom.) Long/MAX_VALUE))
 
 (def stream-names
-  "One random stream per sequence. Each is split off the seeded root in this
-  order, so adding a stream at the end keeps the others unchanged."
+  "The streams of the payments and of the first faults, split off the seeded root
+  in this order. The list is closed: a new stream gets its own root from its name
+  (see `stream`), so the streams listed here, and the operations a seed gave
+  before, stay as they were."
   [:pay :pay-gaps :pay-after-close :pay-after-close-gaps
    :partition :partition-gaps :db :db-gaps :disconnect :disconnect-gaps])
 
+(def ^:private golden-gamma
+  "0x9E3779B97F4A7C15 as a signed long, the increment SplittableRandom uses."
+  -7046029254386353131)
+
 (defn streams
-  "A map of stream name to its SplittableRandom, for one run's `seed`."
+  "The random streams of one run: stream name to its SplittableRandom for the
+  names in stream-names, plus :seed. Take a stream with `stream`."
   [seed]
   (let [root (SplittableRandom. (long seed))]
-    (into {} (map (fn [k] [k (.split root)])) stream-names)))
+    (into {:seed (long seed)} (map (fn [k] [k (.split root)])) stream-names)))
 
-(defn- pick
+(defn stream
+  "The SplittableRandom for stream `k` of `streams`. A name in stream-names gets
+  the stream split off the seeded root. Any other name gets a stream of its own,
+  split off a root seeded with the run's seed and the name, so adding a fault
+  changes no other fault's operations. Each stream should feed one sequence:
+  the instance is shared, and drawing from it advances it."
+  ^SplittableRandom [streams k]
+  (or (get streams k)
+      (.split (SplittableRandom.
+                (unchecked-add (long (:seed streams))
+                               (unchecked-multiply golden-gamma
+                                                   (long (.hashCode (name k)))))))))
+
+(defn gaps-stream
+  "The stream of the gaps between the operations of stream `k`."
+  ^SplittableRandom [streams k]
+  (stream streams (keyword (str (name k) "-gaps"))))
+
+(defn pick
+  "A uniformly chosen element of `coll`, drawn from `r`."
   [^SplittableRandom r coll]
   (nth coll (.nextInt r (count coll))))
 
@@ -99,85 +123,5 @@
 (defn paced-payments
   "Payments from stream `k`, with gaps averaging 1/rate seconds."
   [streams k rate node-count]
-  (paced (gaps (streams (keyword (str (name k) "-gaps"))) (/ 1.0 rate))
-         (payments (streams k) node-count)))
-
-(defn- targets
-  "The nodes for a kill or pause target spec, chosen here so that the nemesis
-  doesn't draw them. Specs other than :one and :all go to the nemesis as they are."
-  [r nodes spec]
-  (case spec
-    :one [(pick r nodes)]
-    :all (vec nodes)
-    spec))
-
-(defn partitions
-  "Endless pairs of a partition that isolates one node and its healing. The grudge
-  is computed here, not from :one in the nemesis."
-  [r nodes]
-  (mapcat (fn [node]
-            [{:type  :info
-              :f     :start-partition
-              :value (n/complete-grudge [[node] (vec (remove #{node} nodes))])}
-             {:type :info, :f :stop-partition, :value nil}])
-          (repeatedly #(pick r nodes))))
-
-(defn db-faults
-  "Endless kill, start, pause and resume ops, as jepsen.nemesis.combined's db
-  generators make them: each op comes from kill/start or pause/resume, chosen
-  uniformly, and each of those alternates between its fault and its recovery."
-  [r nodes {:keys [kill? pause? kill-targets pause-targets]}]
-  (let [modes (cond-> [] pause? (conj :pause) kill? (conj :kill))]
-    (when (seq modes)
-      ((fn step [faulted]
-         (lazy-seq
-           (let [mode (pick r modes)
-                 op   (if (faulted mode)
-                        (case mode
-                          :kill  {:type :info, :f :start, :value :all}
-                          :pause {:type :info, :f :resume, :value :all})
-                        (case mode
-                          :kill  {:type  :info
-                                  :f     :kill
-                                  :value (targets r nodes (pick r kill-targets))}
-                          :pause {:type  :info
-                                  :f     :pause
-                                  :value (targets r nodes (pick r pause-targets))}))]
-             (cons op (step (if (faulted mode) (disj faulted mode) (conj faulted mode)))))))
-       #{}))))
-
-(defn disconnects
-  "Endless pairs of a :disconnect of one random channel's peers and a :reconnect."
-  [r nodes]
-  (let [edges (vec (topology/edges nodes))]
-    (mapcat (fn [edge]
-              [{:type :info, :f :disconnect, :value edge}
-               {:type :info, :f :reconnect}])
-            (repeatedly #(pick r edges)))))
-
-(defn faults
-  "The fault generator for the test options `opts`: one paced stream per nemesis
-  package in use, combined as nc/compose-packages combines them. Gaps average
-  :nemesis-interval seconds. Nil without faults."
-  [streams opts]
-  (let [faults (set (:faults opts))
-        nodes  (vec (:nodes opts))
-        pace   (fn [k ops]
-                 (paced (gaps (streams (keyword (str (name k) "-gaps")))
-                              (:nemesis-interval opts))
-                        ops))
-        gens   (cond-> []
-                 (faults :partition)
-                 (conj (pace :partition (partitions (:partition streams) nodes)))
-
-                 (some faults [:kill :pause])
-                 (conj (pace :db (db-faults (:db streams) nodes
-                                            {:kill?         (faults :kill)
-                                             :pause?        (faults :pause)
-                                             :kill-targets  (:kill-targets opts)
-                                             :pause-targets [:one]})))
-
-                 (faults :disconnect)
-                 (conj (pace :disconnect (disconnects (:disconnect streams) nodes))))]
-    (when (seq gens)
-      (apply gen/any gens))))
+  (paced (gaps (gaps-stream streams k) (/ 1.0 rate))
+         (payments (stream streams k) node-count)))

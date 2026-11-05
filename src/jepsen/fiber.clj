@@ -1,7 +1,9 @@
 (ns jepsen.fiber
-  "Entry point. Runs concurrent keysend payments over a line of channels
-  (n1 - n2 - n3) while injecting faults, heals everything, waits for the network
-  to converge, then checks the invariants in jepsen.fiber.checker."
+  "Entry point. Runs concurrent keysend payments over a graph of channels (by
+  default a line, n1 - n2 - n3) while injecting faults, heals everything, waits
+  for the network to converge, then checks the invariants in
+  jepsen.fiber.checker. The faults are in jepsen.fiber.faults, the named
+  scenarios of the chaos-test plan in jepsen.fiber.scenarios."
   (:require [clojure.string :as str]
             [jepsen [checker :as checker]
                     [cli :as cli]
@@ -9,22 +11,23 @@
                     [os :as os]
                     [tests :as tests]]
             [jepsen.checker.timeline :as timeline]
-            [jepsen.nemesis.combined :as nc]
             [jepsen.fiber [checker :as fiber-checker]
                           [client :as client]
                           [db :as db]
+                          [faults :as faults]
                           [ledger :as ledger]
-                          [nemesis :as fiber-nemesis]
                           [nonce :as nonce]
-                          [schedule :as schedule]])
+                          [scenarios :as scenarios]
+                          [schedule :as schedule]
+                          [topology :as topology]]
+            [jepsen.fiber.faults.packet :as packet])
   (:gen-class))
 
 (def supported-faults
-  "Faults this suite can inject. Jepsen's :clock fault changes the host clock,
-  which Docker containers share, so clock skew needs a per-process approach
-  (libfaketime) instead. :disconnect closes a p2p connection over RPC and
-  reconnects it later, so channels reestablish without a restart."
-  #{:kill :pause :partition :disconnect})
+  "Faults this suite can inject, one namespace each under jepsen.fiber.faults.
+  Jepsen's :clock fault changes the host clock, which Docker containers share, so
+  clock skew needs a per-process approach (libfaketime) instead."
+  faults/supported)
 
 (defn payments
   "Payments for the whole fault window, drawn from the run's seed (see
@@ -39,26 +42,25 @@
                   (pays :pay-after-close))
       (pays :pay))))
 
+(defn fault-window
+  "The payments and the faults, each for :time-limit seconds.
+
+  Each gets a time limit of its own. A single gen/time-limit around both ends the
+  window early: while every client is busy, the next operation is the nemesis's,
+  and when that one falls after the limit, gen/time-limit takes the whole window
+  as finished, payments included. A gap between faults can be up to 100 s, so a
+  run with --nemesis-interval 30 and --time-limit 90 could stop after a second."
+  [opts streams]
+  (let [limit #(some->> % (gen/time-limit (:time-limit opts)))]
+    (gen/nemesis (limit (faults/generator streams opts))
+                 (limit (payments opts streams)))))
+
 (defn nemesis-package
-  "Composes only the nemesis packages for the requested faults. The full
-  nc/nemesis-package also sets up file-corruption tooling (it downloads bitflip
-  onto every node) even when that fault is disabled. fiber-test uses the package's
-  nemesis, final generator and perf, but takes the faults themselves from
-  jepsen.fiber.schedule, so that the seed fixes them."
+  "The nemesis package for the requested faults (jepsen.fiber.faults/package).
+  fiber-test uses its nemesis, final generator and perf, but takes the faults
+  themselves from jepsen.fiber.faults/generator, so that the seed fixes them."
   [db opts]
-  (let [faults (set (:faults opts))
-        popts  {:db        db
-                :nodes     (:nodes opts)
-                :faults    faults
-                :interval  (:nemesis-interval opts)
-                :kill      {:targets (:kill-targets opts)}
-                :pause     {:targets [:one]}
-                :partition {:targets [:one]}}]
-    (nc/compose-packages
-      (cond-> []
-        (faults :partition)             (conj (nc/partition-package popts))
-        (some faults [:kill :pause])    (conj (nc/db-package popts))
-        (faults :disconnect)            (conj (fiber-nemesis/disconnect-package popts))))))
+  (faults/package db opts))
 
 (defn fiber-test
   "The test for `opts`. Without --seed it picks a seed, which jepsen.log shows in
@@ -94,9 +96,7 @@
                                       (:nonce-check opts) (assoc :nonce (nonce/checker))
                                       (:ledger opts)      (assoc :ledger (ledger/checker))))
             :generator            (gen/phases
-                                    (->> (payments opts streams)
-                                         (gen/nemesis (schedule/faults streams opts))
-                                         (gen/time-limit (:time-limit opts)))
+                                    (fault-window opts streams)
                                     (gen/log "Healing all faults")
                                     (gen/nemesis (:final-generator pkg))
                                     (gen/log "Waiting for the network to converge")
@@ -104,12 +104,24 @@
                                     (when-not (:close opts) (gen/clients (gen/once {:f :probe})))
                                     (gen/clients (gen/once {:f :read})))})))
 
+(defn- keywords
+  [s]
+  (mapv keyword (str/split s #",")))
+
 (def cli-opts
-  [[nil "--faults FAULTS" (str "Comma-separated faults to inject: kill, pause, partition, disconnect;"
-                               " or none, for a run without faults (a smoke test of the harness).")
+  [[nil "--scenario NAME" (str "Run a named scenario of the chaos-test plan: its arguments go in"
+                               " place of this option, so arguments after it override them. One of: "
+                               (str/join ", " (keys scenarios/scenarios)) ".")]
+   [nil "--faults FAULTS" (str "Comma-separated faults to inject: "
+                               (str/join ", " (sort (map name supported-faults)))
+                               "; or none, for a run without faults (a smoke test of the harness).")
     :default  [:kill]
-    :parse-fn (fn [s] (if (= "none" s) [] (mapv keyword (str/split s #","))))
+    :parse-fn (fn [s] (if (= "none" s) [] (keywords s)))
     :validate [#(every? supported-faults %) (str "Must be a subset of " supported-faults)]]
+   [nil "--topology NAME" (str "Channel graph: " (str/join ", " (map name (keys topology/topologies))) ".")
+    :default  :line
+    :parse-fn keyword
+    :validate [topology/topologies (str "Must be one of " (keys topology/topologies))]]
    [nil "--rate HZ" "Approximate number of payments per second."
     :default  5
     :parse-fn parse-double]
@@ -123,7 +135,20 @@
     :default  "info"]
    [nil "--kill-targets TARGETS" "Comma-separated kill targets: one, all."
     :default  [:one :all]
-    :parse-fn (fn [s] (mapv keyword (str/split s #",")))]
+    :parse-fn keywords]
+   [nil "--packet-targets TARGETS" (str "With --faults packet, comma-separated target specs to choose"
+                                        " from: one, all, chain (the CKB node).")
+    :default  [:one :all]
+    :parse-fn keywords
+    :validate [#(every? packet/target-specs %) (str "Must be a subset of " packet/target-specs)]]
+   [nil "--packet-delay MS" "With --faults packet, delay in ms, or a range MIN-MAX drawn per fault."
+    :default  [500 3000]
+    :parse-fn packet/parse-delay
+    :validate [(fn [[lo hi]] (and lo hi (<= 0 lo hi))) "Must be MS or MIN-MAX, 0 <= MIN <= MAX"]]
+   [nil "--packet-loss PERCENT" "With --faults packet, percent of packets to drop as well."
+    :default  0
+    :parse-fn parse-long
+    :validate [#(and % (<= 0 % 100)) "Must be 0 to 100"]]
    [nil "--nonce-check" (str "Check MuSig2 nonce use. Needs an fnn built with the nonce-oracle"
                              " feature (scripts/build-fnn-nonce-oracle.sh).")]
    [nil "--close" (str "Halfway through the faults, ask every channel to close cooperatively, and"
@@ -137,4 +162,9 @@
   (cli/run! (merge (cli/single-test-cmd {:test-fn  fiber-test
                                          :opt-spec cli-opts})
                    (cli/serve-cmd))
-            args))
+            (try (scenarios/expand args)
+                 (catch clojure.lang.ExceptionInfo e
+                   (if (= :unknown-scenario (:type (ex-data e)))
+                     (do (binding [*out* *err*] (println (ex-message e)))
+                         (System/exit 254))
+                     (throw e))))))
