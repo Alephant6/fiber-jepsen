@@ -12,7 +12,10 @@
   - a fresh payment each way over every channel (the probe) succeeds: the
     network can still move money once faults are gone. A direction is excused
     only if the final read shows its sender's balance on that channel below the
-    probe amount."
+    probe amount.
+
+  With --availability-window, availability-checker also compares the payment
+  success rate after healing with a baseline taken before the first fault."
   (:require [clojure.string :as str]
             [jepsen.checker :as checker]
             [jepsen.fiber.rpc :as rpc]))
@@ -160,3 +163,90 @@
              :close-requests request
              :final-states   (frequencies (map :state ends))
              :not-closed     open}))))))
+
+(defn window-pays
+  "[invocation completion] of each :pay operation marked with :window `window`,
+  in the order they completed. The invocation is nil if the history doesn't have
+  it."
+  [history window]
+  (loop [ops (seq history), open {}, out []]
+    (if-let [op (first ops)]
+      (if (and (= :pay (:f op)) (= window (:window op)))
+        (if (= :invoke (:type op))
+          (recur (next ops) (assoc open (:process op) op) out)
+          (recur (next ops) (dissoc open (:process op)) (conj out [(get open (:process op)) op])))
+        (recur (next ops) open out))
+      out)))
+
+(defn- percentile
+  "The `q` quantile of the sorted, non-empty vector `xs` (nearest rank)."
+  [xs q]
+  (nth xs (min (dec (count xs)) (long (Math/floor (* q (count xs)))))))
+
+(defn- round
+  [x digits]
+  (when x
+    (let [m (Math/pow 10 digits)]
+      (/ (Math/round (* (double x) m)) m))))
+
+(defn window-stats
+  "How the payments of one window went: how many completed :ok, :fail (the node
+  said Failed, or certainly created no payment) and :info (no answer in time);
+  the success rate in percent; and, reported only, the successful payments per
+  second over the window and their latency."
+  [pairs]
+  (let [n       (count pairs)
+        types   (frequencies (map (comp :type second) pairs))
+        ok      (get types :ok 0)
+        latency (vec (sort (for [[i c] pairs :when (and i (= :ok (:type c)))]
+                             (/ (- (:time c) (:time i)) 1e6))))
+        start   (some->> (seq (keep (comp :time first) pairs)) (reduce min))
+        end     (some->> (seq (keep (comp :time second) pairs)) (reduce max))
+        seconds (when (and start end (< start end)) (/ (- end start) 1e9))]
+    (cond-> {:payments    n
+             :ok          ok
+             :failed      (get types :fail 0)
+             :no-answer   (get types :info 0)
+             :success-pct (when (pos? n) (round (* 100.0 (/ ok n)) 2))
+             :seconds     (round seconds 1)
+             :ok-per-s    (when seconds (round (/ ok seconds) 2))}
+      (seq latency) (assoc :latency-ms {:p50 (round (percentile latency 0.5) 0)
+                                        :p95 (round (percentile latency 0.95) 0)
+                                        :max (round (peek latency) 0)}))))
+
+(def availability-min-payments
+  "Fewer payments than this in either window make the availability check :unknown."
+  10)
+
+(defn availability
+  "The availability verdict (assertion 5 of the chaos-test plan) from the stats
+  of the baseline and recovery windows: valid when the recovery's success rate is
+  at most `tolerance` percentage points below the baseline's. Throughput and
+  latency are reported but don't decide it: they depend on the machine."
+  [tolerance baseline recovery]
+  (let [b    (:success-pct baseline)
+        r    (:success-pct recovery)
+        fall (when (and b r) (round (- b r) 2))]
+    {:valid?        (cond (or (nil? fall)
+                              (< (:payments baseline) availability-min-payments)
+                              (< (:payments recovery) availability-min-payments))
+                          :unknown
+
+                          (<= fall tolerance) true
+                          :else               false)
+     :success-rates (str (if b (str b "%") "-") " -> " (if r (str r "%") "-"))
+     :drop-points   fall
+     :tolerance     tolerance
+     :baseline      baseline
+     :recovery      recovery}))
+
+(defn availability-checker
+  "With --availability-window: compares the success rate of the payments sent
+  after healing and --quiesce (:window :recovery) with that of the payments sent
+  before the first fault (:window :baseline). See `availability`."
+  [tolerance]
+  (reify checker/Checker
+    (check [_ _test history _opts]
+      (availability tolerance
+                    (window-stats (window-pays history :baseline))
+                    (window-stats (window-pays history :recovery))))))
