@@ -167,33 +167,44 @@
           (is (= :unknown (:valid? r))))))))
 
 (deftest excuses
-  (let [history [{:process :nemesis, :type :info, :f :save-state, :time 100
+  (let [history [{:process :nemesis, :type :info, :f :save-state, :time 90
+                  :value {:node "n1"}}
+                 {:process :nemesis, :type :info, :f :save-state, :time 100
                   :value {:node "n1", :fingerprint "aa"}}
                  {:process 0, :type :ok, :f :pay, :time 50, :value {:from "n1", :hash "0xbefore"}}
                  {:process 0, :type :ok, :f :pay, :time 150, :value {:from "n1", :hash "0xafter"}}
                  {:process 1, :type :ok, :f :pay, :time 150, :value {:from "n3", :hash "0xn3"}}
-                 {:process :nemesis, :type :info, :f :restore-state, :time 200, :value restore-value}]
+                 {:process 2, :type :ok, :f :pay, :time 95, :value {:from "n1", :hash "0xduring"}}
+                 {:process :nemesis, :type :info, :f :restore-state, :time 200, :value restore-value}
+                 {:process 0, :type :ok, :f :read, :time 300
+                  :value {:channels {"n2" [{:channel_id "0xc1", :pending_tlcs [{:payment_hash "0xheld"}]}
+                                           {:channel_id "0xc2", :pending_tlcs [{:payment_hash "0xother"}]}]}}}]
         r       {:valid?              false
                  :channel-problems    [{:channel "0xc1", :node "n2", :peer "n1", :problems [[:mirror {}]]}
                                        {:channel "0xc2", :node "n2", :peer "n3", :problems [[:pending-tlcs 1]]}]
-                 :unfinished-payments [{:node "n1", :hash "0xold"}]
-                 :success-flipped     [{:hash "0xbefore"} {:hash "0xafter"} {:hash "0xn3"}]
+                 :unfinished-payments [{:node "n1", :hash "0xold"} {:node "n3", :hash "0xheld"}
+                                       {:node "n3", :hash "0xother"}]
+                 :success-flipped     [{:hash "0xbefore"} {:hash "0xafter"} {:hash "0xn3"}
+                                       {:hash "0xduring"}]
                  :probe-failures      [{:from "n2", :to "n1"} {:from "n2", :to "n3"}]}
         x       (os/excuse r history)]
-    (is (= {"n1" 100} (os/restored history)))
+    (testing "the save began at 90: the copy may miss what completed after that"
+      (is (= {"n1" 90} (os/restored history))))
     (testing "other ops' values aren't looked into (sorted maps with string keys throw)"
-      (is (= {"n1" 100} (os/restored (cons {:process :nemesis, :type :info, :f :reconnect
+      (is (= {"n1" 90} (os/restored (cons {:process :nemesis, :type :info, :f :reconnect
                                             :value (sorted-map "n1->n2" :ok)}
                                            history)))))
     (testing "the restored node's channels, its own lost payments, probes to it"
       (is (= ["0xc2"] (map :channel (:channel-problems x))))
-      (is (empty? (:unfinished-payments x)))
-      (is (= ["0xafter"] (map :hash (get-in x [:old-state-excused :success-flipped]))))
+      (is (= ["0xafter" "0xduring"] (map :hash (get-in x [:old-state-excused :success-flipped]))))
       (is (= [{:from "n2", :to "n3"}] (:probe-failures x))))
+    (testing "another node's payment whose TLC a restored node's channel holds"
+      (is (= ["0xold" "0xheld"] (map :hash (get-in x [:old-state-excused :unfinished-payments])))))
     (testing "what it doesn't explain still fails the run"
+      (is (= ["0xother"] (map :hash (:unfinished-payments x))))
       (is (= ["0xbefore" "0xn3"] (map :hash (:success-flipped x))))
       (is (false? (:valid? x))))
     (testing "nothing restored, or no final read: unchanged"
-      (is (= r (os/excuse r (take 4 history))))
+      (is (= r (os/excuse r (take 5 history))))
       (is (= {:valid? :unknown, :error "no final read"}
              (os/excuse {:valid? :unknown, :error "no final read"} history))))))

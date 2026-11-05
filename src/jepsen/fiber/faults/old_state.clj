@@ -14,10 +14,15 @@
   in one of two ways (--old-state-restore):
     raw    the store directory is replaced with the copy: a disk or snapshot
            rollback, which Fiber can't tell from a normal restart;
-    fiber  `fnn --restore save-dir`, Fiber's own restore (store/restore.rs): it
-           swaps the store for the checkpoint and marks every channel that was
+    fiber  Fiber's own backup and restore: `fnn --restore` (store/restore.rs)
+           of the newest backup fnn made itself before the crash (a RocksDB
+           checkpoint under fiber/backups, which the store actor writes at
+           start and about a minute after a channel opens or closes). It swaps
+           the store for the checkpoint and marks every channel that was
            ChannelReady or ShuttingDown Stale, so that the node audits it with
-           its peer on reestablish and refuses to force-close it.
+           its peer on reestablish and refuses to force-close it. The save
+           op's copy isn't used: `fnn --restore` of it left the node listing
+           no channels in the first CI runs.
   The op records the node's channels before the crash and after the restart
   (state, balances, latest commitment transaction hash), the store's
   fingerprint saved, before and after the restore, and, after waiting for the
@@ -58,6 +63,7 @@
                     [nemesis :as n]
                     [store :as store]]
             [jepsen.fiber [checker :as fc]
+                          [closes :as closes]
                           [db :as fdb]
                           [health :as health]
                           [onchain :as onchain]
@@ -160,18 +166,33 @@
       (finally
         (fdb/signal! "CONT")))))
 
+(defn backups-dir
+  [node]
+  (str (fdb/node-dir node) "/fiber/backups"))
+
+(defn newest-backup
+  "{:path :ms} of the newest backup fnn made of `node`'s store (its directory is
+  named by the time in ms), or nil."
+  [node]
+  (when-let [ms (try+ (some-> (not-empty (sh (str "ls -1 " (c/escape (backups-dir node))
+                                                  " | grep -E '^[0-9]+$' | sort -n | tail -1")))
+                              parse-long)
+                      (catch [:type :jepsen.control/nonzero-exit] _ nil))]
+    {:path (str (backups-dir node) "/" ms), :ms ms}))
+
 (defn restore-store!
-  "Puts the saved copy back as `node`'s store while fnn is down: a copy over the
-  store directory (:raw), or fnn --restore (:fiber), which leaves the store it
-  replaced next to it as store.bak.<ms>; that is deleted. Returns what fnn
-  --restore printed, last lines first stripped of colour, for :fiber."
-  [node mode]
+  "Puts an old store back while fnn on `node` is down: the saved copy over the
+  store directory (:raw), or fnn --restore of backup directory `backup`
+  (:fiber), which leaves the store it replaced next to it as store.bak.<ms>;
+  that is deleted. Returns what fnn --restore printed, last lines first stripped
+  of colour, for :fiber."
+  [node mode backup]
   (case mode
     :raw   (do (c/su (c/exec :rm :-rf (fdb/store-dir node))
                      (c/exec :cp :-a (saved-store) (fdb/store-dir node)))
                nil)
     :fiber (let [out (c/su (c/exec :env (str "FIBER_SECRET_KEY_PASSWORD=password" (fdb/node-id node))
-                                   "RUST_LOG=info" fdb/binary :--restore save-dir
+                                   "RUST_LOG=info" fdb/binary :--restore backup
                                    :-d (fdb/node-dir node)))]
              (sh (str "rm -rf " (c/escape (fdb/store-dir node)) ".bak.*"))
              (->> (str/split-lines (str/replace out #"\u001b\[[0-9;]*m" ""))
@@ -244,11 +265,16 @@
   [db test node saved down]
   (let [mode    (:old-state-restore test :raw)
         before  (try-view node)
+        backup  (when (= :fiber mode) (newest-backup node))
+        _       (when (and (= :fiber mode) (nil? backup))
+                  (throw (ex-info (str "no backup of " node "'s store to restore")
+                                  {:type :no-backup, :node node})))
         _       (swap! down conj node)
         _       (swap! onchain/restored-nodes conj node)
+        crashed (System/currentTimeMillis)
         _       (fdb/crash!)
         fp-pre  (fingerprint (fdb/store-dir node))
-        printed (restore-store! node mode)
+        printed (restore-store! node mode (:path backup))
         fp-post (fingerprint (fdb/store-dir node))
         _       (db/start! db test node)
         up      (try (fdb/await-rpc! node) :started
@@ -284,6 +310,7 @@
              ; Read by jepsen.fiber.onchain: this node's records are now older than the chain.
              :stale-store  [node]}
       printed (assoc :restore-output printed)
+      backup  (assoc :backup (assoc backup :age-ms (- crashed (:ms backup))))
       closes  (assoc :force-close closes))))
 
 (defn nemesis
@@ -600,33 +627,39 @@
 ;; What the restore makes the fiber checker see
 
 (defn restored
-  "{node time} of every restore in `history` that put a store back: the time of
-  the node's save before it. The node has forgotten everything after that."
+  "{node time} of every restore in `history` that put a store back: the time the
+  node's save before it began (the copy is taken somewhere between the save's
+  invocation and its completion). The node has forgotten everything after that."
   [history]
-  (loop [[op & more] (seq history), saves {}, out {}]
+  (loop [[op & more] (seq history), began {}, saves {}, out {}]
     (if (nil? op)
       out
       (let [node (when (#{:save-state :restore-state} (:f op)) (get-in op [:value :node]))]
         (cond
           (nil? node)
-          (recur more saves out)
+          (recur more began saves out)
 
           (and (= :save-state (:f op)) (map? (:value op)) (:fingerprint (:value op)))
-          (recur more (assoc saves node (:time op)) out)
+          (recur more began (assoc saves node (get began node (:time op))) out)
+
+          (= :save-state (:f op))
+          (recur more (assoc began node (:time op)) saves out)
 
           (and (= :restore-state (:f op)) (contains? (:value op) :stale-store))
-          (recur more saves (update out node #(or % (get saves node 0))))
+          (recur more began saves (update out node #(or % (get saves node 0))))
 
           :else
-          (recur more saves out))))))
+          (recur more began saves out))))))
 
 (defn excuse
   "The fiber checker's result `r`, less what a restore explains: problems of a
   restored node's channels, on either end (the restored end's balances are old
   and its peer can't reestablish with it; --onchain judges how they end); its
   own payments that it reports unfinished (it lost their outcome) or that it no
-  longer reports Success although the client saw them succeed after its save;
-  and probes from or to it. Lists what it excused under :old-state-excused."
+  longer reports Success although the client saw them succeed after its save
+  began; other nodes' unfinished payments whose TLC one of its channels still
+  holds in the final read (the channel can't settle it off chain any more); and
+  probes from or to it. Lists what it excused under :old-state-excused."
   [r history]
   (let [nodes (restored history)]
     (if (or (empty? nodes) (not (contains? r :channel-problems)))
@@ -637,6 +670,11 @@
                                 :when (map? v)
                                 id (keys v)]
                             id))
+            held     (set (for [[_ records] (:channels (closes/final-read history))
+                                ch records
+                                :when (chans (:channel_id ch))
+                                tlc (:pending_tlcs ch)]
+                            (:payment_hash tlc)))
             senders  (into {} (for [op history
                                     :when (and (= :ok (:type op)) (= :pay (:f op)))]
                                 [(get-in op [:value :hash]) [(get-in op [:value :from]) (:time op)]]))
@@ -648,7 +686,8 @@
                                          (contains? nodes (:node %))
                                          (contains? nodes (:peer %)))
                                     (:channel-problems r))
-            [unfinished u-x] (split #(contains? nodes (:node %)) (:unfinished-payments r))
+            [unfinished u-x] (split #(or (contains? nodes (:node %)) (held (:hash %)))
+                                    (:unfinished-payments r))
             [flipped f-x]    (split forgot? (:success-flipped r))
             [probes pr-x]    (split #(or (contains? nodes (:from %)) (contains? nodes (:to %)))
                                     (:probe-failures r))]

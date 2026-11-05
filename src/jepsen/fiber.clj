@@ -414,8 +414,9 @@
     :validate [#(every? old-state/target-specs %) (str "Must be a subset of " old-state/target-specs)]]
    [nil "--old-state-restore MODE" (str "With --faults old-state, how the saved store comes back: raw"
                                         " (the store directory is replaced with the copy, as a disk"
-                                        " or snapshot rollback would) or fiber (fnn --restore, which"
-                                        " marks the restored channels Stale).")
+                                        " or snapshot rollback would) or fiber (fnn --restore of the"
+                                        " newest backup fnn made itself, which marks the restored"
+                                        " channels Stale).")
     :default  :raw
     :parse-fn keyword
     :validate [old-state/restore-modes (str "Must be one of " old-state/restore-modes)]]
