@@ -78,6 +78,10 @@
       (is (str/includes? y "rpc:\n  listening_addr: \"10.77.0.23:8227\"\n  enabled_modules:\n    - \"cch\"\n"))
       (is (str/includes? y "wrapped_btc_type_script: \"{\\\"code_hash\\\":\\\"0xe1e3\\\""))
       (is (str/includes? y "services:\n  - \"rpc\"\n  - \"cch\"\n")))
+    (testing "LND keeps macaroons and TLS, which it needs to listen beyond loopback"
+      (is (= "/fiber/cch/lnd-admin.macaroon" (get-in cfg [:cch :lnd_macaroon_path])))
+      (is (not (str/includes? (cch/lnd-conf cch/hub-lnd) "no-macaroons")))
+      (is (not (str/includes? (cch/lnd-conf cch/hub-lnd) "no-rest-tls"))))
     (is (str/includes? (cch/lnd-conf cch/hub-lnd) "tlsextraip=10.77.0.21"))
     (is (str/includes? (cch/lnd-conf cch/user-lnd) "bitcoind.zmqpubrawblock=tcp://10.77.0.20:28332"))))
 

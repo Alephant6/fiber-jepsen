@@ -17,8 +17,11 @@
   opened by each, so that n1 can pay the hub and the hub can pay n1.
 
   The control node reaches the daemons' RPCs by host name (bitcoind's JSON-RPC,
-  LND's REST API without TLS, CCH's JSON-RPC) and the hosts themselves over SSH,
-  with the test's SSH options, to write configs and start and stop daemons.
+  LND's REST API, CCH's JSON-RPC) and the hosts themselves over SSH, with the
+  test's SSH options, to write configs and start and stop daemons. LND refuses
+  to listen beyond loopback without macaroons and TLS, so both LNDs run with
+  them, as a hub would: REST calls carry the admin macaroon, and CCH gets the
+  hub LND's certificate and admin macaroon.
   Jepsen downloads logs only from its nodes, so `db` fetches these hosts' logs
   into the store too, under the host's name."
   (:require [cheshire.core :as json]
@@ -133,17 +136,20 @@
 (defn- http-json
   "Sends a request with an optional JSON body and returns the parsed JSON
   response. Throws ex-info with :type ::http-error for a status other than 2xx;
-  connection errors propagate."
-  [method url {:keys [body query timeout auth raw?] :or {timeout 10000}}]
+  connection errors propagate. HTTPS doesn't check the certificate: LND's is
+  self-signed, made at its first start."
+  [method url {:keys [body query timeout auth headers raw?] :or {timeout 10000}}]
   (let [resp (http/request (cond-> {:method             method
                                     :url                url
                                     :accept             :json
                                     :socket-timeout     timeout
                                     :connection-timeout 2000
                                     :throw-exceptions   false}
-                             body  (assoc :body (json/generate-string body) :content-type :json)
-                             query (assoc :query-params query)
-                             auth  (assoc :basic-auth auth)))
+                             body    (assoc :body (json/generate-string body) :content-type :json)
+                             query   (assoc :query-params query)
+                             auth    (assoc :basic-auth auth)
+                             headers (assoc :headers headers)
+                             (str/starts-with? url "https:") (assoc :insecure? true)))
         text (:body resp)]
     (if (<= 200 (:status resp) 299)
       (if raw? text (some-> text not-empty (json/parse-string true)))
@@ -163,13 +169,23 @@
                        :auth    ["btc" "btc"]
                        :timeout 30000})))
 
+(defonce ^{:doc "host -> the hex of its LND's admin macaroon, read at setup."}
+  macaroons
+  (atom {}))
+
+(defn- lnd-opts
+  [host opts]
+  (assoc opts :headers {"Grpc-Metadata-macaroon" (or (@macaroons host)
+                                                     (throw (ex-info (str "No macaroon for " host)
+                                                                     {:host host})))}))
+
 (defn lnd-get
   [host path & [query opts]]
-  (http-json :get (str "http://" host ":8080" path) (assoc opts :query query)))
+  (http-json :get (str "https://" host ":8080" path) (lnd-opts host (assoc opts :query query))))
 
 (defn lnd-post
   [host path body & [opts]]
-  (http-json :post (str "http://" host ":8080" path) (assoc opts :body body)))
+  (http-json :post (str "https://" host ":8080" path) (lnd-opts host (assoc opts :body body))))
 
 (defn lnd-stream-last
   "The last message of one of LND's server-streaming REST responses, which are
@@ -198,6 +214,7 @@
 (def bitcoind-log "/btc/bitcoind.log")
 
 (def lnd-dir "/btc/lnd")
+(def lnd-macaroon (str lnd-dir "/data/chain/bitcoin/regtest/admin.macaroon"))
 (def lnd-pidfile "/btc/lnd.pid")
 (def lnd-log "/btc/lnd.log")
 
@@ -226,16 +243,15 @@
 
 (defn lnd-conf
   "LND's config on `host`, as Fiber's tests/deploy/lnd-init has it, but listening
-  on the container's network. REST is plain HTTP and needs no macaroon; gRPC,
-  which CCH uses, is TLS with a certificate that names the host's address."
+  on the container's network, which LND allows only with macaroons and TLS. The
+  certificate names the host's address and name, so that CCH's gRPC client
+  accepts it."
   [host]
   (let [btc (ips bitcoind-host)]
     (str/join "\n" ["[Application Options]"
                     "listen=0.0.0.0:9735"
                     "rpclisten=0.0.0.0:10009"
                     "restlisten=0.0.0.0:8080"
-                    "no-macaroons=true"
-                    "no-rest-tls=true"
                     "noseedbackup=true"
                     (str "alias=" host)
                     (str "tlsextraip=" (ips host))
@@ -264,6 +280,7 @@
               :enabled_modules ["cch"]}
    :cch      {:lnd_rpc_url                  (str "https://" (ips hub-lnd) ":10009")
               :lnd_cert_path                (str cch-dir "/lnd-tls.cert")
+              :lnd_macaroon_path            (str cch-dir "/lnd-admin.macaroon")
               :wrapped_btc_type_script_args wrapped-btc-args
               :wrapped_btc_type_script      (json/generate-string script)
               :fiber_rpc_url                (str "http://" (topology/node-ip (hub-node test))
@@ -421,14 +438,30 @@
     (btc-rpc "generatetoaddress" 101 addr)
     addr))
 
+(defn- read-macaroon!
+  "Waits for `host`'s LND to write its admin macaroon (with noseedbackup it makes
+  and unlocks a wallet at the first start), and returns it in base64."
+  [test host]
+  (on-host test host
+    (await-fn #(if (cu/exists? lnd-macaroon)
+                 (str/trim (c/exec :base64 :-w0 lnd-macaroon))
+                 (throw (ex-info (str "no macaroon on " host) {})))
+              {:log-message (str "Waiting for " host "'s macaroon"), :timeout 60000,
+               :retry-interval 1000})))
+
 (defn- setup-lnd!
+  "Starts `host`'s LND with an empty data directory, and keeps its macaroon for
+  the REST calls."
   [test host]
   (on-host test host
     (c/su (cu/stop-daemon! lnd-pidfile)
           (c/exec :rm :-rf lnd-dir)
           (c/exec :mkdir :-p lnd-dir)
           (cu/write-file! (lnd-conf host) (str lnd-dir "/lnd.conf")))
-    (start-lnd!)))
+    (start-lnd!))
+  (let [m (read-macaroon! test host)]
+    (swap! macaroons assoc host (strip-0x (b64->hex m)))
+    m))
 
 (defn- open-ln-channel!
   "Funds lnd-ingrid and opens its channel to lnd-bob, pushing ln-push-sats."
@@ -464,7 +497,9 @@
       (await-ln-channel! user-lnd (:identity_pubkey ingrid)))))
 
 (defn- setup-cch!
-  [test script]
+  "Gives CCH the hub LND's certificate and admin macaroon (`macaroon`, base64),
+  and starts it."
+  [test script macaroon]
   (let [cert   (on-host test hub-lnd (c/exec :cat (str lnd-dir "/tls.cert")))
         config (yaml (cch-config test script))]
     (on-host test cch-host
@@ -472,6 +507,9 @@
             (c/exec :rm :-rf cch-dir)
             (c/exec :mkdir :-p cch-dir)
             (cu/write-file! (str (str/trim cert) "\n") (str cch-dir "/lnd-tls.cert"))
+            (cu/write-file! macaroon (str cch-dir "/lnd-admin.macaroon.b64"))
+            (c/exec :base64 :-d (str cch-dir "/lnd-admin.macaroon.b64")
+                    :> (str cch-dir "/lnd-admin.macaroon"))
             (cu/write-file! config (str cch-dir "/config.yml")))
       (start-cch! test))
     (await-cch! 120000)))
@@ -515,11 +553,13 @@
   starting balances in the test's :swap-env."
   [test]
   (check-hosts!)
-  (let [miner  (setup-bitcoind! test)
-        _      (doseq [h [hub-lnd user-lnd]] (setup-lnd! test h))
-        _      (open-ln-channel! miner)
-        script (wrapped-btc-script test)]
-    (setup-cch! test script)
+  (reset! macaroons {})
+  (let [miner    (setup-bitcoind! test)
+        macaroon (setup-lnd! test hub-lnd)
+        _        (setup-lnd! test user-lnd)
+        _        (open-ln-channel! miner)
+        script   (wrapped-btc-script test)]
+    (setup-cch! test script macaroon)
     (open-udt-channels! test script)
     (reset! (:swap-env test)
             {:script       script
