@@ -16,6 +16,7 @@
                           [db :as db]
                           [faults :as faults]
                           [health :as health]
+                          [invoice]
                           [ledger :as ledger]
                           [nonce :as nonce]
                           [scenarios :as scenarios]
@@ -32,11 +33,13 @@
 
 (defn payments
   "Payments for the whole fault window, drawn from the run's seed (see
-  jepsen.fiber.schedule): 0.01-0.2 CKB each, about :rate a second. With --close,
+  jepsen.fiber.schedule): 0.01-0.2 CKB each, about :rate a second, of the kinds
+  in --pay-kinds (keysend, invoice: jepsen.fiber.invoice). With --close,
   every channel is asked to close cooperatively halfway through, and payments go on
   against the closing channels, from a stream of their own."
   [opts streams]
-  (let [pays (fn [k] (schedule/paced-payments streams k (:rate opts) (count (:nodes opts))))]
+  (let [pays (fn [k] (schedule/paced-payments streams k (:rate opts) (count (:nodes opts))
+                                              (:pay-kinds opts [:keysend])))]
     (if (:close opts)
       (gen/phases (gen/time-limit (/ (:time-limit opts) 2) (pays :pay))
                   (gen/once {:f :close})
@@ -52,13 +55,14 @@
 
 (defn availability-window
   "With --availability-window, payments without faults for that many seconds,
-  at --rate, from a stream of their own (`k`), each op marked with :window
-  `window` for jepsen.fiber.checker/availability-checker. Nil without the
-  option. The streams are new, so the fault window's payments for a seed don't
-  change."
+  at --rate and of the --pay-kinds, from a stream of their own (`k`), each op
+  marked with :window `window` for jepsen.fiber.checker/availability-checker.
+  Nil without the option. The streams are new, so the fault window's payments
+  for a seed don't change."
   [opts streams k window]
   (when (availability? opts)
-    (->> (schedule/paced-payments streams k (:rate opts) (count (:nodes opts)))
+    (->> (schedule/paced-payments streams k (:rate opts) (count (:nodes opts))
+                                  (:pay-kinds opts [:keysend]))
          (gen/map #(assoc % :window window))
          (gen/time-limit (:availability-window opts))
          gen/clients)))
@@ -156,6 +160,12 @@
    [nil "--rate HZ" "Approximate number of payments per second."
     :default  5
     :parse-fn parse-double]
+   [nil "--pay-kinds KINDS" (str "Comma-separated payment kinds, each payment's drawn uniformly from"
+                                 " them (list one twice to draw it twice as often): keysend, invoice.")
+    :default  [:keysend]
+    :parse-fn keywords
+    :validate [#(every? (methods client/send-payment!) %)
+               (str "Each must be a payment kind: " (str/join ", " (map name (keys (methods client/send-payment!)))))]]
    [nil "--nemesis-interval SECONDS" "Seconds between fault operations."
     :default  15
     :parse-fn parse-long]

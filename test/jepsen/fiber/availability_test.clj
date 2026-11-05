@@ -107,4 +107,9 @@
         (is (< 250 n))
         (is (= (take n a) (take n b)))))
     (testing "not with --close"
-      (is (empty? (filter :window (simulate (assoc opts :availability-window 20 :close true))))))))
+      (is (empty? (filter :window (simulate (assoc opts :availability-window 20 :close true))))))
+    (testing "the windows pay with --pay-kinds, like the fault window"
+      (let [h (simulate (assoc opts :availability-window 20 :pay-kinds [:invoice]))]
+        (is (seq (pays h :baseline)))
+        (is (every? #(= :invoice (get-in % [:value :kind]))
+                    (concat (pays h :baseline) (pays h :recovery))))))))
