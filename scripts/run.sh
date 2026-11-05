@@ -5,6 +5,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/../docker"
 
+# --faults power puts fnn's store on LazyFS, which needs it in the node image and
+# FUSE in the node containers (docker-compose.lazyfs.yml).
+if [[ "$*" == *power* ]]; then
+  export COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml}:docker-compose.lazyfs.yml"
+fi
+
 docker compose build
 # Recreating the containers resets the chain to the snapshot and clears any
 # leftover iptables rules or paused processes from an earlier run.

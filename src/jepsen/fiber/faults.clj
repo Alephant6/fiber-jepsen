@@ -19,6 +19,7 @@
                                  [disk :as disk]
                                  [packet :as packet]
                                  [partition :as partition]
+                                 [power :as power]
                                  [process :as process]]))
 
 (def registry
@@ -27,7 +28,8 @@
    process/fault
    disconnect/fault
    packet/fault
-   disk/fault])
+   disk/fault
+   power/fault])
 
 (def supported
   "Every name --faults accepts."
