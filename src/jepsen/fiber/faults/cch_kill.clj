@@ -4,7 +4,8 @@
   nodes. The hub's Fiber node and both LNDs keep running. CCH keeps its orders,
   and the intents of orders it is creating, in its own store and recovers them
   when it starts; meanwhile the hub's incoming payments stay held. Needs --cch."
-  (:require [clojure.tools.logging :refer [warn]]
+  (:require [clojure.string :as str]
+            [clojure.tools.logging :refer [warn]]
             [jepsen.nemesis :as n]
             [jepsen.fiber.cch :as cch]))
 
@@ -50,8 +51,18 @@
   (cycle [{:type :info, :f :kill-cch}
           {:type :info, :f :start-cch}]))
 
+(defn effect
+  "Whether a :kill-cch completion took effect (see jepsen.fiber.faults): not
+  when the kill failed, which the nemesis records as a \"failed: ...\" string."
+  [op]
+  (let [v (:value op)]
+    (when (and (= :kill-cch (:f op)) (string? v) (str/starts-with? v "failed"))
+      v)))
+
 (def fault
   {:faults  #{:cch-kill}
    :stream  :cch-kill
    :package package
-   :ops     ops})
+   :ops     ops
+   :fired   {:cch-kill #{:kill-cch}}
+   :effect  effect})

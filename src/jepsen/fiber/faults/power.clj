@@ -210,4 +210,5 @@
    :stream  :power
    :package package
    :ops     ops
-   :checker (fn [_opts] {:power (checker)})})
+   :checker (fn [_opts] {:power (checker)})
+   :fired   {:power #{:power-off}}})

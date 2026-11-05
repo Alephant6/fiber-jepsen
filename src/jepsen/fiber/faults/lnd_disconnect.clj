@@ -138,8 +138,19 @@
                {:type :info, :f :stop-lnd-disconnect, :value nil}])
             (repeatedly #(schedule/pick r specs)))))
 
+(defn effect
+  "Whether a :start-lnd-disconnect completion took effect (see
+  jepsen.fiber.faults): not when the cut failed, which the nemesis records as a
+  \"failed: ...\" string."
+  [op]
+  (let [r (get-in op [:value :result])]
+    (when (and (= :start-lnd-disconnect (:f op)) (string? r) (.startsWith ^String r "failed"))
+      r)))
+
 (def fault
   {:faults  #{:lnd-disconnect}
    :stream  :lnd-disconnect
    :package package
-   :ops     ops})
+   :ops     ops
+   :fired   {:lnd-disconnect #{:start-lnd-disconnect}}
+   :effect  effect})

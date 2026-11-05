@@ -151,6 +151,7 @@
                                                     :perf       (checker/perf {:nemeses (:perf pkg)})
                                                     :timeline   (timeline/html)
                                                     :health     (health/checker)})
+                                      (seq (faults/in-use opts)) (assoc :faults (faults/fired-checker opts))
                                       (not (:close opts)) (assoc :fiber (if (:force-close-ok opts)
                                                                           (closes/checker)
                                                                           (fiber-checker/checker)))
@@ -239,7 +240,8 @@
    [nil "--kill-targets TARGETS" (str "Comma-separated kill targets: one, all, middle (a node on more"
                                       " than one channel, which forwards payments: n2 in line).")
     :default  [:one :all]
-    :parse-fn keywords]
+    :parse-fn keywords
+    :validate [#(every? process/target-specs %) (str "Must be a subset of " process/target-specs)]]
    [nil "--kill-signal SIGNAL" (str "How a kill stops fnn: kill (SIGKILL, a crash) or term (SIGTERM, a"
                                     " graceful shutdown, checked to finish within --term-grace).")
     :default  :kill

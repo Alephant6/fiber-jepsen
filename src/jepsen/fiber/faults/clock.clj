@@ -193,4 +193,5 @@
    :package package
    :ops     ops
    :env     env
-   :checker (fn [_opts] {:clock (checker)})})
+   :checker (fn [_opts] {:clock (checker)})
+   :fired   {:clock #{:clock-jump}}})

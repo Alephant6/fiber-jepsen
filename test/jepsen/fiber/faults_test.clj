@@ -217,3 +217,95 @@
           n     (min (count alone) (count mixed))]
       (is (< 10 n))
       (is (= (take n alone) (take n mixed))))))
+
+(defn nemesis-history
+  "A history of these nemesis op completions, at times 0, 1, 2…: each after its
+  invocation, which has no result yet, and a client op between them."
+  [& completions]
+  (vec (mapcat (fn [t op]
+                 [{:type :invoke, :process 0, :f :pay, :time t}
+                  {:type :info, :process :nemesis, :f (:f op), :value :invoked, :time t}
+                  (merge {:type :info, :process :nemesis, :time t} op)])
+               (range) completions)))
+
+(deftest fired
+  (let [check (fn [fs & ops] (faults/fired {:faults fs} (apply nemesis-history ops)))]
+    (testing "each fault asked for took effect; recoveries and the health sample aren't counted"
+      (let [r (check [:kill :pause]
+                     {:f :kill, :value {"n1" nil}}
+                     {:f :start, :value {"n1" "started"}}
+                     {:f :pause, :value {"n2" "Tl"}}
+                     {:f :health, :value {"n1" {}}}
+                     {:f :resume, :value {"n2" "Sl"}})]
+        (is (true? (:valid? r)))
+        (is (= {:kill {:ops 1, :took-effect 1}, :pause {:ops 1, :took-effect 1}} (:faults r)))
+        (is (zero? (:crashed-count r)))))
+    (testing "a pause that stopped nothing breaks the run: it is a local signal"
+      (let [r (check [:pause]
+                     {:f :pause, :value {"n2" "T"}}
+                     {:f :resume}
+                     {:f :pause, :value {"n1" "Ssl"}})]
+        (is (false? (:valid? r)))
+        (is (= {:ops 2, :took-effect 1, :no-effect-count 1
+                :no-effect [{:f :pause, :time 2, :why "fnn not stopped: n1 Ssl"}]}
+               (get-in r [:faults :pause])))))
+    (testing "a pause where fnn was down is skipped"
+      (let [r (check [:pause]
+                     {:f :pause, :value {"n2" "T"}}
+                     {:f :resume}
+                     {:f :pause, :value {"n1" :not-running}}
+                     {:f :resume}
+                     {:f :pause, :value {"n3" "Z"}})]
+        (is (true? (:valid? r)))
+        (is (= {:ops 3, :took-effect 1, :skipped 2} (get-in r [:faults :pause]))))
+      (testing "and when every pause was, the run didn't test pauses"
+        (is (= :unknown (:valid? (check [:pause] {:f :pause, :value {"n1" nil}}))))))
+    (testing "a kill target typo: every kill threw, and Jepsen only logged it"
+      (let [crash {:f :kill, :value :midle, :exception {:via []}
+                   :error "indeterminate: Don't know how to create ISeq from: clojure.lang.Keyword"}
+            r     (check [:kill] crash {:f :start} crash)]
+        (is (false? (:valid? r)))
+        (is (= {:ops 2, :took-effect 0, :no-effect-count 2
+                :no-effect [{:f :kill, :time 0, :why "crashed"} {:f :kill, :time 2, :why "crashed"}]}
+               (get-in r [:faults :kill])))
+        (is (= 2 (:crashed-count r)))
+        (is (= {:f :kill, :time 0, :error (:error crash)} (first (:crashed r))))))
+    (testing "a crashed recovery fails the run too"
+      (is (false? (:valid? (check [:kill] {:f :kill, :value {"n1" nil}}
+                                  {:f :start, :exception {}, :error "indeterminate: x"})))))
+    (testing "a fault that never took effect, though nothing threw"
+      (let [r (check [:disconnect]
+                     {:f :disconnect, :value {:from "n1", :to "n2", :result "failed: connection refused"}}
+                     {:f :reconnect, :value {}})]
+        (is (false? (:valid? r)))
+        (is (= "disconnect_peer failed: connection refused"
+               (get-in r [:faults :disconnect :no-effect 0 :why])))))
+    (testing "one that failed now and then is fine, unless it is strict"
+      (let [r (check [:disconnect]
+                     {:f :disconnect, :value {:result "failed: peer down"}}
+                     {:f :reconnect, :value {}}
+                     {:f :flash-disconnect, :value {:disconnect {}, :reconnect {}}})]
+        (is (true? (:valid? r)))
+        (is (= {:ops 2, :took-effect 1, :no-effect-count 1}
+               (dissoc (get-in r [:faults :disconnect]) :no-effect)))))
+    (testing "a fault asked for and never tried: the run was shorter than its first gap"
+      (let [r (check [:kill :partition] {:f :kill, :value {"n1" nil}})]
+        (is (= :unknown (:valid? r)))
+        (is (= {:ops 0, :took-effect 0} (get-in r [:faults :partition])))))
+    (testing "cpu and memory share an op, told apart by the limit"
+      (let [r (check [:cpu :memory]
+                     {:f :limit-resources, :value {:limit {:nodes ["n1"], :cpus 0.25}, :nodes {"n1" {}}}}
+                     {:f :lift-resources, :value {}}
+                     {:f :limit-resources, :value {:limit {:nodes ["n2"], :memory-mib 192}, :nodes {"n2" {}}}}
+                     {:f :lift-resources, :value {}}
+                     {:f :limit-resources, :value {:nodes ["n3"], :cpus 0.5}, :exception {}, :error "indeterminate: x"})]
+        (is (false? (:valid? r)))
+        (is (= {:ops 2, :took-effect 1} (select-keys (get-in r [:faults :cpu]) [:ops :took-effect])))
+        (is (= {:ops 1, :took-effect 1} (get-in r [:faults :memory])))))
+    (testing "only the faults asked for are reported"
+      (is (= [:kill] (keys (:faults (check [:kill] {:f :kill, :value {"n1" nil}}))))))))
+
+(deftest every-fault-says-which-ops-inject-it
+  (doseq [f faults/registry, nm (:faults f)]
+    (testing nm
+      (is (contains? (:fired f) nm)))))

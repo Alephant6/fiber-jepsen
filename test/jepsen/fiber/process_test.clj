@@ -76,5 +76,23 @@
     (is (= 30 (:term-grace (:options (parse [])))))
     (is (= :term (:kill-signal (:options (parse ["--kill-signal" "term"])))))
     (is (= [:middle] (:kill-targets (:options (parse ["--kill-targets" "middle"])))))
+    (is (= [:one :middle] (:kill-targets (:options (parse ["--kill-targets" "one,middle"])))))
+    (testing "a typo is an error, not a run whose every kill throws"
+      (is (seq (:errors (parse ["--kill-targets" "midle"]))))
+      (is (seq (:errors (parse ["--kill-targets" "one,al"])))))
     (is (seq (:errors (parse ["--kill-signal" "hup"]))))
     (is (seq (:errors (parse ["--term-grace" "0"]))))))
+
+(deftest pause-effect
+  (let [pause #(process/effect {:f :pause, :value %})]
+    (is (nil? (pause {"n2" "T"})))
+    (is (nil? (pause {"n1" "Tl", "n2" "Tsl"})))
+    (testing "fnn was down: killed by another fault, or exited and not reaped"
+      (is (= :skipped (pause {"n2" :not-running})))
+      (is (= :skipped (pause {"n2" nil, "n3" "Z"}))))
+    (testing "a running fnn the signal didn't stop"
+      (is (= "fnn not stopped: n1 Ssl, n3 R" (pause {"n3" "R", "n2" "T", "n1" "Ssl"}))))
+    (testing "only pause completions"
+      (is (nil? (process/effect {:f :pause, :value ["n1"]})))
+      (is (nil? (process/effect {:f :resume, :value {"n1" "Ssl"}})))
+      (is (nil? (process/effect {:f :kill, :value {"n1" nil}}))))))

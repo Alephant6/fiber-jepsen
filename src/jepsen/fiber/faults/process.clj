@@ -2,7 +2,8 @@
   "The kill and pause faults: SIGKILL (or, with --kill-signal term, SIGTERM) and
   restart, SIGSTOP and SIGCONT, on fnn processes (jepsen.fiber.db), through
   jepsen.nemesis.combined's db package."
-  (:require [jepsen.checker :as checker]
+  (:require [clojure.string :as str]
+            [jepsen.checker :as checker]
             [jepsen.nemesis.combined :as nc]
             [jepsen.fiber [schedule :as schedule]
                           [topology :as topology]]))
@@ -10,6 +11,12 @@
 (def kill-signals
   "--kill-signal values: how jepsen.fiber.db stops fnn on a :kill op."
   #{:kill :term})
+
+(def target-specs
+  "--kill-targets values. Anything else would reach jepsen.nemesis.combined's
+  db-nodes, which passes an unknown spec through as the node list, so every kill
+  op would throw and the run would have no kills."
+  #{:one :all :middle})
 
 (defn middle-nodes
   "The nodes that forward payments: those on more than one channel of the test's
@@ -91,6 +98,29 @@
          :unlogged      (vec (for [e exits :when (false? (:logged? e))]
                                (select-keys e [:node :time])))}))))
 
+(defn- not-running?
+  "Whether fnn's ps state `st` from jepsen.fiber.db/signal! says there was no
+  fnn to signal: none at all, or one that had exited but wasn't reaped yet."
+  [st]
+  (or (nil? st) (= :not-running st) (and (string? st) (str/starts-with? st "Z"))))
+
+(defn effect
+  "Whether a completed op took effect (see jepsen.fiber.faults). A :pause
+  completion maps each node to fnn's ps state after SIGSTOP: it took effect
+  when every running fnn is stopped (T), is :skipped when none was running
+  (killed by another fault), and otherwise names the nodes it didn't stop.
+  This is the check the pause fault lacked when it stopped nothing (before
+  fiber-jepsen #10). Kills take effect unless they crash."
+  [op]
+  (when (and (= :pause (:f op)) (map? (:value op)))
+    (let [running     (remove (comp not-running? val) (:value op))
+          not-stopped (remove (fn [[_ st]] (and (string? st) (str/starts-with? st "T"))) running)]
+      (cond (empty? running)    :skipped
+            (seq not-stopped)   (str "fnn not stopped: "
+                                     (str/join ", " (for [[node st] (sort-by key not-stopped)]
+                                                      (str node " " st))))
+            :else               nil))))
+
 (def fault
   {:faults  #{:kill :pause}
    :stream  :db
@@ -110,4 +140,8 @@
                       :middles       middles})))
    :checker (fn [opts]
               (when (and (some #{:kill} (:faults opts)) (= :term (:kill-signal opts)))
-                {:term-exits (exit-checker (:term-grace opts 30))}))})
+                {:term-exits (exit-checker (:term-grace opts 30))}))
+   :fired   {:kill #{:kill}, :pause #{:pause}}
+   :effect  effect
+   ; A pause is a local signal: one that stops nothing means the fault is broken.
+   :strict? true})
