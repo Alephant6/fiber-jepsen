@@ -286,6 +286,11 @@
     :default  [120 180]
     :parse-fn partition/parse-duration
     :validate [(fn [[lo hi]] (and lo hi (< 0 lo) (<= lo hi))) "Must be S or MIN-MAX, 0 < MIN <= MAX"]]
+   [nil "--outage-after SECONDS" (str "With --faults outage, how long into the fault window the first"
+                                      " outage waits, so that payments flow before it.")
+    :default  30
+    :parse-fn parse-long
+    :validate [#(and % (<= 0 %)) "Must be 0 or more"]]
    [nil "--outage-await SECONDS" (str "With --faults outage, how long an outage waits for a neighbour"
                                       " of its node to hold a TLC in flight to it before it kills the"
                                       " node anyway.")

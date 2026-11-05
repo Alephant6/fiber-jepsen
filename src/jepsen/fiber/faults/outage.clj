@@ -235,8 +235,10 @@
 
 (defn ops
   "Endless :outage ops, each a target and a duration drawn from `r`. Options:
-  :outage-targets (specs to choose from: one, middle) and :outage-duration
-  ([min max] seconds, drawn uniformly)."
+  :outage-targets (specs to choose from: one, middle), :outage-duration
+  ([min max] seconds, drawn uniformly) and :outage-after (seconds): the ops
+  start with a sleep that long, which Jepsen keeps out of the history, so that
+  payments flow before the first outage."
   [^java.util.SplittableRandom r opts]
   (let [specs   (vec (:outage-targets opts [:middle]))
         nodes   (vec (:nodes opts))
@@ -250,14 +252,15 @@
       (throw (ex-info (str "--outage-jump can't run with --faults clock: the clock fault resets"
                            " fnn's clock, and the chain's can't go back")
                       {:type :conflicting-faults})))
-    (repeatedly
-      (fn []
-        {:type  :info
-         :f     :outage
-         :value {:node       (case (schedule/pick r specs)
-                               :one    (schedule/pick r nodes)
-                               :middle (schedule/pick r middles))
-                 :duration-s (+ lo (.nextInt r (int (inc (- hi lo)))))}}))))
+    (cond->> (repeatedly
+               (fn []
+                 {:type  :info
+                  :f     :outage
+                  :value {:node       (case (schedule/pick r specs)
+                                        :one    (schedule/pick r nodes)
+                                        :middle (schedule/pick r middles))
+                          :duration-s (+ lo (.nextInt r (int (inc (- hi lo)))))}}))
+      (pos? (:outage-after opts 0)) (cons {:type :sleep, :value (:outage-after opts)}))))
 
 (defn check
   "Every :outage completion in `history`: how many caught a TLC in flight, and,

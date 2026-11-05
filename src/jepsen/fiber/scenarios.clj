@@ -27,8 +27,8 @@
              :args     ["--faults" "outage" "--outage-targets" "middle" "--outage-duration" "120-180"
                         "--outage-jump" "34200" "--time-limit" "120" "--rate" "10"
                         "--tlc-expiry-delta" "9600000" "--final-tlc-expiry-delta" "9600000"
-                        "--tlc-expiry-limit" "33660000" "--quiesce" "60" "--onchain"
-                        "--settle-timeout" "600" "--expiry-check" "--force-close-ok"]
+                        "--tlc-expiry-limit" "33660000" "--quiesce" "330" "--onchain"
+                        "--settle-timeout" "900" "--expiry-check" "--force-close-ok"]
              :differs  (str "Three nodes in a line; payments go between all three, keysend only,"
                             " about 10 a second. Fiber adds a random privacy delay of 4 hours or"
                             " more to every hop's TLC expiry (rand_tlc_expiry_delta in graph.rs), so"
@@ -37,13 +37,16 @@
                             " with the release minimum delta of 160 minutes, and payments ask for a"
                             " 160-minute final delta and a TLC expiry limit that pins the random"
                             " delay at 4 hours, so a payment's TLCs expire 6 h 40 min to 9 h 20 min"
-                            " after it is sent. One outage takes n2 down for 120-180 s, as soon as"
-                            " a neighbour holds a TLC in flight to it (it waits up to 30 s); while"
+                            " after it is sent. One outage takes n2 down for 120-180 s, 30 s into"
+                            " the run, as soon as a neighbour holds a TLC in flight to it (it waits"
+                            " up to 30 s more); while"
                             " n2 is down, every fnn's clock and the CKB node's jump 9.5 hours"
                             " forward, and n2 restarts with the new time. The"
                             " neighbours force-close the channels whose TLCs expired, so closed"
                             " channels are expected and --force-close-ok excuses them (this is not"
-                            " open question 1). After settling, --expiry-check wants every payment"
+                            " open question 1). A node sees that its counterparty force-closed a"
+                            " channel only in a check every 300 s (CHECK_CHANNELS_SHUTDOWN_INTERVAL),"
+                            " so the quiesce lasts 330 s, for the restarted n2 to see the closes. After settling, --expiry-check wants every payment"
                             " Success or Failed and every payer's Failed TLC back on chain;"
                             " :unknown when the outage caught no payment in flight.")}
     "c-04"  {:priority :p0

@@ -16,7 +16,8 @@
 (def nodes ["n1" "n2" "n3"])
 
 (def opts
-  {:nodes nodes, :faults [:outage], :outage-targets [:middle], :outage-duration [120 180]})
+  {:nodes nodes, :faults [:outage], :outage-targets [:middle], :outage-duration [120 180]
+   :outage-after 0})
 
 (defn draw
   [seed opts n]
@@ -32,6 +33,10 @@
     (testing "the seed fixes them"
       (is (= ops (draw 7 opts 200)))
       (is (not= ops (draw 8 opts 200)))))
+  (testing "with :outage-after, a sleep comes first"
+    (let [ops (draw 7 (assoc opts :outage-after 30) 3)]
+      (is (= {:type :sleep, :value 30} (first ops)))
+      (is (= (take 2 (draw 7 opts 2)) (rest ops)))))
   (testing "one: any node"
     (is (= (set nodes) (set (map (comp :node :value) (draw 7 (assoc opts :outage-targets [:one]) 200))))))
   (testing "middle needs a node on two channels"
@@ -175,8 +180,10 @@
 
 (deftest options
   (let [parse (fn [& args] (cli/parse-opts args fiber/cli-opts))]
-    (is (= {:outage-targets [:middle], :outage-duration [120 180], :outage-await 30, :outage-jump 0}
-           (select-keys (:options (parse)) [:outage-targets :outage-duration :outage-await :outage-jump])))
+    (is (= {:outage-targets [:middle], :outage-duration [120 180], :outage-await 30, :outage-jump 0
+            :outage-after 30}
+           (select-keys (:options (parse)) [:outage-targets :outage-duration :outage-await :outage-jump
+                                            :outage-after])))
     (is (= [:outage] (:faults (:options (parse "--faults" "outage")))))
     (is (= 33660000 (:tlc-expiry-limit (:options (parse "--tlc-expiry-limit" "33660000")))))
     (is (seq (:errors (parse "--outage-targets" "all"))))
