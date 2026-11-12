@@ -69,13 +69,13 @@
   and its healing. Without :partition-duration, every fault's gaps. With it
   ([min max] seconds), each partition lasts a whole number of seconds drawn from
   a stream of its own, and the gaps after each healing come from the usual gap
-  stream."
+  stream, none shorter than :nemesis-min-gap seconds."
   [streams opts]
   (let [usual (schedule/gaps (schedule/gaps-stream streams :partition) (:nemesis-interval opts))]
     (if-let [[lo hi] (:partition-duration opts)]
       (let [^SplittableRandom r (schedule/stream streams :partition-duration)]
         (interleave (repeatedly #(* 1000000000 (+ lo (.nextInt r (int (inc (- hi lo)))))))
-                    usual))
+                    (schedule/at-least (:nemesis-min-gap opts) usual)))
       usual)))
 
 (def partition-rule

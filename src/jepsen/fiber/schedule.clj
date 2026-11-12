@@ -81,6 +81,16 @@
     #(long (* 1e9 (min max-gap-s
                        (* (- (double mean-s)) (Math/log (- 1.0 (.nextDouble r)))))))))
 
+(defn at-least
+  "`gaps` (ns) with none shorter than `seconds`: a shorter one becomes `seconds`
+  long. As many values are drawn as before, so a seed's ops and its other gaps
+  stay what they were. Nil or 0 seconds leaves the gaps as they are."
+  [seconds gaps]
+  (if (and seconds (pos? seconds))
+    (let [floor (long (* 1e9 seconds))]
+      (map #(max floor (long %)) gaps))
+    gaps))
+
 (defrecord Paced [gaps next-time gen]
   gen/Generator
   (op [_ test ctx]

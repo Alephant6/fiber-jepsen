@@ -1,0 +1,26 @@
+# For --faults slow-io: unreliablefs in the node image, and FUSE in the node
+# containers. scripts/run.sh adds this file for --faults with slow-io in it, or
+# --compose slowio; by hand:
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.slowio.yml scripts/run.sh --faults slow-io ...
+# Mounting a FUSE filesystem in a container needs the host's /dev/fuse,
+# CAP_SYS_ADMIN, and, on hosts with AppArmor (Ubuntu, GitHub's runners), no
+# AppArmor profile, since Docker's default one denies mount: the same as for
+# LazyFS (docker-compose.lazyfs.yml). The node containers are disposable test
+# machines; nothing else runs with these.
+x-slowio-node: &slowio-node
+  build:
+    args:
+      SLOWIO: build
+  devices:
+    - /dev/fuse:/dev/fuse
+  cap_add: [NET_ADMIN, SYS_ADMIN]
+  security_opt:
+    - apparmor:unconfined
+
+services:
+  n1: *slowio-node
+  n2: *slowio-node
+  n3: *slowio-node
+  n4: *slowio-node
+  n5: *slowio-node
+  n6: *slowio-node

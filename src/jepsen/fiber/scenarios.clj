@@ -330,7 +330,35 @@
                             " writes in a cache of its own until fsync; a power loss SIGKILLs fnn on"
                             " one node or all of them and drops that cache. Needs Fiber from"
                             " 4777d5d6 (#1703): an earlier build ignores the setting, and the power"
-                            " check is then unknown.")}))
+                            " check is then unknown.")}
+    "slow-io"
+            {:priority :extra
+             :plan     (str "Not in the plan. A node's disk is slow for a while, then fast again;"
+                            " the node stays up and connected")
+             :compose  "slowio"
+             :args     ["--faults" "slow-io" "--slow-io-targets" "one" "--slow-io-delay" "20-200"
+                        "--nemesis-interval" "20" "--time-limit" "300"
+                        "--availability-window" "30" "--ledger"]
+             :differs  (str "fnn's store is on unreliablefs (scripts/run.sh --compose slowio), a FUSE"
+                            " filesystem that delays operations. A slowdown makes every write and"
+                            " fsync of one node's store wait 20 to 200 ms first (drawn per slowdown),"
+                            " one operation at a time, so store writes queue behind each other. A"
+                            " forced close fails the run: the node never went away.")}
+    "slow-io-kill"
+            {:priority :extra
+             :plan     (str "Not in the plan. Every node's disk is slow for a while, and nodes are"
+                            " killed (SIGKILL) and restarted meanwhile, so that fnn also opens its"
+                            " store and replays its log on a slow disk")
+             :compose  "slowio"
+             :args     ["--faults" "slow-io,kill" "--slow-io-targets" "all" "--slow-io-delay" "20-200"
+                        "--kill-targets" "one" "--process-duration" "5-20"
+                        "--nemesis-interval" "20" "--nemesis-min-gap" "30" "--time-limit" "300"
+                        "--ledger"]
+             :differs  (str "As slow-io, but every node's store is slowed at once, about half the"
+                            " time, and one node at a time is killed and restarted 5 to 20 s later,"
+                            " under fnn's 30 s peer deadline, the next kill at least 30 s after"
+                            " that (--nemesis-min-gap 30). The kills come at their own times, so"
+                            " some restarts land on a slow disk and some on a fast one.")}))
 
 (defn scenario-args
   "The arguments of scenario `name`. Throws for an unknown name."
