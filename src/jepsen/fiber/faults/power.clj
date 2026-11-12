@@ -138,6 +138,15 @@
                            :one [(schedule/pick r nodes)]
                            :all nodes)))))
 
+(defn gaps
+  "The gaps in ns between this fault's ops, which alternate between a power
+  loss and the power coming back: every fault's gaps, with none after a
+  :power-on shorter than :nemesis-min-gap seconds."
+  [streams opts]
+  (schedule/after-recovery-at-least
+    (:nemesis-min-gap opts)
+    (schedule/gaps (schedule/gaps-stream streams :power) (:nemesis-interval opts))))
+
 ;; The checker
 
 (def ^:private ansi
@@ -220,5 +229,6 @@
    :stream  :power
    :package package
    :ops     ops
+   :gaps    gaps
    :checker (fn [_opts] {:power (checker)})
    :fired   {:power #{:power-off}}})

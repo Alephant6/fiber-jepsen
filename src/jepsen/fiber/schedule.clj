@@ -91,6 +91,16 @@
       (map #(max floor (long %)) gaps))
     gaps))
 
+(defn after-recovery-at-least
+  "`gaps` (ns) of a fault whose ops alternate between the fault and its
+  recovery, the fault first: every second gap, the one after a recovery, is at
+  least `seconds` long. The others say how long each fault lasts and stay as
+  they are. Nothing new is drawn (see `at-least`)."
+  [seconds gaps]
+  (if (and seconds (pos? seconds))
+    (interleave (take-nth 2 gaps) (at-least seconds (take-nth 2 (rest gaps))))
+    gaps))
+
 (defrecord Paced [gaps next-time gen]
   gen/Generator
   (op [_ test ctx]

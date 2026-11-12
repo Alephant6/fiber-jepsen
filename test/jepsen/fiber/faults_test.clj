@@ -185,9 +185,13 @@
         (is (= (take-nth 2 g) (take-nth 2 g30)))
         (is (= (map #(max (long 30e9) %) (take-nth 2 (rest g))) (take-nth 2 (rest g30))))
         (is (= g (take 40 (partition/gaps (schedule/streams 9) (assoc opts :nemesis-min-gap 0)))))
-        (testing "and without --partition-duration it changes nothing: every gap would be a fault's length too"
-          (is (= (usual) (take 20 (partition/gaps (schedule/streams 9) {:nemesis-interval 15
-                                                                       :nemesis-min-gap  30})))))))
+        (testing "and without --partition-duration too: a partition lasts the gap drawn for it, a healing at least 30 s"
+          (let [u   (usual)
+                g30 (take 20 (partition/gaps (schedule/streams 9) {:nemesis-interval 15
+                                                                   :nemesis-min-gap  30}))]
+            (is (some #(< % 30e9) (take-nth 2 (rest u))))
+            (is (= (take-nth 2 u) (take-nth 2 g30)))
+            (is (= (map #(max (long 30e9) %) (take-nth 2 (rest u))) (take-nth 2 (rest g30))))))))
     (testing "under the simulator, a partition lasts what was drawn"
       (let [hist  (->> (gt/simulate (gen/context {:concurrency 1})
                                     (gen/nemesis (gen/limit 20 (faults/generator
