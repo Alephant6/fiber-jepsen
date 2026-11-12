@@ -140,7 +140,7 @@ A scenario is added to the list once the suite covers it; `test/jepsen/fiber/sce
 scripts/run.sh --compose lazyfs --scenario power-sync-on
 ```
 
-`hold-kill` and `hold-partition` are extras too: hold-invoice payments (`--pay-kinds hold`, below) while one node is killed for 5-20 s at a time, or cut off from the others for 5-15 s.
+`hold-kill` and `hold-partition` are extras too: hold-invoice payments (`--pay-kinds hold`, below) while one node is killed for 5-20 s at a time, or cut off from the others for 5-15 s, with at least 30 s from one fault's end to the next one (`--nemesis-min-gap 30`).
 
 ### Running a run again (`--seed`)
 

@@ -65,7 +65,9 @@
       (testing "faults under fnn's 30 s deadline; closes fail the run"
         (is (< (second (or (:process-duration options) (:partition-duration options))) 30))
         (is (not (:force-close-ok options)))
-        (is (nil? (:force-close-ok-after options)))))))
+        (is (nil? (:force-close-ok-after options))))
+      (testing "and at least 30 s apart, so that two in a row don't add up to an outage over it"
+        (is (= 30 (:nemesis-min-gap options)))))))
 
 (deftest expand
   (testing "a scenario's arguments follow the option, so later ones override them"
