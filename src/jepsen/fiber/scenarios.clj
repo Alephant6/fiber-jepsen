@@ -22,7 +22,9 @@
   pauses, partitions, power losses) run with --force-close-ok-after 30: fnn
   force-closes a channel whose peer hasn't answered for 30 s, and the Fiber
   team expects that (jepsen.fiber.closes). Such closes are reported, not
-  failed; a channel closed any other way still fails the run."
+  failed; a channel closed any other way still fails the run. These runs wait
+  after the quiet period, for up to --channel-settle-timeout seconds, until
+  both ends of a closed channel say so."
   (sorted-map
     "c-01a" {:priority :p0
              :plan     "kill (SIGTERM) A or B at random every 30 to 120 s, then restart"

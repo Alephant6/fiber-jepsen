@@ -35,6 +35,19 @@
   before the outage had lasted the deadline, long after it ended, or for
   another reason. :not-excused lists them, and :not-excused-why says which.
 
+  The rule judges a channel only once every end of it is Closed, and an end
+  can take minutes to get there. The end that force-closes is Closed as soon
+  as its commitment transaction confirms, but fnn notices a counterparty's
+  forced close only in a check every 300 s (jepsen.fiber.channels): until
+  then the other end stays ChannelReady (a node that was down while its peer
+  closed), or ShuttingDown when it force-closed too and its own transaction
+  lost. So with --force-close-ok-after the run waits for the ends to agree
+  before the recovery window, the probe and the final read: the
+  :settle-channels operation, for up to --channel-settle-timeout seconds, and
+  only when a channel needs it. The result has the wait under :settle-wait. A
+  channel one end of which is Closed and another still isn't after that wait
+  is not judged: it stays a problem, and :not-settled lists it.
+
   What an excused channel excuses:
     - its ends' problems (not ready, balances): settlement is on chain, which
       the checker doesn't read;
@@ -44,10 +57,10 @@
       upstream TLC before the downstream one resolves);
     - a probe over it, and a route probe (--probe-routes) when no path of
       channels that are ready at both ends joins its nodes.
-  Everything else fails as before: a channel only one end considers closed, a
-  stuck payment no closed channel explains, a flipped success, a probe that
-  should have got through. The result lists what was closed and what it
-  excused under :force-closed.
+  Everything else fails as before: a channel only one end considers closed
+  (:not-settled), a stuck payment no closed channel explains, a flipped
+  success, a probe that should have got through. The result lists what was
+  closed and what it excused under :force-closed.
 
   --force-close-ok excuses every closed channel, whatever closed it: for the
   scenarios whose point is a close (C-03's expired TLCs, C-11's old state)."
@@ -95,6 +108,28 @@
   (set (for [[id views] ends
              :when (and (seq views) (every? #(= "closed" (fc/state-name %)) (vals views)))]
          id)))
+
+(defn unsettled-ids
+  "Ids of the channels some end of which is Closed while another isn't: it
+  hasn't noticed the close yet, or never will."
+  [ends]
+  (set (for [[id views] ends
+             :let  [closed? #(= "closed" (fc/state-name %))]
+             :when (and (some closed? (vals views)) (not-every? closed? (vals views)))]
+         id)))
+
+(defn settle-wait
+  "What the :settle-channels wait before the final read found
+  (jepsen.fiber.channels/settle!): {:waited-s, :settled?}, with :at-end, the
+  ends still unsettled, when it gave up. nil when the run had no such wait, or
+  every channel was settled when it began."
+  [history]
+  (let [v (->> history
+               (filter #(and (= :ok (:type %)) (= :settle-channels (:f %))))
+               last
+               :value)]
+    (when (and (map? v) (or (:at-start v) (false? (:settled? v))))
+      (select-keys v [:waited-s :settled? :at-end]))))
 
 (defn ready-graph
   "{node #{node ...}}: neighbours over channels ready at both ends."
@@ -405,12 +440,15 @@
   "The fiber checker's result `r`, less what the closed channels explain. With
   `explain` ((fn [id ends]) -> a judgement, see `judge`), only the closed
   channels it excuses are; the others stay problems and are listed under
-  :not-excused, with the judgements under :not-excused-why."
+  :not-excused, with the judgements under :not-excused-why. A channel only
+  some end of which is Closed is not judged either way: it stays a problem,
+  listed under :not-settled."
   ([r initial read]
    (excuse r initial read nil))
   ([r initial read explain]
    (let [ends      (ends initial (:channels read))
          all       (closed-ids ends)
+         unsettled (vec (sort (unsettled-ids ends)))
          why       (into {} (for [id all]
                               [id (if explain
                                     (explain id (vec (sort (keys (get ends id)))))
@@ -429,12 +467,14 @@
                                             (if explain
                                               (tally (map (comp :kind :because why) closed))
                                               (str (count closed))))
-                     (seq unexcused) (assoc :closes-not-excused (tally (map (comp :why why) unexcused))))]
+                     (seq unexcused) (assoc :closes-not-excused (tally (map (comp :why why) unexcused)))
+                     (seq unsettled) (assoc :closes-not-settled (str (count unsettled))))]
      (if (empty? closed)
        (merge r summary
               {:force-closed (cond-> {:channels []}
                                (seq unexcused) (assoc :not-excused unexcused)
-                               why-not         (assoc :not-excused-why why-not))})
+                               why-not         (assoc :not-excused-why why-not)
+                               (seq unsettled) (assoc :not-settled unsettled))})
        (let [held     (set (for [id closed, ch (vals (get ends id)), tlc (fc/live-tlcs ch)]
                              (:payment_hash tlc)))
              graph    (ready-graph ends)
@@ -472,7 +512,8 @@
                                                      :probe-failures      pr-excused}}
                                    reasons          (assoc :because reasons)
                                    (seq unexcused)  (assoc :not-excused unexcused)
-                                   why-not          (assoc :not-excused-why why-not))}))))))
+                                   why-not          (assoc :not-excused-why why-not)
+                                   (seq unsettled)  (assoc :not-settled unsettled))}))))))
 
 (defn checker
   "jepsen.fiber.checker/checker, with closed channels excused as above: every
@@ -489,10 +530,12 @@
        (check [_ test history copts]
          (let [r    (checker/check inner test history copts)
                read (final-read history)
-               rule (when (and after read) (rule test history opts))]
+               rule (when (and after read) (rule test history opts))
+               wait (settle-wait history)]
            (cond-> (if read
                      (excuse r @(:initial-channels test) read (:explain rule))
                      r)
+             wait  (assoc :settle-wait wait)
              after (assoc :force-close-ok-after-s after)
              (and after (:kinds opts)) (assoc :force-close-ok-kinds (vec (sort (:kinds opts))))
              (:logs-not-used rule) (assoc-in [:force-closed :logs-not-used] (:logs-not-used rule)))))))))

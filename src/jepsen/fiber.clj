@@ -194,7 +194,9 @@
                                     (gen/nemesis (:final-generator pkg))
                                     (gen/log "Waiting for the network to converge")
                                     (gen/sleep (:quiesce opts))
-                                    (when (seq (:channel-ops opts))
+                                    ; Fiber notices a counterparty's forced close only every 300 s:
+                                    ; wait for the ends to agree (jepsen.fiber.channels, closes).
+                                    (when (or (seq (:channel-ops opts)) (:force-close-ok-after opts))
                                       (gen/clients (gen/once {:f :settle-channels})))
                                     (availability-window opts streams :pay-recovery :recovery)
                                     (swap/final-generator opts)
@@ -372,9 +374,10 @@
    [nil "--channel-keep N" "With --channel-ops, closes leave at least this many ready channels on each edge."
     :default  1
     :parse-fn parse-long]
-   [nil "--channel-settle-timeout SECONDS" (str "With --channel-ops, how long to wait after the quiet period"
-                                                " for every channel to be ready or closed on both ends. Fiber"
-                                                " checks for a counterparty's force close every 300 s.")
+   [nil "--channel-settle-timeout SECONDS" (str "With --channel-ops or --force-close-ok-after, how long to wait"
+                                                " after the quiet period for every channel to be ready or closed"
+                                                " on both ends. Fiber checks for a counterparty's force close"
+                                                " every 300 s.")
     :default  360
     :parse-fn parse-long]
    [nil "--disconnect-flash MS" (str "With --faults disconnect, make each fault a flash: disconnect a pair"

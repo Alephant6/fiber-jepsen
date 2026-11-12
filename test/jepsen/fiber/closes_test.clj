@@ -6,10 +6,11 @@
                           [topology :as topology]]))
 
 (defn channel
+  "`state` is a state name, or fnn's whole state: {:state_name, :state_flags}."
   ([id local remote] (channel id local remote "ChannelReady" []))
   ([id local remote state tlcs]
    {:channel_id     id
-    :state          {:state_name state}
+    :state          (if (map? state) state {:state_name state})
     :local_balance  (rpc/int->hex local)
     :remote_balance (rpc/int->hex remote)
     :pending_tlcs   tlcs}))
@@ -115,7 +116,9 @@
     (testing "a channel only one end considers closed"
       (let [r (run (ring {["0x23" "n2"] "Closed"} {}) [] all-probes)]
         (is (= false (:valid? r)))
-        (is (= [] (get-in r [:force-closed :channels])))))
+        (is (= [] (get-in r [:force-closed :channels])))
+        (is (= ["0x23"] (get-in r [:force-closed :not-settled])))
+        (is (= "1" (:closes-not-settled r)))))
     (testing "a route probe between nodes still joined by ready channels"
       ; n1 -> n3 can still go through n4.
       (let [r (run (ring closed {}) []
@@ -280,6 +283,76 @@
         (is (= true (:valid? r)))
         (is (= {:kind :partition, :nodes ["n2" "n3"], :seconds 40.0}
                (get-in r [:force-closed :because "0x23"])))))))
+
+(def local
+  "fnn's state for the end that force-closed a channel."
+  {:state_name "Closed", :state_flags "UNCOOPERATIVE_LOCAL|WAITING_ONCHAIN_SETTLEMENT"})
+
+(def remote
+  "fnn's state for the end that saw its counterparty's forced close on chain."
+  {:state_name "Closed", :state_flags "UNCOOPERATIVE_REMOTE"})
+
+(deftest a-close-one-end-has-not-noticed
+  ; n3 is down from 10 s to 45 s, and n2 closes 0x23 on the deadline.
+  (let [kill (concat (nem 10 :kill {"n3" :killed}) (nem 45 :start {"n3" :started}))]
+    (testing "an end still ready, or one whose own forced close lost, isn't Closed: not judged"
+      (doseq [other ["ChannelReady"
+                     {:state_name "ShuttingDown", :state_flags "WAITING_COMMITMENT_CONFIRMATION"}]]
+        (let [r (run-after (ring {["0x23" "n2"] local, ["0x23" "n3"] other} {}) kill)]
+          (is (= false (:valid? r)))
+          (is (= ["0x23"] (get-in r [:force-closed :not-settled])))
+          (is (= "1" (:closes-not-settled r)))
+          (is (= [] (get-in r [:force-closed :channels])))
+          (is (nil? (get-in r [:force-closed :not-excused])))
+          (is (nil? (:closes-not-excused r)))
+          (is (= #{"0x23"} (set (map :channel (:channel-problems r))))))))
+    (testing "once that end is Closed too, the rule judges the channel"
+      (let [r (run-after (ring {["0x23" "n2"] local, ["0x23" "n3"] remote} {}) kill)]
+        (is (= true (:valid? r)))
+        (is (= ["0x23"] (get-in r [:force-closed :channels])))
+        (is (nil? (get-in r [:force-closed :not-settled])))
+        (is (nil? (:closes-not-settled r)))))
+    (testing "an excused channel doesn't excuse another that isn't settled"
+      (let [r (run-after (ring {["0x23" "n2"] local, ["0x23" "n3"] remote
+                                ["0x34" "n4"] local}
+                               {})
+                         kill)]
+        (is (= false (:valid? r)))
+        (is (= ["0x23"] (get-in r [:force-closed :channels])))
+        (is (= ["0x34"] (get-in r [:force-closed :not-settled])))
+        (is (= #{"0x34"} (set (map :channel (:channel-problems r)))))))))
+
+(deftest unsettled-ids
+  (let [ids #(closes/unsettled-ids (closes/ends (ring) (ring % {})))]
+    (is (= #{} (ids {})))
+    (is (= #{"0x23"} (ids {["0x23" "n2"] local})))
+    (is (= #{} (ids {["0x23" "n2"] local, ["0x23" "n3"] remote})))
+    (testing "ends between ready and closed aren't a close yet"
+      (is (= #{} (ids {["0x23" "n2"] "ShuttingDown", ["0x23" "n3"] "ShuttingDown"}))))))
+
+(deftest settle-wait
+  (let [closed  (ring {["0x23" "n2"] local, ["0x23" "n3"] remote} {})
+        kill    (concat (nem 10 :kill {"n3" :killed}) (nem 45 :start {"n3" :started}))
+        between [{:channel "0x23", :node "n3", :state {:state_name "ChannelReady"}}]
+        settle  (fn [value] [{:type :invoke, :f :settle-channels, :time (long 150e9)}
+                             {:type :ok, :f :settle-channels, :value value, :time (long 190e9)}])]
+    (testing "the wait for the ends to agree is in the result"
+      (let [r (run-after closed (concat kill (settle {:waited-s 40, :settled? true
+                                                      :at-start {:between [], :disagree between}})))]
+        (is (= true (:valid? r)))
+        (is (= {:waited-s 40, :settled? true} (:settle-wait r)))))
+    (testing "and so is what it gave up on"
+      (let [r (run-after (ring {["0x23" "n2"] local} {})
+                         (concat kill (settle {:waited-s 360, :settled? false
+                                               :at-start {:between [], :disagree between}
+                                               :at-end   {:between [], :disagree between}})))]
+        (is (= false (:valid? r)))
+        (is (= {:waited-s 360, :settled? false, :at-end {:between [], :disagree between}}
+               (:settle-wait r)))
+        (is (= ["0x23"] (get-in r [:force-closed :not-settled])))))
+    (testing "but not a wait that found nothing to wait for, nor a run without one"
+      (is (nil? (:settle-wait (run-after closed (concat kill (settle {:waited-s 0, :settled? true}))))))
+      (is (nil? (:settle-wait (run-after closed kill)))))))
 
 (deftest log-closes
   (let [lines [(str (at 1) "  INFO fnn: Starting node with git version abc")
