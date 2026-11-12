@@ -484,3 +484,108 @@
                                               %)
                                            all-probes)))))
     (is (nil? (:closes-excused (run (ring) [] all-probes))))))
+
+;; Availability after an excused close
+
+(defn- pays
+  "`n` payments from `from` to `to` in `window`, each completing as `type`,
+  starting at second `t`."
+  [window from to n type t]
+  (mapcat (fn [i]
+            (let [op {:f :pay, :process (+ 100 i), :window window, :value {:id (+ (* 1000 t) i)}}]
+              [(assoc op :type :invoke, :time (long (* (+ t (* 0.1 i)) 1e9)))
+               (cond-> (-> op
+                           (assoc :type type, :time (long (* (+ t 0.05 (* 0.1 i)) 1e9)))
+                           (update :value assoc :from from, :to to))
+                 (not= :ok type) (assoc :error "Failed to build route"))]))
+          (range n)))
+
+(defn- line
+  "The setup channels of a line n1 - n2 - n3: {node [channel ...]}."
+  []
+  {"n1" [(channel "0x12" 1 1)]
+   "n2" [(channel "0x12" 1 1) (channel "0x23" 1 1)]
+   "n3" [(channel "0x23" 1 1)]})
+
+(defn- windows
+  "The two windows' payments of `history`, as closes/availability takes them."
+  [history]
+  [(#'jepsen.fiber.checker/window-pays history :baseline)
+   (#'jepsen.fiber.checker/window-pays history :recovery)])
+
+(deftest setup-graph
+  (is (= {"n1" #{"n2"}, "n2" #{"n1" "n3"}, "n3" #{"n2"}} (closes/setup-graph (line) #{})))
+  (is (= {"n2" #{"n3"}, "n3" #{"n2"}} (closes/setup-graph (line) #{"0x12"})))
+  (is (= {} (closes/setup-graph (line) #{"0x12" "0x23"}))))
+
+(deftest availability-after-an-excused-close
+  (let [before (concat (pays :baseline "n1" "n3" 10 :ok 0)
+                       (pays :baseline "n3" "n1" 10 :ok 2)
+                       (pays :baseline "n2" "n3" 10 :ok 4))
+        after  (fn [type] (concat (pays :recovery "n1" "n3" 10 :fail 100)
+                                  (pays :recovery "n3" "n1" 10 :fail 102)
+                                  (pays :recovery "n2" "n3" 10 type 104)))
+        verdict (fn [cut history]
+                  (let [[b r] (windows history)]
+                    (closes/availability 5 (line) cut b r)))]
+    (testing "the pairs an excused close cut off are left out of both windows"
+      (let [r (verdict #{"0x12"} (concat before (after :ok)))]
+        (is (= true (:valid? r)))
+        (is (= "100.0% -> 100.0%" (:success-rates r)))
+        (is (= 10 (get-in r [:baseline :payments]) (get-in r [:recovery :payments])))
+        (is (= {["n1" "n3"] {:baseline 10, :recovery 10}
+                ["n3" "n1"] {:baseline 10, :recovery 10}}
+               (:cut-off r)))))
+    (testing "a pair that still has a path is judged as ever"
+      (let [r (verdict #{"0x12"} (concat before (after :fail)))]
+        (is (= false (:valid? r)))
+        (is (= "100.0% -> 0.0%" (:success-rates r)))))
+    (testing "without an excused close nothing is left out"
+      (let [r (verdict #{} (concat before (after :ok)))]
+        (is (= false (:valid? r)))
+        (is (= 30 (get-in r [:recovery :payments])))
+        (is (nil? (:cut-off r)))))
+    (testing "every pair cut off: nothing to compare"
+      (let [r (verdict #{"0x12" "0x23"} (concat before (after :fail)))]
+        (is (= true (:valid? r)))
+        (is (= true (:nothing-to-compare r)))
+        (is (= 0 (get-in r [:recovery :payments])))
+        (is (= 3 (count (:cut-off r))))))
+    (testing "too few payments left to compare is unknown, as in the plain check"
+      (let [r (verdict #{"0x12"} (concat before
+                                         (pays :recovery "n1" "n3" 10 :fail 100)
+                                         (pays :recovery "n2" "n3" 3 :ok 104)))]
+        (is (= :unknown (:valid? r)))
+        (is (nil? (:nothing-to-compare r)))))))
+
+(deftest availability-checker
+  (let [closed  [(channel "0x12" 1 1 "Closed" [])]
+        initial {"n1" [(channel "0x12" 1 1)], "n2" [(channel "0x12" 1 1)]}
+        check   (fn [chk kill-s final]
+                  (checker/check chk
+                                 {:nodes ["n1" "n2"], :initial-channels (atom initial)}
+                                 (concat (pays :baseline "n1" "n2" 20 :ok 0)
+                                         (nem 10 :kill {"n2" :killed})
+                                         (nem (+ 10 kill-s) :start {"n2" :started})
+                                         (pays :recovery "n1" "n2" 20 :fail 100)
+                                         [{:type :ok, :f :read, :time (long 201e9)
+                                           :value {:channels final, :payments []}}])
+                                 {}))
+        ends    {"n1" closed, "n2" closed}]
+    (testing "the only channel closed after a kill past the deadline: nothing to compare"
+      (let [r (check (closes/availability-checker 5 30) 35 ends)]
+        (is (= true (:valid? r)))
+        (is (= true (:nothing-to-compare r)))
+        (is (= 1 (:excused-closes r)))
+        (is (= {["n1" "n2"] {:baseline 20, :recovery 20}} (:cut-off r)))))
+    (testing "a close the rule doesn't excuse leaves the check as it was"
+      (let [r (check (closes/availability-checker 5 30) 20 ends)]
+        (is (= false (:valid? r)))
+        (is (= "100.0% -> 0.0%" (:success-rates r)))
+        (is (nil? (:cut-off r)))))
+    (testing "--force-close-ok excuses every closed channel"
+      (is (= true (:valid? (check (closes/availability-checker 5) 20 ends)))))
+    (testing "no channel closed: the plain check"
+      (let [r (check (closes/availability-checker 5 30) 35 initial)]
+        (is (= false (:valid? r)))
+        (is (nil? (:excused-closes r)))))))

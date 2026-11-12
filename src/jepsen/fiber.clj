@@ -182,8 +182,20 @@
                                       (:expiry-check opts) (assoc :expiry (expiry/checker))
                                       (:cch opts)         (assoc :swap (swap/checker))
                                       (availability? opts)
-                                      (assoc :availability (fiber-checker/availability-checker
-                                                             (:availability-tolerance opts 5)))))
+                                      (assoc :availability
+                                             (let [tolerance (:availability-tolerance opts 5)]
+                                               ; An excused close takes its channel out of the comparison.
+                                               (cond (:force-close-ok opts)
+                                                     (closes/availability-checker tolerance)
+
+                                                     (:force-close-ok-after opts)
+                                                     (closes/availability-checker
+                                                       tolerance
+                                                       {:seconds (:force-close-ok-after opts)
+                                                        :kinds   (some-> (:force-close-ok-kinds opts) set)})
+
+                                                     :else
+                                                     (fiber-checker/availability-checker tolerance))))))
             ; With --availability-window, a baseline window of payments before the
             ; faults and a recovery window after the network has converged.
             :generator            (gen/phases

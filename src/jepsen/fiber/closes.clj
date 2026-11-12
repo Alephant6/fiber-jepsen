@@ -57,6 +57,9 @@
       upstream TLC before the downstream one resolves);
     - a probe over it, and a route probe (--probe-routes) when no path of
       channels that are ready at both ends joins its nodes.
+    - in the availability check (--availability-window), the payments between
+      nodes that the excused closes left without a path of setup channels: see
+      `availability-checker`.
   Everything else fails as before: a channel only one end considers closed
   (:not-settled), a stuck payment no closed channel explains, a flipped
   success, a probe that should have got through. The result lists what was
@@ -539,3 +542,96 @@
              after (assoc :force-close-ok-after-s after)
              (and after (:kinds opts)) (assoc :force-close-ok-kinds (vec (sort (:kinds opts))))
              (:logs-not-used rule) (assoc-in [:force-closed :logs-not-used] (:logs-not-used rule)))))))))
+
+;; Availability after an excused close
+
+(defn excused-ids
+  "Ids of the closed channels `excuse` excuses: every channel all of whose ends
+  are Closed, or with `explain` only those it gives a reason for."
+  [ends explain]
+  (set (for [id (closed-ids ends)
+             :when (or (nil? explain)
+                       (:excused? (explain id (vec (sort (keys (get ends id)))))))]
+         id)))
+
+(defn setup-graph
+  "{node #{node ...}}: neighbours over the setup channels (`initial`, the
+  channels each node listed after setup), without the channels in `cut`. A
+  channel that isn't ready stays in: only `cut` takes one out."
+  [initial cut]
+  (let [nodes (reduce (fn [m [node chs]]
+                        (reduce #(update %1 (:channel_id %2) (fnil conj #{}) node) m chs))
+                      {}
+                      initial)]
+    (reduce (fn [g [id ns]]
+              (let [[a b] (sort ns)]
+                (if (and b (not (contains? cut id)))
+                  (-> g (update a (fnil conj #{}) b) (update b (fnil conj #{}) a))
+                  g)))
+            {}
+            nodes)))
+
+(defn availability
+  "The availability verdict for a run in which the channels `cut` (ids) were
+  closed and excused. `baseline` and `recovery` are the windows' payments
+  (jepsen.fiber.checker/window-pays).
+
+  An excused close takes a channel away for good. Two nodes that it leaves
+  without a path of setup channels can't pay each other in the recovery
+  window, and that is the close, not a network that failed to recover. So
+  their payments are left out, of the baseline too: the same pairs are
+  compared before and after. :cut-off has those pairs ([from to]) with the
+  payments each window lost. When that leaves the recovery window with no
+  payment at all, there is nothing to compare, and the check passes and says
+  so (:nothing-to-compare). A pair with a path left is judged as ever, and so
+  is a pair whose path needs a channel that is closed but not excused."
+  [tolerance initial cut baseline recovery]
+  (let [graph   (setup-graph initial cut)
+        linked? (memoize (fn [from to] (reachable? graph from to)))
+        ends-of (fn [[_ c]] [(get-in c [:value :from]) (get-in c [:value :to])])
+        keep?   (fn [pair]
+                  (let [[from to] (ends-of pair)]
+                    (or (nil? from) (nil? to) (linked? from to))))
+        lost    (fn [pairs] (frequencies (map ends-of (remove keep? pairs))))
+        b-lost  (lost baseline)
+        r-lost  (lost recovery)
+        kept    (filterv keep? recovery)
+        r       (fc/availability tolerance
+                                 (fc/window-stats (filterv keep? baseline))
+                                 (fc/window-stats kept))]
+    (cond-> r
+      (or (seq b-lost) (seq r-lost))
+      (assoc :cut-off (into (sorted-map)
+                            (for [pair (set (concat (keys b-lost) (keys r-lost)))]
+                              [pair {:baseline (get b-lost pair 0)
+                                     :recovery (get r-lost pair 0)}])))
+
+      (and (seq recovery) (empty? kept))
+      (assoc :valid? true, :nothing-to-compare true))))
+
+(defn availability-checker
+  "jepsen.fiber.checker/availability-checker for a run that excuses closed
+  channels: with every closed channel excused (--force-close-ok), or with a
+  deadline or `rule`'s options (--force-close-ok-after) only those the rule
+  excuses. See `availability`. A run without an excused close gets the plain
+  check."
+  ([tolerance]
+   (availability-checker tolerance nil))
+  ([tolerance opts]
+   (let [opts  (if (number? opts) {:seconds opts} opts)
+         after (:seconds opts)]
+     (reify checker/Checker
+       (check [_ test history _copts]
+         (let [baseline (fc/window-pays history :baseline)
+               recovery (fc/window-pays history :recovery)
+               read     (final-read history)
+               initial  (some-> (:initial-channels test) deref)
+               rule     (when (and after read) (rule test history opts))
+               cut      (when (and read initial)
+                          (excused-ids (ends initial (:channels read)) (:explain rule)))]
+           (if (seq cut)
+             (assoc (availability tolerance initial cut baseline recovery)
+                    :excused-closes (count cut))
+             (fc/availability tolerance
+                              (fc/window-stats baseline)
+                              (fc/window-stats recovery)))))))))
