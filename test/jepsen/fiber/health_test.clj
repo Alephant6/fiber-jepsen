@@ -169,7 +169,11 @@
         nem    (health/compose faults)]
     (testing "fault ops still reach the faults' nemesis, which needn't support Reflection"
       (is (= :faulted (:value (n/invoke! nem {} {:f :kill}))))
-      (is (= :faulted (:value (n/invoke! (n/setup! nem {}) {} {:f :start-partition})))))))
+      (is (= :faulted (:value (n/invoke! (n/setup! nem {}) {} {:f :start-partition})))))
+    (testing "every completion carries the control node's wall clock, before and after setup"
+      (let [before (System/currentTimeMillis)]
+        (doseq [nem [nem (n/setup! nem {})]]
+          (is (<= before (:wall-ms (n/invoke! nem {} {:f :kill})) (System/currentTimeMillis))))))))
 
 (deftest pidfile
   (testing "the health sample reads the pidfile jepsen.fiber.db writes"

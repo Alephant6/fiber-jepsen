@@ -61,7 +61,7 @@
       (is (= 30 (:nemesis-interval options)))
       (is (= 60 (:time-limit options))))
     (is (= ["--rate" "9" "--scenario=c-08" "--faults" "pause" "--nemesis-interval" "30"
-            "--time-limit" "300" "--ledger"]
+            "--nemesis-min-gap" "30" "--time-limit" "300" "--ledger" "--force-close-ok-after" "30"]
            (scenarios/expand ["--rate" "9" "--scenario=c-08"]))))
   (testing "other arguments pass through"
     (is (= ["test" "--faults" "kill"] (scenarios/expand ["test" "--faults" "kill"]))))
@@ -76,6 +76,27 @@
       (is (empty? errors))
       (is (= [:power] (:faults options)))
       (is (= sync (:store-sync-writes options))))))
+
+(deftest force-close-rule
+  (let [opts (into {} (for [[name _] scenarios/scenarios]
+                        [name (:options (parse ["--scenario" name]))]))]
+    (testing "the scenarios whose faults can outlast fnn's 30 s peer deadline excuse the closes it explains"
+      (is (= #{"c-01a" "c-01b" "c-02a" "c-02b" "c-04" "c-06" "c-08" "power-sync-off" "power-sync-on"}
+             (set (for [[name o] opts :when (= 30 (:force-close-ok-after o))] name)))))
+    (testing "those with short kills, pauses or power losses space them, so that two in a row can't add up to an outage over the deadline; c-06's partitions each outlast it"
+      (is (= #{"c-01a" "c-01b" "c-02a" "c-02b" "c-04" "c-08" "power-sync-off" "power-sync-on"}
+             (set (for [[name o] opts
+                        :when (and (= 30 (:force-close-ok-after o)) (= 30 (:nemesis-min-gap o)))]
+                    name))))
+      (is (zero? (:nemesis-min-gap (opts "c-06")))))
+    (testing "the scenarios whose point is a close excuse every one"
+      (is (= #{"c-03" "c-11"} (set (for [[name o] opts :when (:force-close-ok o)] name)))))
+    (testing "every kind of outage counts unless a scenario says otherwise"
+      (is (every? (comp nil? :force-close-ok-kinds) (vals opts)))
+      (is (= [:pause :partition]
+             (:force-close-ok-kinds (:options (parse ["--scenario" "c-06" "--force-close-ok-kinds"
+                                                      "pause,partition"])))))
+      (is (seq (:errors (parse ["--force-close-ok-kinds" "pause,clock"])))))))
 
 (deftest ledger-coverage
   (testing "every scenario checks the ledger, except where on-chain closes or swaps move the balances"

@@ -44,12 +44,16 @@ def valid(r):
 
 
 def outcome(rs):
-    """A scenario's cell: how many of its runs were valid."""
+    """A scenario's cell: how many of its runs were valid, and in how many of
+    the valid ones --force-close-ok-after excused a closed channel (the runs'
+    channels field then says `closes excused N: kind n, ...`), so that an
+    expected close stays in sight."""
     if not rs:
         return "no runs (the job failed before its first run)"
     n = sum(valid(r) for r in rs)
     mark = "✅" if n == len(rs) else ("❌" if n == 0 else "◐")
-    return f"{mark} {n} of {len(rs)} valid"
+    excused = sum(valid(r) and "closes excused" in r["channels"] for r in rs)
+    return f"{mark} {n} of {len(rs)} valid" + (f" ({excused} with excused closes)" if excused else "")
 
 
 def failed_checks(rs):

@@ -164,7 +164,9 @@
                                                                                         (closes/checker)
 
                                                                                         (:force-close-ok-after opts)
-                                                                                        (closes/checker (:force-close-ok-after opts))
+                                                                                        (closes/checker
+                                                                                          {:seconds (:force-close-ok-after opts)
+                                                                                           :kinds   (some-> (:force-close-ok-kinds opts) set)})
 
                                                                                         :else
                                                                                         (fiber-checker/checker))
@@ -180,8 +182,20 @@
                                       (:expiry-check opts) (assoc :expiry (expiry/checker))
                                       (:cch opts)         (assoc :swap (swap/checker))
                                       (availability? opts)
-                                      (assoc :availability (fiber-checker/availability-checker
-                                                             (:availability-tolerance opts 5)))))
+                                      (assoc :availability
+                                             (let [tolerance (:availability-tolerance opts 5)]
+                                               ; An excused close takes its channel out of the comparison.
+                                               (cond (:force-close-ok opts)
+                                                     (closes/availability-checker tolerance)
+
+                                                     (:force-close-ok-after opts)
+                                                     (closes/availability-checker
+                                                       tolerance
+                                                       {:seconds (:force-close-ok-after opts)
+                                                        :kinds   (some-> (:force-close-ok-kinds opts) set)})
+
+                                                     :else
+                                                     (fiber-checker/availability-checker tolerance))))))
             ; With --availability-window, a baseline window of payments before the
             ; faults and a recovery window after the network has converged.
             :generator            (gen/phases
@@ -192,7 +206,9 @@
                                     (gen/nemesis (:final-generator pkg))
                                     (gen/log "Waiting for the network to converge")
                                     (gen/sleep (:quiesce opts))
-                                    (when (seq (:channel-ops opts))
+                                    ; Fiber notices a counterparty's forced close only every 300 s:
+                                    ; wait for the ends to agree (jepsen.fiber.channels, closes).
+                                    (when (or (seq (:channel-ops opts)) (:force-close-ok-after opts))
                                       (gen/clients (gen/once {:f :settle-channels})))
                                     (availability-window opts streams :pay-recovery :recovery)
                                     (swap/final-generator opts)
@@ -259,6 +275,16 @@
    [nil "--nemesis-interval SECONDS" "Seconds between fault operations."
     :default  15
     :parse-fn parse-long]
+   [nil "--nemesis-min-gap SECONDS"
+    (str "At least this many seconds between the end of a kill, pause, power loss or partition"
+         " and the start of the fault's next one. The gaps average --nemesis-interval and can be"
+         " a fraction of a second, so two faults in a row can keep a node or a link away for as"
+         " long as one longer fault. 0 leaves the gaps as drawn. Each fault paces itself: two"
+         " faults in one test can still follow each other closely. With --faults kill,pause and"
+         " no --process-duration, kills and pauses overlap and the option does nothing.")
+    :default  0
+    :parse-fn parse-long
+    :validate [#(and % (<= 0 %)) "Must be 0 or more"]]
    [nil "--quiesce SECONDS" "Seconds to wait after healing before the final read."
     :default  30
     :parse-fn parse-long]
@@ -370,9 +396,10 @@
    [nil "--channel-keep N" "With --channel-ops, closes leave at least this many ready channels on each edge."
     :default  1
     :parse-fn parse-long]
-   [nil "--channel-settle-timeout SECONDS" (str "With --channel-ops, how long to wait after the quiet period"
-                                                " for every channel to be ready or closed on both ends. Fiber"
-                                                " checks for a counterparty's force close every 300 s.")
+   [nil "--channel-settle-timeout SECONDS" (str "With --channel-ops or --force-close-ok-after, how long to wait"
+                                                " after the quiet period for every channel to be ready or closed"
+                                                " on both ends. Fiber checks for a counterparty's force close"
+                                                " every 300 s.")
     :default  360
     :parse-fn parse-long]
    [nil "--disconnect-flash MS" (str "With --faults disconnect, make each fault a flash: disconnect a pair"
@@ -492,16 +519,22 @@
                         " node's payments in the final read.")]
    [nil "--probe-routes" (str "After healing, also pay from every node to every node it has no"
                               " channel with, so that the probe tests multi-hop routing.")]
-   [nil "--force-close-ok" (str "Don't fail the run for channels that ended closed, nor for what"
-                                " they explain (open question 1 on the chaos-test plan: a pause or"
-                                " partition over 30 s force-closes channels). They are reported.")]
+   [nil "--force-close-ok" (str "Don't fail the run for channels that ended closed, whatever"
+                                " closed them, nor for what they explain. They are reported.")]
    [nil "--force-close-ok-after SECONDS"
-    (str "Like --force-close-ok, but only for a channel one of whose ends was killed or paused,"
-         " or whose ends a partition cut apart, for longer than SECONDS during the run (fnn's"
-         " peer deadline is 30 s): open question 1 answered \"expected\". A channel closed"
-         " without such a fault still fails the run. --force-close-ok overrides it.")
+    (str "Don't fail the run for a channel that ended closed after an outage of SECONDS or"
+         " longer, less a margin of 5 s (fnn's peer deadline is 30 s): one of its ends was"
+         " killed, paused or powered off, or a partition cut its ends apart, and fnn's logs"
+         " show the close came once the outage had lasted that long, for no other reason than"
+         " the peer's silence. A channel closed otherwise still fails the run. --force-close-ok"
+         " overrides it.")
     :parse-fn parse-long
     :validate [#(and % (pos? %)) "Must be positive"]]
+   [nil "--force-close-ok-kinds KINDS"
+    (str "With --force-close-ok-after, the comma-separated kinds of outage that count: kill,"
+         " pause, partition, power, outage. Default: all of them.")
+    :parse-fn keywords
+    :validate [#(every? closes/kinds %) (str "Must be a subset of " closes/kinds)]]
    [nil "--onchain" (str "After the final read, close every channel and check on chain that each"
                          " party received its last balance plus its reserve, less fees, and that"
                          " every node's wallet changed by what its channels' transactions explain.")]

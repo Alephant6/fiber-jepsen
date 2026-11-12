@@ -15,7 +15,8 @@
   so this rarely makes channels reestablish; the disconnect fault does. A node
   waiting more than 30 s for its peer's reply force-closes the channel (fnn's
   PEER_CHANNEL_RESPONSE_TIMEOUT), so a partition longer than that usually closes
-  the channels across it (open question 1 on the chaos-test plan).
+  the channels across it, which the Fiber team expects
+  (--force-close-ok-after, jepsen.fiber.closes).
 
   Healing deletes the partitions' own rules only (`net`), so that it doesn't
   also end a chain partition that is in effect at the time."
@@ -69,14 +70,17 @@
   and its healing. Without :partition-duration, every fault's gaps. With it
   ([min max] seconds), each partition lasts a whole number of seconds drawn from
   a stream of its own, and the gaps after each healing come from the usual gap
-  stream."
+  stream. Either way, no gap after a healing is shorter than :nemesis-min-gap
+  seconds."
   [streams opts]
   (let [usual (schedule/gaps (schedule/gaps-stream streams :partition) (:nemesis-interval opts))]
-    (if-let [[lo hi] (:partition-duration opts)]
-      (let [^SplittableRandom r (schedule/stream streams :partition-duration)]
-        (interleave (repeatedly #(* 1000000000 (+ lo (.nextInt r (int (inc (- hi lo)))))))
-                    usual))
-      usual)))
+    (schedule/after-recovery-at-least
+      (:nemesis-min-gap opts)
+      (if-let [[lo hi] (:partition-duration opts)]
+        (let [^SplittableRandom r (schedule/stream streams :partition-duration)]
+          (interleave (repeatedly #(* 1000000000 (+ lo (.nextInt r (int (inc (- hi lo)))))))
+                      usual))
+        usual))))
 
 (def partition-rule
   "A rule of jepsen.net/iptables's partitions as `iptables -S INPUT` prints it:

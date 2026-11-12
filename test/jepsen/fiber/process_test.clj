@@ -112,7 +112,27 @@
         (is (every? #{[:kill :start] [:pause :resume]} (map vec (partition 2 fs))))
         (is (= #{:kill :pause} (set (take-nth 2 fs))))
         (is (every? #(<= 5e9 % 15e9) (take-nth 2 gs)))
-        (is (= (take 20 usual) (take-nth 2 (rest gs))))))
+        (is (= (take 20 usual) (take-nth 2 (rest gs))))
+        (testing "and with --nemesis-min-gap the next fault comes no sooner than that after it"
+          (let [g30 (gaps (assoc o :nemesis-min-gap 30))]
+            (is (some #(< % 30e9) (take-nth 2 (rest gs))))
+            (is (= (take-nth 2 gs) (take-nth 2 g30)))
+            (is (= (map #(max (long 30e9) %) (take-nth 2 (rest gs))) (take-nth 2 (rest g30))))))))
+    (testing "without --process-duration, --nemesis-min-gap spaces a fault that is in use alone"
+      (let [alone (assoc opts :faults [:kill])
+            g     (gaps alone)
+            g30   (gaps (assoc alone :nemesis-min-gap 30))]
+        (is (= usual g))
+        (is (every? #{[:kill :start]} (map vec (partition 2 (map :f (ops alone))))))
+        (is (some #(< % 30e9) (take-nth 2 (rest g))))
+        (testing "a kill lasts the gap drawn for it; the node is back at least 30 s before the next one"
+          (is (= (take-nth 2 g) (take-nth 2 g30)))
+          (is (= (map #(max (long 30e9) %) (take-nth 2 (rest g))) (take-nth 2 (rest g30)))))
+        (testing "kills and pauses together overlap, so nothing changes"
+          (is (= usual (gaps (assoc opts :nemesis-min-gap 30)))))))
     (testing "the option parses"
       (is (= [5 15] (:process-duration (:options (cli/parse-opts ["--process-duration" "5-15"] fiber/cli-opts)))))
-      (is (seq (:errors (cli/parse-opts ["--process-duration" "15-5"] fiber/cli-opts)))))))
+      (is (seq (:errors (cli/parse-opts ["--process-duration" "15-5"] fiber/cli-opts))))
+      (is (= 0 (:nemesis-min-gap (:options (cli/parse-opts [] fiber/cli-opts)))))
+      (is (= 30 (:nemesis-min-gap (:options (cli/parse-opts ["--nemesis-min-gap" "30"] fiber/cli-opts)))))
+      (is (seq (:errors (cli/parse-opts ["--nemesis-min-gap" "-1"] fiber/cli-opts)))))))

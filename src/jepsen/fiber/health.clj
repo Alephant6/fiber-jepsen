@@ -155,12 +155,24 @@
 
     (teardown! [_ _test])))
 
+(defn stamped
+  "`nemesis`, with the control node's wall clock on every completion: :wall-ms,
+  in ms since the epoch. An op's :time counts from the start of the run, and
+  fnn's log lines carry wall-clock timestamps; this is what places one in the
+  other (jepsen.fiber.closes)."
+  [nemesis]
+  (reify n/Nemesis
+    (setup! [_ test] (stamped (n/setup! nemesis test)))
+    (invoke! [_ test op] (assoc (n/invoke! nemesis test op) :wall-ms (System/currentTimeMillis)))
+    (teardown! [_ test] (n/teardown! nemesis test))))
+
 (defn compose
-  "The faults' nemesis and the health nemesis, as one. The faults' nemesis gets
-  every op but :health, so it needn't support Reflection."
+  "The faults' nemesis and the health nemesis, as one, with every completion
+  `stamped`. The faults' nemesis gets every op but :health, so it needn't
+  support Reflection."
   [faults-nemesis]
-  (n/compose {#{:health}                  (nemesis)
-              #(when-not (= :health %) %) faults-nemesis}))
+  (stamped (n/compose {#{:health}                  (nemesis)
+                       #(when-not (= :health %) %) faults-nemesis})))
 
 (def final-sample
   "The op that samples every node after healing."

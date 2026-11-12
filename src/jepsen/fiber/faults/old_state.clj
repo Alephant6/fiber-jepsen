@@ -666,8 +666,8 @@
           :else
           (recur more began saves out))))))
 
-;; Not closes/final-read: jepsen.fiber.closes loads jepsen.fiber.faults, which
-;; loads this namespace.
+;; As jepsen.fiber.closes/final-read; a fault's namespace doesn't load that
+;; checker.
 (defn- final-read
   "The value of the last :ok :read in `history`."
   [history]

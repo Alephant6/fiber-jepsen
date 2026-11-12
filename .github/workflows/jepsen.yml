@@ -282,6 +282,15 @@ jobs:
               else probe="failed"; fi
               # pprint may put the map on the line after its key.
               channels="$(tr '\n' ' ' <"$log" | grep -oE ':channel-summary +\{[^}]*\}' | tail -1 | sed -E 's/:channel-summary +//' | tr -s ' ' || true)"
+              # With --force-close-ok-after: the closed channels the rule excused, by
+              # kind of outage, those it didn't, by why not, and the channels only
+              # one end of which had closed by the final read.
+              excused="$(tr '\n' ' ' <"$log" | grep -oE ':closes-excused +"[^"]*"' | tail -1 | sed -E 's/^:closes-excused +"//; s/"$//' || true)"
+              unexcused="$(tr '\n' ' ' <"$log" | grep -oE ':closes-not-excused +"[^"]*"' | tail -1 | sed -E 's/^:closes-not-excused +"//; s/"$//' || true)"
+              unsettled="$(tr '\n' ' ' <"$log" | grep -oE ':closes-not-settled +"[^"]*"' | tail -1 | sed -E 's/^:closes-not-settled +"//; s/"$//' || true)"
+              [ -z "$excused" ] || channels="${channels:+$channels; }closes excused ${excused}"
+              [ -z "$unexcused" ] || channels="${channels:+$channels; }closes not excused ${unexcused}"
+              [ -z "$unsettled" ] || channels="${channels:+$channels; }closes not settled ${unsettled}"
               # With --availability-window: the baseline's success rate, then the recovery's.
               rates="$(tr '\n' ' ' <"$log" | grep -oE ':success-rates +"[^"]*"' | tail -1 | sed -E 's/^:success-rates +"//; s/"$//; s/->/→/' || true)"
               failed="$(awk -F'\t' -v d="/jepsen/store/$store" '$1 == d { print $2 }' verdicts.txt 2>/dev/null || true)"

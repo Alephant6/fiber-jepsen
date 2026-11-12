@@ -16,42 +16,62 @@
             :differs   where this suite departs from the plan
             :compose   optional: the docker/docker-compose.NAME.yml file the
                        scenario needs, which scripts/run.sh adds with --compose}
-  A scenario is listed once the suite covers it. Keep the names in order."
+  A scenario is listed once the suite covers it. Keep the names in order.
+
+  The scenarios whose faults can keep a node silent for more than 30 s (kills,
+  pauses, partitions, power losses) run with --force-close-ok-after 30: fnn
+  force-closes a channel whose peer hasn't answered for 30 s, and the Fiber
+  team expects that (jepsen.fiber.closes). Such closes are reported, not
+  failed; a channel closed any other way still fails the run. These runs wait
+  after the quiet period, for up to --channel-settle-timeout seconds, until
+  both ends of a closed channel say so."
   (sorted-map
     "c-01a" {:priority :p0
              :plan     "kill (SIGTERM) A or B at random every 30 to 120 s, then restart"
              :args     ["--nodes" "n1,n2" "--faults" "kill" "--kill-signal" "term"
-                        "--kill-targets" "one" "--nemesis-interval" "20" "--time-limit" "300"
-                        "--availability-window" "30" "--ledger"]
+                        "--kill-targets" "one" "--nemesis-interval" "20" "--nemesis-min-gap" "30"
+                        "--time-limit" "300" "--availability-window" "30" "--ledger"
+                        "--force-close-ok-after" "30"]
              :differs  (str "A-B as in the plan: --nodes n1,n2 opens one channel (the cluster's"
                             " n3 stays idle). A kill comes every two gaps, the restart one gap"
-                            " after it; gaps are exponential with a 20 s mean, capped at 100 s, so"
-                            " kills come about every 40 s rather than uniformly every 30-120 s, and"
-                            " most restarts come within 30 s, past which the peer force-closes the"
-                            " channel (open question 1 to the team). fnn must exit within"
-                            " --term-grace, 30 s.")}
+                            " after it; gaps are exponential with a 20 s mean, capped at 100 s, and"
+                            " the gap after a restart is at least 30 s (--nemesis-min-gap 30),"
+                            " since two short kills in a row can add up to an outage longer than"
+                            " the deadline. So kills come about every 55 s rather than uniformly"
+                            " every 30-120 s, and most restarts come within 30 s. Past that the"
+                            " peer's deadline force-closes the channel, which is excused and reported"
+                            " (--force-close-ok-after 30). fnn must exit within --term-grace, 30 s.")}
     "c-01b" {:priority :p0
              :plan     "kill -9 (SIGKILL) A or B at random every 30 to 120 s, then restart"
              :args     ["--faults" "kill" "--kill-targets" "one" "--nemesis-interval" "75"
-                        "--time-limit" "300" "--ledger"]
+                        "--nemesis-min-gap" "30" "--time-limit" "300" "--ledger"
+                        "--force-close-ok-after" "30"]
              :differs  (str "Three nodes in a line rather than A-B. The gap between a kill and"
                             " the restart, and between restarts and kills, is exponential with a"
-                            " 75 s mean, capped at 100 s, rather than uniform over 30-120 s.")}
+                            " 75 s mean, capped at 100 s, rather than uniform over 30-120 s, and a"
+                            " kill comes at least 30 s after the last restart"
+                            " (--nemesis-min-gap 30). Most"
+                            " restarts come after the peers' 30 s deadline, which force-closes the"
+                            " channels with an update in flight; those closes are excused and"
+                            " reported (--force-close-ok-after 30).")}
     "c-02a" {:priority :p0
              :plan     "kill (SIGTERM) the middle node B of A-B-C during multi-hop invoice payments, then restart"
              :args     ["--faults" "kill" "--kill-signal" "term" "--kill-targets" "middle"
-                        "--pay-kinds" "invoice" "--nemesis-interval" "20" "--time-limit" "300"
-                        "--availability-window" "30" "--ledger"]
+                        "--pay-kinds" "invoice" "--nemesis-interval" "20" "--nemesis-min-gap" "30"
+                        "--time-limit" "300" "--availability-window" "30" "--ledger"
+                        "--force-close-ok-after" "30"]
              :differs  (str "Payments go between any two of the three nodes, so only those between"
-                            " n1 and n3 cross the middle node, about a third. Kill and restart gaps"
-                            " as in c-01a. fnn must exit within --term-grace, 30 s.")}
+                            " n1 and n3 cross the middle node, about a third. Kill and restart gaps,"
+                            " and the closes excused, as in c-01a. fnn must exit within --term-grace,"
+                            " 30 s.")}
     "c-02b" {:priority :p0
              :plan     "kill -9 (SIGKILL) the middle node B of A-B-C during multi-hop invoice payments, then restart"
              :args     ["--faults" "kill" "--kill-signal" "kill" "--kill-targets" "middle"
-                        "--pay-kinds" "invoice" "--nemesis-interval" "20" "--time-limit" "300"
-                        "--availability-window" "30" "--ledger"]
+                        "--pay-kinds" "invoice" "--nemesis-interval" "20" "--nemesis-min-gap" "30"
+                        "--time-limit" "300" "--availability-window" "30" "--ledger"
+                        "--force-close-ok-after" "30"]
              :differs  (str "As c-02a: about a third of the payments cross the middle node, and the"
-                            " kill and restart gaps are those of c-01a.")}
+                            " kill and restart gaps, and the closes excused, are those of c-01a.")}
     "c-03"  {:priority :p0
              :plan     (str "A-B-C, multi-hop payments. B is down longer than the TLC expiry. The"
                             " upstream node eventually recovers the funds, and the payment is Failed.")
@@ -74,8 +94,8 @@
                             " n2 is down, every fnn's clock and the CKB node's jump 9.5 hours"
                             " forward, and n2 restarts with the new time. The"
                             " neighbours force-close the channels whose TLCs expired, so closed"
-                            " channels are expected and --force-close-ok excuses them (this is not"
-                            " open question 1). A node sees that its counterparty force-closed a"
+                            " channels are expected and --force-close-ok excuses them (they close"
+                            " for the expiry, not for the peer deadline). A node sees that its counterparty force-closed a"
                             " channel only in a check every 300 s (CHECK_CHANNELS_SHUTDOWN_INTERVAL),"
                             " so the quiesce lasts 330 s, for the restarted n2 to see the closes. After settling, --expiry-check wants every payment"
                             " Success or Failed and every payer's Failed TLC back on chain;"
@@ -84,20 +104,23 @@
              :plan     (str "4-6 node mesh, mixed payments. Random nodes restarted again and"
                             " again. Once all recover, the success rate is back to baseline.")
              :args     ["--nodes" "n1,n2,n3,n4,n5,n6" "--topology" "mesh" "--faults" "kill"
-                        "--kill-targets" "one" "--nemesis-interval" "30" "--time-limit" "300"
-                        "--pay-kinds" "keysend,invoice" "--availability-window" "60"
-                        "--quiesce" "60" "--probe-routes" "--ledger"]
+                        "--kill-targets" "one" "--nemesis-interval" "30" "--nemesis-min-gap" "30"
+                        "--time-limit" "300" "--pay-kinds" "keysend,invoice"
+                        "--availability-window" "60"
+                        "--quiesce" "60" "--probe-routes" "--ledger" "--force-close-ok-after" "30"]
              :differs  (str "Six nodes, each with channels to three others (the ring and its"
                             " diameters), as in c-06. A kill (SIGKILL) takes one node drawn"
                             " uniformly; the gap between a kill and the restart, and between a"
                             " restart and the next kill, is exponential with a 30 s mean, capped"
-                            " at 100 s. Baseline and recovery are 60 s of payments each, before"
+                            " at 100 s; a kill comes at least 30 s after the last restart"
+                            " (--nemesis-min-gap 30), since two short kills in a row can add up"
+                            " to an outage longer than the deadline. Baseline and recovery are 60 s of payments each, before"
                             " the first kill and after healing and --quiesce; the recovery's"
                             " success rate may be at most --availability-tolerance (5) points"
                             " below the baseline's. Each payment is a keysend or an invoice"
-                            " payment, drawn uniformly, in all three windows. A channel that ends"
-                            " force-closed fails the run; add --force-close-ok to excuse it (open"
-                            " question 1).")}
+                            " payment, drawn uniformly, in all three windows. A channel force-closed"
+                            " once its node had been down for 30 s is excused and reported"
+                            " (--force-close-ok-after 30); one closed otherwise fails the run.")}
     "c-05"  {:priority :p0
              :plan     "flash the network between A and B for 100 ms to 5 s at random, while they pay each other"
              :args     ["--nodes" "n1,n2" "--faults" "disconnect" "--disconnect-flash" "100-5000"
@@ -115,7 +138,7 @@
              :args     ["--nodes" "n1,n2,n3,n4,n5,n6" "--topology" "mesh" "--faults" "partition"
                         "--partition-targets" "half" "--partition-duration" "120-300"
                         "--nemesis-interval" "60" "--time-limit" "600" "--quiesce" "60"
-                        "--probe-routes" "--ledger"]
+                        "--probe-routes" "--ledger" "--force-close-ok-after" "30"]
              :differs  (str "Six nodes, each with channels to three others (the ring and its"
                             " diameters); 6 of the 15 node pairs are two hops apart, the rest"
                             " neighbours, and each payment goes to a node drawn uniformly. Each"
@@ -124,8 +147,9 @@
                             " Routing after healing is a payment between every two nodes without"
                             " a channel, on top of the usual probe of each channel. A partition"
                             " over 30 s force-closes the channels across it that had an update in"
-                            " flight, which fails the run; add --force-close-ok to excuse closed"
-                            " channels and what they explain (open question 1).")}
+                            " flight, which the Fiber team expects: those closes and what they"
+                            " explain are excused and reported (--force-close-ok-after 30). A"
+                            " channel closed otherwise fails the run.")}
     "c-07"  {:priority :p1
              :plan     (str "A-B-C, large MPP payments, tc netem delay of 500 ms-3 s plus 10% loss."
                             " Each MPP payment fully succeeds or fully fails; money is conserved.")
@@ -148,13 +172,18 @@
                             " alternating with healing, each an exponential 30 s on average, capped"
                             " at 100 s. The quiesce, 150 s, outlasts the 120 s a receiver holds an"
                             " incomplete set of parts. A channel that ends force-closed fails the"
-                            " run; add --force-close-ok to excuse it (open question 1).")}
+                            " run: no fault here keeps a node silent for 30 s.")}
     "c-08"  {:priority :p1
              :plan     "SIGSTOP a node for tens of seconds, then resume"
-             :args     ["--faults" "pause" "--nemesis-interval" "30" "--time-limit" "300" "--ledger"]
+             :args     ["--faults" "pause" "--nemesis-interval" "30" "--nemesis-min-gap" "30"
+                        "--time-limit" "300" "--ledger" "--force-close-ok-after" "30"]
              :differs  (str "Three nodes in a line rather than A-B. A pause lasts an exponential"
-                            " 30 s on average, capped at 100 s, so some cross V2's 30 s"
-                            " peer-response deadline.")}
+                            " 30 s on average, capped at 100 s, so some cross fnn's 30 s peer"
+                            " deadline and close a channel, which the Fiber team expects: those"
+                            " closes are excused and reported (--force-close-ok-after 30). A channel"
+                            " closed otherwise fails the run. A pause begins at least 30 s after"
+                            " the last one ended (--nemesis-min-gap 30), since two short pauses"
+                            " in a row can add up to one longer than the deadline.")}
     "c-09"  {:priority :p0
              :plan     (str "Any topology; channels opened and closed continuously; CKB disconnected"
                             " for seconds to minutes. Channels end Ready or Closed, never stuck in"
@@ -274,8 +303,8 @@
                         "--pay-kinds" "keysend,invoice" "--nemesis-interval" "30" "--time-limit" "1200"
                         "--availability-window" "60" "--quiesce" "60" "--probe-routes" "--ledger"
                         "--log-level" "info,fnn::fiber::network=debug"]
-             :differs  (str "The short form: 20 minutes of faults, not hours (the long form and"
-                            " where it runs wait for open questions 4 and 5). Six nodes, each with"
+             :differs  (str "The short form: 20 minutes of faults, not hours (the long form waits"
+                            " for where it will run). Six nodes, each with"
                             " channels to three others (the ring and its diameters), as in c-04 and"
                             " c-06; keysend and invoice payments, drawn uniformly. Nine faults, each"
                             " from its own stream of the seed, so they overlap at random: a kill"
@@ -286,7 +315,7 @@
                             " and a clock jump of 2-10 s either way on one node or all. The gaps"
                             " between faults, and how long the others last, average 30 s, capped at"
                             " 100 s. Kills, pauses and partitions stay under fnn's 30 s peer deadline,"
-                            " so that the run tests what open question 1 doesn't decide; a partition"
+                            " so that no close is expected; a partition"
                             " under 30 s can still close a channel, since TCP's retransmissions back"
                             " off. Clock jumps stay small for the same reason: fnn measures that"
                             " deadline on the wall clock, so a step forward of more than 30 s while a"
@@ -299,38 +328,46 @@
                             " LND hosts. A closed channel fails the run. For the plan's longer"
                             " faults, add --process-duration 30-120 --partition-duration 30-120,"
                             " --clock-jump 60-1800 and --force-close-ok-after 30, which excuses only"
-                            " the closes that a kill, pause or partition over 30 s explains (open"
-                            " question 1 answered \"expected\"); closes after clock steps still fail.")}
+                            " the closes that a kill, pause or partition over 30 s explains; closes"
+                            " after clock steps still fail.")}
     "power-sync-off"
             {:priority :extra
-             :plan     (str "Not in the plan; proposed in a comment on it (open question 3). A node"
+             :plan     (str "Not in the plan; proposed in a comment on it. A node"
                             " loses power: fnn dies, and every store write it didn't fsync is lost."
-                            " Run with fiber.store_sync_writes on and off")
+                            " Run with fiber.store_sync_writes on (the team's reference) and off")
              :compose  "lazyfs"
              :args     ["--faults" "power" "--store-sync-writes" "false" "--rate" "10"
-                        "--nemesis-interval" "20" "--time-limit" "180" "--ledger"]
+                        "--nemesis-interval" "20" "--nemesis-min-gap" "30" "--time-limit" "180"
+                        "--ledger" "--force-close-ok-after" "30"]
              :differs  (str "Unsynced writes, fnn's default: a node can come back with an older"
                             " channel state than its peer's."
                             " fnn's store is on LazyFS (scripts/run.sh --compose lazyfs), which keeps"
                             " writes in a cache of its own until fsync; a power loss SIGKILLs fnn on"
                             " one node or all of them and drops that cache. Needs Fiber from"
                             " 4777d5d6 (#1703): an earlier build ignores the setting, and the power"
-                            " check is then unknown.")}
+                            " check is then unknown. A channel force-closed once its node had been"
+                            " without power for 30 s is excused and reported"
+                            " (--force-close-ok-after 30). A power loss comes at least 30 s"
+                            " after the last one's node is back (--nemesis-min-gap 30).")}
     "power-sync-on"
             {:priority :extra
-             :plan     (str "Not in the plan; proposed in a comment on it (open question 3). A node"
+             :plan     (str "Not in the plan; proposed in a comment on it. A node"
                             " loses power: fnn dies, and every store write it didn't fsync is lost."
-                            " Run with fiber.store_sync_writes on and off")
+                            " Run with fiber.store_sync_writes on (the team's reference) and off")
              :compose  "lazyfs"
              :args     ["--faults" "power" "--store-sync-writes" "true" "--rate" "10"
-                        "--nemesis-interval" "20" "--time-limit" "180" "--ledger"]
+                        "--nemesis-interval" "20" "--nemesis-min-gap" "30" "--time-limit" "180"
+                        "--ledger" "--force-close-ok-after" "30"]
              :differs  (str "Synced writes: every store write waits for the disk, so a node should"
                             " come back with everything it acknowledged."
                             " fnn's store is on LazyFS (scripts/run.sh --compose lazyfs), which keeps"
                             " writes in a cache of its own until fsync; a power loss SIGKILLs fnn on"
                             " one node or all of them and drops that cache. Needs Fiber from"
                             " 4777d5d6 (#1703): an earlier build ignores the setting, and the power"
-                            " check is then unknown.")}))
+                            " check is then unknown. A channel force-closed once its node had been"
+                            " without power for 30 s is excused and reported"
+                            " (--force-close-ok-after 30). A power loss comes at least 30 s"
+                            " after the last one's node is back (--nemesis-min-gap 30).")}))
 
 (defn scenario-args
   "The arguments of scenario `name`. Throws for an unknown name."
