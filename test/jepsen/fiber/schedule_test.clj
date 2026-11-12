@@ -71,6 +71,47 @@
     (is (< 89e9 (:time (last pays))))
     (is (< 400 (count pays)))))
 
+(deftest the-healing-is-due-at-the-limit
+  ; Partitions of 5-15 s, 20 s apart on average, for 60 s, and payments that
+  ; take 45 s each, so every client is busy until 30 s after the limit.
+  (let [opts  (assoc opts :faults [:partition] :partition-duration [5 15]
+                     :nemesis-interval 20 :time-limit 60)
+        heal  {:type :info, :f :heal}
+        slow  #(if (= :pay (:f %)) 45000000000 1000000)
+        run   (fn [window seed]
+                (simulate (gen/phases (window (schedule/streams seed))
+                                      (gen/nemesis {:type :info, :f :next-phase}))
+                          slow))
+        at    (fn [ops f] (:time (first (filter #(= f (:f %)) ops))))
+        cuts  (fn [ops]
+                ; How long each partition lasted, in seconds: until the nemesis's
+                ; next operation, which ends it.
+                (for [[a b] (partition 2 1 (filter #(= :nemesis (:process %)) ops))
+                      :when (= :start-partition (:f a))]
+                  (/ (- (:time b) (:time a)) 1e9)))]
+    (testing "the healing comes at the limit, whatever the clients are doing"
+      (doseq [seed (range 1 31)]
+        (let [ops   (run #(fiber/fault-window opts % [heal]) seed)
+              start (:time (first (filter #(= :nemesis (:process %)) ops)))]
+          (is (<= (+ start 60e9) (at ops :heal) (+ start 60.1e9)) (str "seed " seed))
+          (is (every? #(<= % 15.1) (cuts ops)) (str "seed " seed))
+          (testing "and the next phase still waits for the payments in flight"
+            (is (< (at ops :heal) (at ops :next-phase)))
+            (is (= 1 (count (filter #(= :heal (:f %)) ops))))))))
+    (testing "as a phase of its own, it waited for them, and the last partition lasted on"
+      (let [phased (fn [streams] (gen/phases (fiber/fault-window opts streams)
+                                             (gen/nemesis heal)))
+            long   (for [seed (range 1 31)
+                         c    (cuts (run phased seed))
+                         :when (< 15.1 c)]
+                     c)]
+        (is (seq long))
+        (is (some #(< 30 %) long))))
+    (testing "without faults there is nothing to heal, and the payments keep their limit"
+      (let [ops (run #(fiber/fault-window (assoc opts :faults []) % []) 1)]
+        (is (nil? (at ops :heal)))
+        (is (< 44e9 (:time (last (filter #(= :pay (:f %)) ops))) 60e9))))))
+
 (deftest same-seed-same-operations
   (testing "the same seed draws the same payments and faults"
     (is (= (take 50 (schedule/payments (:pay (schedule/streams 7)) 3))
