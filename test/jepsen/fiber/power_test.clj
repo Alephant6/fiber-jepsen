@@ -20,6 +20,19 @@
     (testing "the seed fixes them"
       (is (= ops (take 60 (power/ops (schedule/stream (schedule/streams 5) :power) opts)))))))
 
+(deftest gaps
+  (let [usual (take 40 (schedule/gaps (schedule/gaps-stream (schedule/streams 5) :power) 20))
+        gaps  #(take 40 ((:gaps power/fault) (schedule/streams 5)
+                                             (merge opts {:nemesis-interval 20} %)))]
+    (testing "every fault's gaps"
+      (is (= usual (gaps {})))
+      (is (= usual (gaps {:nemesis-min-gap 0}))))
+    (testing "with --nemesis-min-gap, a power loss lasts the gap drawn for it and the power is back at least that long"
+      (is (some #(< % 30e9) (take-nth 2 (rest usual))))
+      (is (= (take-nth 2 usual) (take-nth 2 (gaps {:nemesis-min-gap 30}))))
+      (is (= (map #(max (long 30e9) %) (take-nth 2 (rest usual)))
+             (take-nth 2 (rest (gaps {:nemesis-min-gap 30}))))))))
+
 (deftest store
   (is (db/lazyfs-store? {:faults #{:power}}))
   (is (not (db/lazyfs-store? {:faults #{:kill}})))
