@@ -232,8 +232,13 @@
                                           (nem 50 :stop-partition :network-healed)))))))))
 
 (deftest candidates
-  (testing "every spell over the deadline that touched the channel, the longest first"
+  (testing "every spell that reached the deadline and touched the channel, the longest first"
     (is (= [60.0 40.0] (map :seconds ((closes/candidates faults-history 30) ["n1" "n2"])))))
+  (testing "a spell counts from 5 s under the deadline: a peer may have been waiting when it began"
+    (is (= [60.0 40.0] (map :seconds ((closes/candidates faults-history 45) ["n1" "n2"]))))
+    (is (= [60.0] (map :seconds ((closes/candidates faults-history 46) ["n1" "n2"]))))
+    (is (= [] ((closes/candidates faults-history 18) ["n3" "n5"])))       ; n4's pause lasted 13 s
+    (is (= [70.0 13.0] (map :seconds ((closes/candidates faults-history 17) ["n3" "n4"])))))
   (testing "only the kinds that count"
     (is (= [] ((closes/candidates faults-history 30 #{:pause :partition}) ["n1" "n2"])))
     (is (= [:partition] (map :kind ((closes/candidates faults-history 30 #{:pause :partition})
@@ -245,7 +250,8 @@
     (is (= 60.0 (:seconds (why ["n1" "n2"]))))
     (is (= :partition (:kind (why ["n3" "n4"]))))
     (is (nil? (why ["n3" "n5"])))                      ; n4's pause lasted 13 s
-    (is (nil? ((closes/explainer faults-history 70) ["n3" "n4"])))))
+    (is (= 70.0 (:seconds ((closes/explainer faults-history 75) ["n3" "n4"]))))
+    (is (nil? ((closes/explainer faults-history 76) ["n3" "n4"])))))
 
 (defn run-after
   "As `run`, with --force-close-ok-after 30 and `faults` before the final read."

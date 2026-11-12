@@ -11,9 +11,10 @@
   --force-close-ok-after SECONDS excuses a setup channel that ended closed
   (every end of it Closed in the final read) when both of these hold:
 
-    1. An outage touched it for longer than SECONDS (`outages`): one of its
-       ends was killed, paused or powered off, or a partition cut its ends
-       apart. --force-close-ok-kinds says which of these count.
+    1. An outage touched it for SECONDS or longer, less a margin of 5 s
+       (`outages`): one of its ends was killed, paused or powered off, or a
+       partition cut its ends apart. --force-close-ok-kinds says which of
+       these count.
     2. fnn's logs agree, where they can tell (`log-closes`). The first end to
        force-close the channel did so while such an outage had lasted SECONDS
        (less a margin of 5 s), and at most SECONDS plus fnn's channel check
@@ -81,9 +82,11 @@
   #{:kill :pause :partition :power :outage})
 
 (def margin-s
-  "How many seconds before an outage has lasted the deadline a close may come
-  and still be the deadline's: a peer was already waiting for an answer when
-  the fault began (closes came 28 to 30 s after a kill)."
+  "How many seconds short of the deadline an outage may be, and how many
+  seconds before an outage has lasted the deadline a close may come, and
+  still be the deadline's: a peer was already waiting for an answer when the
+  fault began. Closes came 28 to 30 s after a kill, and in the 30th second of
+  a pause that lasted 30.0 s."
   5)
 
 (def check-interval-s
@@ -233,14 +236,14 @@
             (recur more open out)))))))
 
 (defn candidates
-  "(fn [ends]) -> the spells of `outages` longer than `seconds`, of a kind in
-  `kinds` (default: all of them), that touched the channel between the two
-  nodes `ends`; the longest first."
+  "(fn [ends]) -> the spells of `outages` that lasted `seconds` less
+  `margin-s` or longer, of a kind in `kinds` (default: all of them), that
+  touched the channel between the two nodes `ends`; the longest first."
   ([history seconds]
    (candidates history seconds kinds))
   ([history seconds kinds]
    (let [long (->> (outages history)
-                   (filter #(and (kinds (:kind %)) (< seconds (:seconds %))))
+                   (filter #(and (kinds (:kind %)) (<= (- seconds margin-s) (:seconds %))))
                    (sort-by (comp - :seconds))
                    vec)]
      (fn [[a b]]
@@ -249,7 +252,7 @@
                long)))))
 
 (defn explainer
-  "(fn [ends]) -> the longest spell of `outages` over `seconds` that touched
+  "(fn [ends]) -> the longest spell of `outages` that counts (`candidates`) and touched
   the channel between the two nodes `ends`, or nil."
   [history seconds]
   (comp first (candidates history seconds)))

@@ -522,11 +522,12 @@
    [nil "--force-close-ok" (str "Don't fail the run for channels that ended closed, whatever"
                                 " closed them, nor for what they explain. They are reported.")]
    [nil "--force-close-ok-after SECONDS"
-    (str "Don't fail the run for a channel that ended closed after an outage longer than"
-         " SECONDS (fnn's peer deadline is 30 s): one of its ends was killed, paused or powered"
-         " off, or a partition cut its ends apart, and fnn's logs show the close came once the"
-         " outage had lasted that long, for no other reason than the peer's silence. A channel"
-         " closed otherwise still fails the run. --force-close-ok overrides it.")
+    (str "Don't fail the run for a channel that ended closed after an outage of SECONDS or"
+         " longer, less a margin of 5 s (fnn's peer deadline is 30 s): one of its ends was"
+         " killed, paused or powered off, or a partition cut its ends apart, and fnn's logs"
+         " show the close came once the outage had lasted that long, for no other reason than"
+         " the peer's silence. A channel closed otherwise still fails the run. --force-close-ok"
+         " overrides it.")
     :parse-fn parse-long
     :validate [#(and % (pos? %)) "Must be positive"]]
    [nil "--force-close-ok-kinds KINDS"
