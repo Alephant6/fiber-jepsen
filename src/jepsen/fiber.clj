@@ -272,6 +272,16 @@
    [nil "--nemesis-interval SECONDS" "Seconds between fault operations."
     :default  15
     :parse-fn parse-long]
+   [nil "--nemesis-min-gap SECONDS"
+    (str "With --process-duration or --partition-duration, at least this many seconds between"
+         " the end of a kill, pause or partition and the start of the fault's next one. The gaps"
+         " average --nemesis-interval and can be a fraction of a second, so two short faults in"
+         " a row can keep a node or a link away for as long as one long fault. 0 leaves the gaps"
+         " as drawn. Each fault paces itself: two faults in one test can still follow each other"
+         " closely.")
+    :default  0
+    :parse-fn parse-long
+    :validate [#(and % (<= 0 %)) "Must be 0 or more"]]
    [nil "--quiesce SECONDS" "Seconds to wait after healing before the final read."
     :default  30
     :parse-fn parse-long]
