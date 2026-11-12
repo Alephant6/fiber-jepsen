@@ -72,6 +72,7 @@ Why a clock fault: Fiber expires TLCs by wall-clock timestamp (off-chain checks 
   - `channels.clj` (opening and closing channels during the run, with `--channel-ops`)
   - `invoice.clj` (invoice payments, with `--pay-kinds invoice`)
   - `mpp.clj` (multi-part payments and their all-or-nothing check, with `--pay-kinds mpp`)
+  - `udt.clj` (channels and payments in a token instead of CKB, with `--asset udt`)
   - `checker.clj` (invariants)
   - `health.clj` (process health: panics, and a sample of every node after healing)
   - `ledger.clj` (per-node money check, with `--ledger`)
@@ -137,6 +138,8 @@ A scenario is added to the list once the suite covers it; `test/jepsen/fiber/sce
 scripts/run.sh --compose lazyfs --scenario power-sync-on
 ```
 
+Three more extras run on UDT channels (`--asset udt`, below): `udt-kill` and `udt-partition`, with one node killed for 5-20 s or cut off for 5-15 s at a time, and `udt-pause`, c-08's pauses, which cross fnn's 30 s peer deadline so that UDT channels are force-closed.
+
 ### Running a run again (`--seed`)
 
 Every run has a seed, and the payments and faults are drawn from it in advance (`schedule.clj`): each payment's amount, destination and attempt id, each fault's kind and target (node or channel), and the gaps between operations. A run with the same seed, arguments and Fiber build issues the same payments, and the same faults, in the same order. Each fault namespace draws from a stream of its own (kill and pause share one), so adding a fault to `--faults` doesn't change the others' operations. Without `--seed` the harness picks one; it is in the test map at the top of `jepsen.log` (`:seed`), and `repeat.sh` prints it. In CI every run gets its own, listed in the job summary.
@@ -178,6 +181,8 @@ scripts/nonce_report.py store/fiber-kill/<run> ...    # per node: restarts, repl
 By default every payment is a keysend. `--pay-kinds keysend,invoice` draws each payment's kind from the list, uniformly; a kind listed twice is drawn twice as often, and `--pay-kinds invoice` makes every payment an invoice payment. For an invoice payment the receiver creates an invoice with `new_invoice` (devnet currency `Fibd`, an hour's expiry, a preimage derived from the attempt id), and the sender pays it with `send_payment`. Unlike a keysend, it needs the receiver up: when `new_invoice` fails, the payment fails without being sent (`[:new-invoice :receiver-down]`). The kinds come from a stream of their own, so the payments' amounts, destinations and ids for a seed are the same whatever the kinds; with keysend alone nothing is drawn. Invoice payments carry their attempt id like keysends, so `--ledger` counts them. A workload adds a kind with a `client/send-payment!` method; `--pay-kinds` accepts every kind that has one.
 
 `--pay-kinds mpp` (C-07) makes multi-part payments: the invoice allows MPP (`allow_mpp`), and `send_payment` may split the amount into up to `--mpp-max-parts` parts (Fiber's default, 12). Fiber splits only when no single route carries the amount, so MPP payments take their amounts from `--mpp-amount MIN-MAX` CKB (default 1000-1600), spread over the range by the same draw as other payments' amounts, so that a seed's other values stay the same. On the default line no amount above one channel's balance has a route at all: use a graph with several routes (`--topology mesh`), and `--acceptor-funding CKB` so that the acceptor of each channel puts in CKB too and both ends start with something to send. Fiber reports a payment's parts only in debug builds, so while a payment is in flight the client samples the sender's pending TLCs for its hash and records `:parts` (most TLCs at once, distinct TLCs, distinct channels), lower bounds. After the final read, every MPP invoice's status is read on its receiver and its payment's on its sender, and the `:mpp` check wants Success with the invoice Paid, or Failed with it unpaid; `:unknown` while a payment is unfinished or a receiver holds a set it hasn't settled. `--ledger` checks that the receiver got the full amount.
+
+`--asset udt` runs the whole test on a token instead of CKB: every channel the setup opens is funded with the devnet's simple UDT (`open_channel`'s `funding_udt_type_script`), and every payment, invoice and probe names it (`udt_type_script`), whatever its kind. Balances, TLCs and fees are then amounts of the token, the commitment transactions carry UDT cells, and a forced close puts them on chain. Fiber's devnet mints the token to nodes 1-3 only and lists it in every node's UDT whitelist as `SIMPLE_UDT`, where the setup reads its type script; a UDT run therefore takes its nodes from n1-n3. The opener puts in as many units as a CKB channel has shannons, so amounts and checks keep their scale; the acceptor adds the whitelist's auto-accept amount, 1000 units, less than any payment, so like a CKB acceptor it can send only once it has been paid. Not with `--onchain`, `--cch`, `--acceptor-funding` or `--pay-kinds mpp`, whose amounts are CKB's.
 
 ### Per-node ledger (`--ledger`)
 

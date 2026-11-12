@@ -28,7 +28,8 @@
                           [scenarios :as scenarios]
                           [schedule :as schedule]
                           [swap :as swap]
-                          [topology :as topology]]
+                          [topology :as topology]
+                          [udt :as udt]]
             [jepsen.fiber.faults [chain-partition :as chain-partition]
                                  [clock :as clock]
                                  [lnd-disconnect :as lnd-disconnect]
@@ -123,6 +124,7 @@
   the test map (:seed): pass it as --seed to run the same payments and faults again."
   [opts]
   (swap/check-opts! opts)
+  (udt/check-opts! opts)
   (let [db      (cond-> (db/db) (:cch opts) cch/db)
         faults  (set (:faults opts))
         pkg     (nemesis-package db opts)
@@ -226,6 +228,13 @@
     :default  :line
     :parse-fn keyword
     :validate [topology/topologies (str "Must be one of " (keys topology/topologies))]]
+   [nil "--asset ASSET" (str "What the channels hold and the payments move: ckb, or udt, the"
+                             " devnet's simple UDT, which only n1-n3 hold (jepsen.fiber.udt). With"
+                             " udt every channel opened at setup is funded with the token and every"
+                             " payment, invoice and probe is in it.")
+    :default  :ckb
+    :parse-fn keyword
+    :validate [#{:ckb :udt} "Must be ckb or udt"]]
    [nil "--rate HZ" "Approximate number of payments per second."
     :default  5
     :parse-fn parse-double]

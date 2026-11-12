@@ -4,11 +4,13 @@
   docker/docker-compose.yml). The default, line, is n1 - n2 - n3 of public
   channels, so payments between the ends are forwarded by the middle node; ring
   and mesh give payments more than one route. Records each node's starting
-  channels for the conservation check."
+  channels for the conservation check. With --asset udt the channels hold a
+  token instead of CKB (jepsen.fiber.udt)."
   (:require [clojure.string :as str]
             [clojure.tools.logging :refer [info]]
             [jepsen.util :refer [await-fn]]
-            [jepsen.fiber.rpc :as rpc]))
+            [jepsen.fiber [rpc :as rpc]
+                          [udt :as udt]]))
 
 (def funding-ckb
   "CKB the opener puts into each channel. The acceptor adds its auto-accept amount."
@@ -160,7 +162,8 @@
   [test]
   (let [nodes (:nodes test)
         infos (into {} (map (fn [n] [n (rpc/call n "node_info")]) nodes))
-        edges (edges test)]
+        edges (edges test)
+        udt   (udt/setup! test)]
     (info "Opening" (count edges) "channels for" (name (:topology test :line)) "over" nodes)
     (reset! (:pubkeys test) (update-vals infos :pubkey))
     (doseq [[a b] edges]
@@ -170,10 +173,12 @@
         (await-condition! (str "Waiting for " a " to connect to " b) 30000
                           #(some (fn [p] (= pubkey-b (:pubkey p)))
                                  (:peers (rpc/call a "list_peers"))))
-        (info "Opening a" funding-ckb "CKB channel" a "->" b)
-        (rpc/call a "open_channel" {:pubkey         pubkey-b
-                                    :funding_amount (rpc/int->hex (* funding-ckb shannons-per-ckb))
-                                    :public         true})))
+        (info "Opening a" (if udt "UDT" (str funding-ckb " CKB")) "channel" a "->" b)
+        (rpc/call a "open_channel" (merge {:pubkey         pubkey-b
+                                           :funding_amount (rpc/int->hex (* funding-ckb shannons-per-ckb))
+                                           :public         true}
+                                          ; With --asset udt: the token and its amount.
+                                          (udt/channel-params)))))
     (doseq [n nodes]
       (let [expected (count (filter #(some #{n} %) edges))]
         (await-condition! (str "Waiting for " expected " ready channels on " n) 180000
