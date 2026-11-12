@@ -88,14 +88,24 @@
   "The gaps in ns between this fault's ops. Without :process-duration, every
   fault's gaps. With it ([min max] seconds), the ops pair up (see `ops`), each
   kill or pause lasts a whole number of seconds drawn from a stream of its own,
-  and the gaps after each recovery come from the usual gap stream."
+  and the gaps after each recovery come from the usual gap stream.
+
+  Where the ops alternate between a fault and its recovery, no gap after a
+  recovery is shorter than :nemesis-min-gap seconds: with :process-duration,
+  and without it when only kills or only pauses are in use. With both and no
+  duration, kills and pauses overlap (see `ops`), no gap is one fault's own,
+  and the minimum does nothing."
   [streams opts]
-  (let [usual (schedule/gaps (schedule/gaps-stream streams :db) (:nemesis-interval opts))]
+  (let [usual (schedule/gaps (schedule/gaps-stream streams :db) (:nemesis-interval opts))
+        modes (count (filter (set (:faults opts)) [:kill :pause]))]
     (if-let [[lo hi] (:process-duration opts)]
       (let [^java.util.SplittableRandom r (schedule/stream streams :process-duration)]
-        (interleave (repeatedly #(* 1000000000 (+ lo (.nextInt r (int (inc (- hi lo)))))))
-                    usual))
-      usual)))
+        (schedule/after-recovery-at-least
+          (:nemesis-min-gap opts)
+          (interleave (repeatedly #(* 1000000000 (+ lo (.nextInt r (int (inc (- hi lo)))))))
+                      usual)))
+      (cond->> usual
+        (= 1 modes) (schedule/after-recovery-at-least (:nemesis-min-gap opts))))))
 
 (defn term-exits
   "Every SIGTERM exit in `history` (--kill-signal term): one map per node and

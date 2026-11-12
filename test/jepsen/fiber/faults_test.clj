@@ -177,6 +177,21 @@
         (is (every? #(and (<= 120e9 % 300e9) (zero? (mod % 1000000000))) (take-nth 2 g)))
         (is (< 3 (count (set (take-nth 2 g)))))
         (is (= (take 10 (usual)) (take-nth 2 (rest g))))))
+    (testing "with --nemesis-min-gap, no healing is followed by a partition sooner than that"
+      (let [opts {:nemesis-interval 15, :partition-duration [5 15]}
+            g    (take 40 (partition/gaps (schedule/streams 9) opts))
+            g30  (take 40 (partition/gaps (schedule/streams 9) (assoc opts :nemesis-min-gap 30)))]
+        (is (some #(< % 30e9) (take-nth 2 (rest g))))
+        (is (= (take-nth 2 g) (take-nth 2 g30)))
+        (is (= (map #(max (long 30e9) %) (take-nth 2 (rest g))) (take-nth 2 (rest g30))))
+        (is (= g (take 40 (partition/gaps (schedule/streams 9) (assoc opts :nemesis-min-gap 0)))))
+        (testing "and without --partition-duration too: a partition lasts the gap drawn for it, a healing at least 30 s"
+          (let [u   (usual)
+                g30 (take 20 (partition/gaps (schedule/streams 9) {:nemesis-interval 15
+                                                                   :nemesis-min-gap  30}))]
+            (is (some #(< % 30e9) (take-nth 2 (rest u))))
+            (is (= (take-nth 2 u) (take-nth 2 g30)))
+            (is (= (map #(max (long 30e9) %) (take-nth 2 (rest u))) (take-nth 2 (rest g30))))))))
     (testing "under the simulator, a partition lasts what was drawn"
       (let [hist  (->> (gt/simulate (gen/context {:concurrency 1})
                                     (gen/nemesis (gen/limit 20 (faults/generator
@@ -191,6 +206,25 @@
         (is (every? (fn [[a b dt]] (and (= :start-partition a) (= :stop-partition b)
                                         (<= 120e9 dt 300e9)))
                     spans))))
+    (testing "under the simulator, with --nemesis-min-gap the network is whole that long between partitions"
+      (let [sim   (fn [min-gap]
+                    (->> (gt/simulate (gen/context {:concurrency 1})
+                                      (gen/nemesis (gen/limit 40 (faults/generator
+                                                                   (schedule/streams 9)
+                                                                   {:nodes six, :faults [:partition]
+                                                                    :nemesis-interval   20
+                                                                    :partition-duration [5 15]
+                                                                    :nemesis-min-gap    min-gap})))
+                                      (fn [_ctx op] (-> op (assoc :type :ok) (update :time + 1000000))))
+                         (filter #(= :info (:type %)))))
+            whole (fn [hist] (->> hist rest (partition 2)
+                                  (map (fn [[a b]] [(:f a) (:f b) (- (:time b) (:time a))]))))
+            cuts  (fn [hist] (->> hist (partition 2) (map (fn [[a b]] (- (:time b) (:time a))))))]
+        (is (some (fn [[_ _ dt]] (< dt 5e9)) (whole (sim 0))))
+        (is (= 19 (count (whole (sim 30)))))
+        (is (every? (fn [[a b dt]] (and (= :stop-partition a) (= :start-partition b) (<= 30e9 dt)))
+                    (whole (sim 30))))
+        (is (every? #(<= 5e9 % 15.1e9) (cuts (sim 30))))))
     (is (= [120 300] (partition/parse-duration "120-300")))
     (is (= [180 180] (partition/parse-duration "180")))))
 
