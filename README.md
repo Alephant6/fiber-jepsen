@@ -8,7 +8,7 @@ Fiber's unit tests drive nodes in-process, and its integration tests replay scri
 
 ## What it checks
 
-After all faults are healed and the network has had time to converge:
+The faults are healed when the time limit is reached, without waiting for the payments still in flight, so a fault whose end would fall after the limit is cut short and never lasts longer than it was drawn to. After all faults are healed and the network has had time to converge:
 
 - every channel opened during setup is still `ChannelReady`, with no pending TLCs;
 - both ends of a channel agree on its balances (A's local balance equals B's remote balance);

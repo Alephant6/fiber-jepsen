@@ -99,17 +99,25 @@
       pays)))
 
 (defn fault-window
-  "The client operations and the faults, each for :time-limit seconds.
+  "The client operations and the faults, each for :time-limit seconds, and then
+  the faults' healing (`final`, the nemesis package's final generator).
 
   Each gets a time limit of its own. A single gen/time-limit around both ends the
   window early: while every client is busy, the next operation is the nemesis's,
   and when that one falls after the limit, gen/time-limit takes the whole window
   as finished, payments included. A gap between faults can be up to 100 s, so a
-  run with --nemesis-interval 30 and --time-limit 90 could stop after a second."
-  [opts streams]
-  (let [limit #(some->> % (gen/time-limit (:time-limit opts)))]
-    (gen/nemesis (limit (faults/generator streams opts))
-                 (limit (client-ops opts streams)))))
+  run with --nemesis-interval 30 and --time-limit 90 could stop after a second.
+
+  The healing belongs to the window, and is due when the faults' limit is
+  (jepsen.fiber.schedule/limited-then). As a phase of its own it waited for the
+  payments still in flight, up to client/payment-timeout-ms each and longer for
+  a held payment, and the limit usually falls inside a fault: a partition drawn
+  to last 5-15 s then lasted up to 30 s, past fnn's peer deadline."
+  ([opts streams]
+   (fault-window opts streams nil))
+  ([opts streams final]
+   (gen/nemesis (schedule/limited-then (:time-limit opts) (faults/generator streams opts) final)
+                (some->> (client-ops opts streams) (gen/time-limit (:time-limit opts))))))
 
 (defn nemesis-package
   "The nemesis package for the requested faults (jepsen.fiber.faults/package).
@@ -187,10 +195,9 @@
             :generator            (gen/phases
                                     (when (:onchain opts) (gen/clients (gen/once {:f :chain-baseline})))
                                     (availability-window opts streams :pay-baseline :baseline)
-                                    (fault-window opts streams)
-                                    (gen/log "Healing all faults")
-                                    (gen/nemesis (:final-generator pkg))
-                                    (gen/log "Waiting for the network to converge")
+                                    ; The faults, and their healing when the limit is reached.
+                                    (fault-window opts streams (:final-generator pkg))
+                                    (gen/log "Faults healed; waiting for the network to converge")
                                     (gen/sleep (:quiesce opts))
                                     (when (seq (:channel-ops opts))
                                       (gen/clients (gen/once {:f :settle-channels})))

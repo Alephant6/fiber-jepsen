@@ -109,6 +109,41 @@
   (when gen
     (Paced. gaps nil gen)))
 
+(defrecord LimitedThen [limit deadline gen final]
+  gen/Generator
+  (op [_ test ctx]
+    (let [[op gen' :as res] (when gen (gen/op gen test ctx))]
+      (if (and res (identical? :pending op))
+        [op (LimitedThen. limit deadline gen' final)]
+        (let [deadline (or deadline (+ (:time (if res op ctx)) limit))]
+          (if (and res (< (:time op) deadline))
+            [op (LimitedThen. limit deadline gen' final)]
+            ; `gen` is over. `final` follows, at the deadline at the earliest.
+            (when-let [[op final'] (when final (gen/op final test ctx))]
+              (if (identical? :pending op)
+                [op (LimitedThen. limit deadline nil final')]
+                [(update op :time max deadline) (LimitedThen. limit deadline nil final')])))))))
+
+  (update [_ test ctx event]
+    (LimitedThen. limit deadline
+                  (when gen (gen/update gen test ctx event))
+                  (when final (gen/update final test ctx event)))))
+
+(defn limited-then
+  "`gen` for `seconds` from its first operation, as gen/time-limit has it, then
+  `final`, whose operations are issued at that deadline at the earliest: at once
+  if `gen` has nothing more to issue before it, and not when `gen` runs dry.
+
+  For the faults and their healing. The time limit often falls between a fault
+  and the operation that ends it, which is then never issued, so the fault lasts
+  until the healing. As the next phase of gen/phases, the healing waits for
+  every client operation in flight, so such a fault outlasted the time limit by
+  as long as the slowest payment took to give up. Here the healing is the same
+  thread's next operation and is due at the limit."
+  [seconds gen final]
+  (when (or gen final)
+    (LimitedThen. (long (* 1e9 seconds)) nil gen final)))
+
 (defn payments
   "Endless payment ops for a test with `node-count` nodes. :to-index picks the
   destination among the nodes other than the sender, in the order of :nodes."
