@@ -53,6 +53,22 @@
       (is (= 30 (:force-close-ok-after (:options (parse ["--scenario" "c-16"
                                                          "--force-close-ok-after" "30"]))))))))
 
+(deftest hold-scenarios
+  (doseq [[name fault] [["hold-kill" :kill] ["hold-partition" :partition]]]
+    (let [{:keys [options errors]} (parse ["--scenario" name])]
+      (is (empty? errors))
+      (is (= [fault] (:faults options)))
+      (testing "hold invoices next to plain ones, held for up to 10 s"
+        (is (= [:hold :invoice] (:pay-kinds options)))
+        (is (= [1 10] (:hold-time options)))
+        (is (= 25 (:hold-cancel options))))
+      (testing "faults under fnn's 30 s deadline; closes fail the run"
+        (is (< (second (or (:process-duration options) (:partition-duration options))) 30))
+        (is (not (:force-close-ok options)))
+        (is (nil? (:force-close-ok-after options))))
+      (testing "and at least 30 s apart, so that two in a row don't add up to an outage over it"
+        (is (= 30 (:nemesis-min-gap options)))))))
+
 (deftest expand
   (testing "a scenario's arguments follow the option, so later ones override them"
     (let [{:keys [options errors]} (parse ["--scenario" "c-08" "--time-limit" "60"])]
@@ -92,7 +108,7 @@
     (is (= (scenarios/select "p1") (scenarios/select "p1,c-08")))
     (is (thrown? clojure.lang.ExceptionInfo (scenarios/select "c-99"))))
   (testing "extra: the scenarios the plan doesn't have"
-    (is (= ["power-sync-off" "power-sync-on"] (scenarios/select "extra"))))
+    (is (= ["hold-kill" "hold-partition" "power-sync-off" "power-sync-on"] (scenarios/select "extra"))))
   (testing "run.sh's arguments: a scenario's compose file, then the scenario"
     (is (= {:name "c-15", :priority "p1", :args "--compose cch --scenario c-15"}
            (first (scenarios/matrix "c-15"))))
