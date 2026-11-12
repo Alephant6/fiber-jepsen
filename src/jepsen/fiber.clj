@@ -20,6 +20,7 @@
                           [expiry :as expiry]
                           [faults :as faults]
                           [health :as health]
+                          [hold :as hold]
                           [invoice]
                           [ledger :as ledger]
                           [mpp :as mpp]
@@ -51,7 +52,8 @@
   "Payments for the whole fault window, drawn from the run's seed (see
   jepsen.fiber.schedule): 0.01-0.2 CKB each, about :rate a second, of the kinds
   in --pay-kinds (keysend, invoice: jepsen.fiber.invoice, mpp:
-  jepsen.fiber.mpp, whose amounts are --mpp-amount's). With --close,
+  jepsen.fiber.mpp, whose amounts are --mpp-amount's, hold: jepsen.fiber.hold).
+  With --close,
   every channel is asked to close cooperatively halfway through, and payments go on
   against the closing channels, from a stream of their own."
   [opts streams]
@@ -146,12 +148,16 @@
             :payments             (atom [])
             ; With --pay-kinds mpp: every MPP invoice, for :read-invoices.
             :invoices             (atom [])
+            ; With --pay-kinds hold: every hold invoice by attempt id, for
+            ; :resolve-holds and :read-holds.
+            :holds                (atom {})
             :initial-channels     (atom nil)
             ; With --cch: the swaps that got a payment hash, and the swap
             ; environment's starting state (jepsen.fiber.cch).
             :swaps                (atom [])
             :swap-env             (atom nil)
-            :nonserializable-keys [:pubkeys :payments :invoices :initial-channels :swaps :swap-env]
+            :nonserializable-keys [:pubkeys :payments :invoices :holds :initial-channels :swaps
+                                   :swap-env]
             :checker              (checker/compose
                                     (cond-> (merge (faults/checkers opts)
                                                    {:stats      (checker/stats)
@@ -175,6 +181,7 @@
                                       (:nonce-check opts) (assoc :nonce (nonce/checker))
                                       (:ledger opts)      (assoc :ledger (ledger/checker))
                                       (mpp/enabled? opts) (assoc :mpp (mpp/checker))
+                                      (hold/enabled? opts) (assoc :hold (hold/checker))
                                       (:onchain opts)     (assoc :onchain (onchain/checker))
                                       (seq (:channel-ops opts)) (assoc :channels (channels/checker))
                                       (:expiry-check opts) (assoc :expiry (expiry/checker))
@@ -190,11 +197,15 @@
                                     (fault-window opts streams)
                                     (gen/log "Healing all faults")
                                     (gen/nemesis (:final-generator pkg))
+                                    ; With --pay-kinds hold: the settles and cancels the faults
+                                    ; kept from the receivers.
+                                    (hold/resolve-generator opts)
                                     (gen/log "Waiting for the network to converge")
                                     (gen/sleep (:quiesce opts))
                                     (when (seq (:channel-ops opts))
                                       (gen/clients (gen/once {:f :settle-channels})))
                                     (availability-window opts streams :pay-recovery :recovery)
+                                    (when (availability? opts) (hold/resolve-generator opts))
                                     (swap/final-generator opts)
                                     (when-not (:close opts) (gen/clients (gen/once {:f :probe})))
                                     ; Assertion 7 (jepsen.fiber.health): is every fnn there and working?
@@ -202,6 +213,8 @@
                                     (gen/clients (gen/once {:f :read}))
                                     (when (mpp/enabled? opts)
                                       (gen/clients (gen/once {:f :read-invoices})))
+                                    (when (hold/enabled? opts)
+                                      (gen/clients (gen/once {:f :read-holds})))
                                     (when (:onchain opts)
                                       (gen/phases (gen/log "Closing every channel and waiting for it to settle on chain")
                                                   (gen/clients (gen/once {:f :settle}))))
@@ -232,7 +245,9 @@
    [nil "--pay-kinds KINDS" (str "Comma-separated payment kinds, each payment's drawn uniformly from"
                                  " them (list one twice to draw it twice as often): keysend, invoice,"
                                  " mpp (an invoice that allows multi-part payment, of --mpp-amount;"
-                                 " checks that each ends all or nothing).")
+                                 " checks that each ends all or nothing), hold (a hold invoice: the"
+                                 " receiver holds the payment for --hold-time, then settles or"
+                                 " cancels it; checks that no money moves without the preimage).")
     :default  [:keysend]
     :parse-fn keywords
     :validate [#(every? (methods client/send-payment!) %)
@@ -248,6 +263,17 @@
                                  " (send_payment's max_parts, 2-24). Default: Fiber's (12).")
     :parse-fn parse-long
     :validate [#(and % (<= 2 % 24)) "Must be 2 to 24"]]
+   [nil "--hold-time SECONDS" (str "With --pay-kinds hold, how long the receiver holds each payment"
+                                   " before it settles or cancels it: seconds, or a range MIN-MAX"
+                                   " the times are spread over.")
+    :default  hold/default-hold-time-s
+    :parse-fn partition/parse-duration
+    :validate [(fn [[lo hi]] (and lo hi (<= 0 lo hi))) "Must be S or MIN-MAX, 0 <= MIN <= MAX"]]
+   [nil "--hold-cancel PERCENT" (str "With --pay-kinds hold, the share of held payments the receiver"
+                                     " cancels instead of settling.")
+    :default  hold/default-cancel-percent
+    :parse-fn parse-long
+    :validate [#(and % (<= 0 % 100)) "Must be 0 to 100"]]
    [nil "--acceptor-funding CKB" (str "CKB the acceptor of each channel opened at setup puts in, as"
                                       " the opener puts in 1000 (Fiber's"
                                       " auto_accept_channel_ckb_funding_amount, through"

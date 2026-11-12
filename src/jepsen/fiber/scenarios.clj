@@ -301,6 +301,36 @@
                             " --clock-jump 60-1800 and --force-close-ok-after 30, which excuses only"
                             " the closes that a kill, pause or partition over 30 s explains (open"
                             " question 1 answered \"expected\"); closes after clock steps still fail.")}
+    "hold-kill"
+            {:priority :extra
+             :plan     (str "Not in the plan. Hold-invoice payments: the receiver holds each"
+                            " payment, then settles or cancels it, while nodes are killed and"
+                            " restarted")
+             :args     ["--faults" "kill" "--kill-targets" "one" "--process-duration" "5-20"
+                        "--pay-kinds" "hold,invoice" "--hold-time" "1-10" "--concurrency" "6"
+                        "--nemesis-interval" "20" "--time-limit" "300" "--ledger"]
+             :differs  (str "Three nodes in a line; each payment is a hold-invoice or an invoice"
+                            " payment, drawn uniformly, and about a third cross the middle node."
+                            " A receiver holds a payment for 1-10 s, then settles it, or cancels"
+                            " it one time in four (--hold-cancel 25). A kill (SIGKILL) takes one"
+                            " node for 5-20 s, under fnn's 30 s peer deadline, so a hold often"
+                            " spans a kill of the receiver, the sender or the node between them,"
+                            " and a closed channel fails the run. A settle or cancel that found"
+                            " its receiver down is made after the faults heal. Two clients a node"
+                            " (--concurrency 6), since a client waits while its payment is held."
+                            " The hold check wants Success only with the invoice Paid and the"
+                            " preimage released, and no payment held at the end.")}
+    "hold-partition"
+            {:priority :extra
+             :plan     (str "Not in the plan. Hold-invoice payments: the receiver holds each"
+                            " payment, then settles or cancels it, while partitions isolate a node")
+             :args     ["--faults" "partition" "--partition-targets" "one" "--partition-duration" "5-15"
+                        "--pay-kinds" "hold,invoice" "--hold-time" "1-10" "--concurrency" "6"
+                        "--nemesis-interval" "20" "--time-limit" "300" "--ledger"]
+             :differs  (str "As hold-kill, with a partition that isolates one node for 5-15 s in"
+                            " place of the kill. The control node still reaches a partitioned"
+                            " receiver, so it takes the preimage or the cancel while it cannot"
+                            " tell its peer: the settle crosses the partition's end.")}
     "power-sync-off"
             {:priority :extra
              :plan     (str "Not in the plan; proposed in a comment on it (open question 3). A node"

@@ -37,17 +37,18 @@
   or {:error e} when it made none (the receiver is down or refused). With
   `final-delta` (ms, --final-tlc-expiry-delta) the invoice asks for that final
   TLC expiry delta; without it Fiber's default applies. `extra` adds parameters
-  (the MPP kind's allow_mpp)."
+  (the MPP kind's allow_mpp). With a payment_hash in `extra` the node isn't given
+  the preimage: that makes a hold invoice (jepsen.fiber.hold)."
   [node amount id final-delta & [extra]]
   (try
     (rpc/call node "new_invoice"
-              (cond-> (merge {:amount           (rpc/int->hex amount)
-                              :currency         currency
-                              :description      (str "fiber-jepsen " id)
-                              :expiry           (rpc/int->hex expiry-s)
-                              :payment_preimage (preimage id)}
+              (cond-> (merge {:amount      (rpc/int->hex amount)
+                              :currency    currency
+                              :description (str "fiber-jepsen " id)
+                              :expiry      (rpc/int->hex expiry-s)}
                              extra)
-                final-delta (assoc :final_expiry_delta (rpc/int->hex final-delta))))
+                (not (:payment_hash extra)) (assoc :payment_preimage (preimage id))
+                final-delta                 (assoc :final_expiry_delta (rpc/int->hex final-delta))))
     (catch ConnectException _ {:error :receiver-down})
     (catch ConnectTimeoutException _ {:error :receiver-unreachable})
     (catch clojure.lang.ExceptionInfo e
