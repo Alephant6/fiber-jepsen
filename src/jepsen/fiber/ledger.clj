@@ -21,6 +21,12 @@
   for falls below 0, and one that was paid for a payment it didn't pass on rises
   above its bound, or the totals differ.
 
+  A trampoline payment (jepsen.fiber.trampoline) goes to its trampoline nodes
+  first, wherever they are, so it can pass its receiver on the way there and its
+  sender on the way back, each as a forwarder that earns a fee. Its fee counts
+  towards every node's bound, and a test that sends such payments bounds the
+  forwarding income on the line too.
+
   It counts the payments the nodes themselves report: the final read lists every
   payment session on every node (list_payments), and each payment carries its
   attempt id in a custom record, so payments whose send_payment reply the client
@@ -58,7 +64,7 @@
                                 (#{:ok :fail :info} (:type op))
                                 (get-in op [:value :id]))]
                  (let [v (:value op)]
-                   (assoc (select-keys v [:id :from :to :amount :hash])
+                   (assoc (select-keys v [:id :from :to :amount :hash :kind])
                           :source :pay
                           :client (case (:type op)
                                     :ok   "Success"
@@ -119,11 +125,14 @@
 
 (defn forwarding-bounds
   "{node max}: for each node, the fees of the `payments` it neither sent nor
-  received, the most it can have earned forwarding them."
+  received, the most it can have earned forwarding them. A trampoline payment's
+  fee counts for its sender and receiver too: either may forward it on its way
+  to or from a trampoline node."
   [nodes payments]
   (into {} (for [n nodes]
              [n (reduce + 0 (for [{:keys [fee attempt]} payments
-                                  :when (not (#{(:from attempt) (:to attempt)} n))]
+                                  :when (or (= :trampoline (:kind attempt))
+                                            (not (#{(:from attempt) (:to attempt)} n)))]
                               fee))])))
 
 (defn analyze
@@ -268,4 +277,7 @@
                       last
                       :value)]
         (analyze (:nodes test) @(:initial-channels test) read history
-                 {:line? (= :line (:topology test :line))})))))
+                 ; A trampoline payment's forwarders aren't the nodes between its
+                 ; ends, even on the line.
+                 {:line? (and (= :line (:topology test :line))
+                              (not (some #{:trampoline} (:pay-kinds test))))})))))
