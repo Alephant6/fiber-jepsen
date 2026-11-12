@@ -77,6 +77,21 @@
       (is (= [:power] (:faults options)))
       (is (= sync (:store-sync-writes options))))))
 
+(deftest partition-scenarios
+  (testing "one-way cuts on the line, around fnn's 30 s deadline"
+    (let [{:keys [options errors]} (parse ["--scenario" "partition-one-way"])]
+      (is (empty? errors))
+      (is (= [:partition] (:faults options)))
+      (is (= [:deaf :mute :pair-one-way] (:partition-targets options)))
+      (is (< (first (:partition-duration options)) 30 (second (:partition-duration options))))
+      (is (= 30 (:force-close-ok-after options)))))
+  (testing "a channel's two ends cut apart on the mesh, where both still reach the others"
+    (let [{:keys [options errors]} (parse ["--scenario" "partition-pair"])]
+      (is (empty? errors))
+      (is (= [:pair] (:partition-targets options)))
+      (is (= :mesh (:topology options)))
+      (is (:probe-routes options)))))
+
 (deftest ledger-coverage
   (testing "every scenario checks the ledger, except where on-chain closes or swaps move the balances"
     (is (= #{"c-03" "c-09" "c-10" "c-11" "c-15"}
@@ -92,7 +107,8 @@
     (is (= (scenarios/select "p1") (scenarios/select "p1,c-08")))
     (is (thrown? clojure.lang.ExceptionInfo (scenarios/select "c-99"))))
   (testing "extra: the scenarios the plan doesn't have"
-    (is (= ["power-sync-off" "power-sync-on"] (scenarios/select "extra"))))
+    (is (= ["partition-one-way" "partition-pair" "power-sync-off" "power-sync-on"]
+           (scenarios/select "extra"))))
   (testing "run.sh's arguments: a scenario's compose file, then the scenario"
     (is (= {:name "c-15", :priority "p1", :args "--compose cch --scenario c-15"}
            (first (scenarios/matrix "c-15"))))

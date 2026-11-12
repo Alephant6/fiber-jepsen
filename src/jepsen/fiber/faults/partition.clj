@@ -1,10 +1,27 @@
 (ns jepsen.fiber.faults.partition
-  "The partition fault: iptables drops all traffic between groups of nodes,
-  through jepsen.nemesis.combined's partition package. A target spec
+  "The partition fault: iptables drops traffic between nodes, through
+  jepsen.nemesis.combined's partition package. A target spec
   (--partition-targets) is one of:
-    :one   one node, isolated from the others (the default);
-    :half  a random half of the nodes, isolated from the other half (for an odd
-           count, the smaller half).
+    :one           one node, isolated from the others (the default);
+    :half          a random half of the nodes, isolated from the other half
+                   (for an odd count, the smaller half);
+    :deaf          one node drops everything the others send it, and they still
+                   get what it sends: a one-way partition;
+    :mute          the others drop everything one node sends, and it still gets
+                   what they send: the other way;
+    :pair          the two ends of one channel, cut off from each other only.
+                   Both still reach every other node, so the partition isn't
+                   transitive: the network knows the channel, and can't use it;
+    :pair-one-way  one end of a channel drops what the other sends it.
+
+  A one-way cut lets messages through in one direction only. TCP delivers the
+  open side's data once and loses every acknowledgement of it, so a node gets
+  its peer's commitment_signed, say, and its own revoke_and_ack never arrives:
+  each end has a different view of who is waiting for whom. A partition rule is
+  one iptables DROP in a node's INPUT chain per source it no longer hears, so a
+  one-way cut is a grudge that isn't symmetric. After every partition the op
+  records the rules found on each node (:rules), and the fault took effect
+  (`effect`) when they are exactly the grudge's.
   A partition lasts until the next op of this fault, a gap of --nemesis-interval
   seconds on average and at most 100 s, like every fault's. With
   --partition-duration MIN-MAX each partition lasts a whole number of seconds
@@ -25,11 +42,12 @@
                     [net :as jnet]]
             [jepsen.net.proto :as p]
             [jepsen.nemesis.combined :as nc]
-            [jepsen.fiber.schedule :as schedule])
+            [jepsen.fiber [schedule :as schedule]
+                          [topology :as topology]])
   (:import (java.util ArrayList Collection Collections SplittableRandom)))
 
 (def target-specs
-  #{:one :half})
+  #{:one :half :deaf :mute :pair :pair-one-way})
 
 (defn shuffled
   "`coll` in an order drawn from `r` (Fisher-Yates)."
@@ -40,29 +58,48 @@
     (vec a)))
 
 (defn grudge
-  "The grudge of a partition of `nodes` by target spec `spec`, drawn from `r`."
-  [r nodes spec]
-  (case spec
-    :one  (let [node (schedule/pick r nodes)]
-            (n/complete-grudge [[node] (vec (remove #{node} nodes))]))
-    :half (n/complete-grudge (map vec (n/bisect (shuffled r nodes))))))
+  "The grudge of a partition of `nodes` by target spec `spec`, drawn from `r`:
+  {node #{the nodes whose packets it drops}}. `edges` are the topology's
+  channels, for the specs that cut one."
+  ([r nodes spec]
+   (grudge r nodes nil spec))
+  ([^SplittableRandom r nodes edges spec]
+   (case spec
+     :one  (let [node (schedule/pick r nodes)]
+             (n/complete-grudge [[node] (vec (remove #{node} nodes))]))
+     :half (n/complete-grudge (map vec (n/bisect (shuffled r nodes))))
+     :deaf (let [node (schedule/pick r nodes)]
+             {node (set (remove #{node} nodes))})
+     :mute (let [node (schedule/pick r nodes)]
+             (into {} (for [other nodes :when (not= other node)] [other #{node}])))
+     :pair (let [[a b] (schedule/pick r edges)]
+             {a #{b}, b #{a}})
+     :pair-one-way (let [[a b] (schedule/pick r edges)]
+                     (if (.nextBoolean r) {a #{b}} {b #{a}})))))
 
 (defn ops
   "Endless pairs of a partition and its healing. The grudge is computed here, not
   from a spec in the nemesis. Each partition's spec is drawn from `specs`
   (default [:one]); with only one spec nothing is drawn for it, so `(ops r nodes)`
-  gives the ops it gave before target specs existed."
+  gives the ops it gave before target specs existed. `edges` are the topology's
+  channels, which :pair and :pair-one-way cut."
   ([r nodes]
    (ops r nodes [:one]))
   ([r nodes specs]
+   (ops r nodes specs nil))
+  ([r nodes specs edges]
    (let [specs (vec specs)
+         edges (vec edges)
          spec  (if (= 1 (count specs))
                  (constantly (first specs))
                  #(schedule/pick r specs))]
+     (when (and (some #{:pair :pair-one-way} specs) (empty? edges))
+       (throw (ex-info "--partition-targets pair and pair-one-way need a channel to cut"
+                       {:type :no-edges, :nodes nodes})))
      (mapcat (fn [g]
                [{:type :info, :f :start-partition, :value g}
                 {:type :info, :f :stop-partition, :value nil}])
-             (repeatedly #(grudge r nodes (spec)))))))
+             (repeatedly #(grudge r nodes edges (spec)))))))
 
 (defn gaps
   "The gaps in ns between this fault's ops, which alternate between a partition
@@ -96,6 +133,63 @@
   (c/su (doseq [src (partition-sources (c/exec :iptables :-w :-S :INPUT))]
           (c/exec :iptables :-w :-D :INPUT :-s src :-j :DROP))))
 
+(defn rules
+  "{node #{source address}}: the partition rules now on each node of `nodes`."
+  [test nodes]
+  (into (sorted-map)
+        (c/on-nodes test nodes
+                    (fn [_ _] (set (partition-sources (c/su (c/exec :iptables :-w :-S :INPUT))))))))
+
+(defn recording
+  "The partition nemesis `nemesis`, with the rules found on every node after
+  each partition on the op's completion, as :rules."
+  [nemesis]
+  (reify
+    n/Reflection
+    (fs [_] (n/fs nemesis))
+
+    n/Nemesis
+    (setup! [_ test] (recording (n/setup! nemesis test)))
+
+    (invoke! [_ test op]
+      (let [op' (n/invoke! nemesis test op)]
+        (cond-> op'
+          (= :start-partition (:f op')) (assoc :rules (rules test (:nodes test))))))
+
+    (teardown! [_ test] (n/teardown! nemesis test))))
+
+(defn expected-rules
+  "{node #{source address}}: the rules `grudge` means, as iptables lists them."
+  [grudge]
+  (into {} (for [[node sources] grudge
+                 :when (seq sources)]
+             [node (set (map #(str (topology/node-ip %) "/32") sources))])))
+
+(defn effect
+  "Whether a completed op took effect (see jepsen.fiber.faults): a
+  :start-partition did when the rules found on the nodes are the grudge's, no
+  fewer and no more, so that a cut meant to be one-way isn't two-way and a
+  pair's cut doesn't isolate a node. Rules for other sources than the test's
+  nodes aren't the partition's."
+  [op]
+  (when (= :start-partition (:f op))
+    (let [v      (:value op)
+          grudge (when (and (vector? v) (= :isolated (first v))) (second v))
+          found  (:rules op)]
+      (cond
+        (nil? grudge) (str "no partition: " (pr-str v))
+        (nil? found)  nil
+        :else
+        (let [wanted (expected-rules grudge)
+              ours   (set (map #(str (topology/node-ip %) "/32") (keys found)))
+              found  (into {} (for [[node sources] found
+                                    :let  [sources (set (filter ours sources))]
+                                    :when (seq sources)]
+                                [node sources]))]
+          (when (not= wanted found)
+            (str "iptables rules differ from the grudge: wanted " (pr-str (into (sorted-map) wanted))
+                 ", found " (pr-str (into (sorted-map) found)))))))))
+
 (def net
   "The test's network (its :net): jepsen.net/iptables, except that healing
   deletes only the partitions' rules. iptables' own heal! flushes every rule on
@@ -125,7 +219,9 @@
 (def fault
   {:faults  #{:partition}
    :stream  :partition
-   :package nc/partition-package
-   :ops     (fn [r opts] (ops r (vec (:nodes opts)) (:partition-targets opts [:one])))
+   :package (fn [opts] (update (nc/partition-package opts) :nemesis recording))
+   :ops     (fn [r opts] (ops r (vec (:nodes opts)) (:partition-targets opts [:one])
+                              (topology/edges opts)))
    :gaps    gaps
-   :fired   {:partition #{:start-partition}}})
+   :fired   {:partition #{:start-partition}}
+   :effect  effect})
