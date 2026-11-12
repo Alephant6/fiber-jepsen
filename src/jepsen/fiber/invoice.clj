@@ -7,7 +7,8 @@
   With --ledger the payment carries its attempt id in a custom record, as keysend
   payments do: send_payment passes custom records through for invoices too."
   (:require [jepsen.fiber [client :as client]
-                          [rpc :as rpc]])
+                          [rpc :as rpc]
+                          [udt :as udt]])
   (:import (java.io IOException)
            (java.net ConnectException)
            (java.nio.charset StandardCharsets)
@@ -37,7 +38,7 @@
   or {:error e} when it made none (the receiver is down or refused). With
   `final-delta` (ms, --final-tlc-expiry-delta) the invoice asks for that final
   TLC expiry delta; without it Fiber's default applies. `extra` adds parameters
-  (the MPP kind's allow_mpp)."
+  (the MPP kind's allow_mpp). With --asset udt the invoice is for the token."
   [node amount id final-delta & [extra]]
   (try
     (rpc/call node "new_invoice"
@@ -46,6 +47,7 @@
                               :description      (str "fiber-jepsen " id)
                               :expiry           (rpc/int->hex expiry-s)
                               :payment_preimage (preimage id)}
+                             (udt/payment-params)
                              extra)
                 final-delta (assoc :final_expiry_delta (rpc/int->hex final-delta))))
     (catch ConnectException _ {:error :receiver-down})

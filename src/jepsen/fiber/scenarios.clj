@@ -330,7 +330,47 @@
                             " writes in a cache of its own until fsync; a power loss SIGKILLs fnn on"
                             " one node or all of them and drops that cache. Needs Fiber from"
                             " 4777d5d6 (#1703): an earlier build ignores the setting, and the power"
-                            " check is then unknown.")}))
+                            " check is then unknown.")}
+    "udt-kill"
+            {:priority :extra
+             :plan     (str "Not in the plan. UDT channels and payments: every channel holds a"
+                            " token instead of CKB, while nodes are killed and restarted")
+             :args     ["--asset" "udt" "--faults" "kill" "--kill-targets" "one"
+                        "--process-duration" "5-20" "--pay-kinds" "keysend,invoice"
+                        "--nemesis-interval" "20" "--nemesis-min-gap" "30" "--time-limit" "300"
+                        "--ledger"]
+             :differs  (str "Three nodes in a line, the channels funded with the devnet's simple"
+                            " UDT (--asset udt), which only n1-n3 hold; each payment is a keysend"
+                            " or an invoice payment in the token, drawn uniformly. A kill"
+                            " (SIGKILL) takes one node for 5-20 s, under fnn's 30 s peer deadline,"
+                            " and a closed channel fails the run. A kill starts at least 30 s"
+                            " after the last one's node is back (--nemesis-min-gap 30), since two"
+                            " in a row can add up to an outage longer than the deadline. Balances,"
+                            " the ledger and the"
+                            " probes are all in units of the token.")}
+    "udt-partition"
+            {:priority :extra
+             :plan     (str "Not in the plan. UDT channels and payments: every channel holds a"
+                            " token instead of CKB, while partitions isolate a node")
+             :args     ["--asset" "udt" "--faults" "partition" "--partition-targets" "one"
+                        "--partition-duration" "5-15" "--pay-kinds" "keysend,invoice"
+                        "--nemesis-interval" "20" "--nemesis-min-gap" "30" "--time-limit" "300"
+                        "--ledger"]
+             :differs  (str "As udt-kill, with a partition that isolates one node for 5-15 s in"
+                            " place of the kill, and as far apart.")}
+    "udt-pause"
+            {:priority :extra
+             :plan     (str "Not in the plan. UDT channels and payments: every channel holds a"
+                            " token instead of CKB, while nodes are paused past fnn's peer deadline"
+                            " and force-close their channels")
+             :args     ["--asset" "udt" "--faults" "pause" "--nemesis-interval" "30"
+                        "--time-limit" "300" "--ledger" "--force-close-ok-after" "30"]
+             :differs  (str "c-08 on UDT channels: a pause lasts an exponential 30 s on average,"
+                            " capped at 100 s, so some cross fnn's 30 s peer deadline and the peer"
+                            " force-closes the channel. Those closes are expected and excused"
+                            " (--force-close-ok-after 30); the point is that the commitment"
+                            " transaction of a UDT channel, with the token's cells and the TLCs"
+                            " in flight, gets on chain and the nodes stay healthy.")}))
 
 (defn scenario-args
   "The arguments of scenario `name`. Throws for an unknown name."

@@ -3,7 +3,8 @@
             [clojure.tools.cli :as cli]
             [jepsen.cli :as jc]
             [jepsen.fiber :as fiber]
-            [jepsen.fiber.scenarios :as scenarios]))
+            [jepsen.fiber [scenarios :as scenarios]
+                          [udt :as udt]]))
 
 (defn parse
   "Parses `args` as `lein run test` does: Jepsen's options and this suite's."
@@ -53,6 +54,22 @@
       (is (= 30 (:force-close-ok-after (:options (parse ["--scenario" "c-16"
                                                          "--force-close-ok-after" "30"]))))))))
 
+(deftest udt-scenarios
+  (doseq [[name fault] [["udt-kill" :kill] ["udt-partition" :partition] ["udt-pause" :pause]]]
+    (let [{:keys [options errors]} (parse ["--scenario" name])]
+      (is (empty? errors))
+      (is (= :udt (:asset options)))
+      (is (= [fault] (:faults options)))
+      (testing "on the nodes that hold the token"
+        (is (nil? (udt/check-opts! (assoc options :nodes ["n1" "n2" "n3"])))))))
+  (testing "only the pause scenario crosses fnn's deadline, and excuses the closes that follow"
+    (is (= 30 (:force-close-ok-after (:options (parse ["--scenario" "udt-pause"])))))
+    (is (nil? (:force-close-ok-after (:options (parse ["--scenario" "udt-kill"]))))))
+  (testing "short faults are at least 30 s apart, so that two in a row don't add up to an outage over it"
+    (is (= 30 (:nemesis-min-gap (:options (parse ["--scenario" "udt-kill"])))))
+    (is (= 30 (:nemesis-min-gap (:options (parse ["--scenario" "udt-partition"])))))
+    (is (= 0 (:nemesis-min-gap (:options (parse ["--scenario" "udt-pause"])))))))
+
 (deftest expand
   (testing "a scenario's arguments follow the option, so later ones override them"
     (let [{:keys [options errors]} (parse ["--scenario" "c-08" "--time-limit" "60"])]
@@ -92,7 +109,8 @@
     (is (= (scenarios/select "p1") (scenarios/select "p1,c-08")))
     (is (thrown? clojure.lang.ExceptionInfo (scenarios/select "c-99"))))
   (testing "extra: the scenarios the plan doesn't have"
-    (is (= ["power-sync-off" "power-sync-on"] (scenarios/select "extra"))))
+    (is (= ["power-sync-off" "power-sync-on" "udt-kill" "udt-partition" "udt-pause"]
+           (scenarios/select "extra"))))
   (testing "run.sh's arguments: a scenario's compose file, then the scenario"
     (is (= {:name "c-15", :priority "p1", :args "--compose cch --scenario c-15"}
            (first (scenarios/matrix "c-15"))))

@@ -28,7 +28,8 @@
                           [scenarios :as scenarios]
                           [schedule :as schedule]
                           [swap :as swap]
-                          [topology :as topology]]
+                          [topology :as topology]
+                          [udt :as udt]]
             [jepsen.fiber.faults [chain-partition :as chain-partition]
                                  [clock :as clock]
                                  [lnd-disconnect :as lnd-disconnect]
@@ -123,6 +124,7 @@
   the test map (:seed): pass it as --seed to run the same payments and faults again."
   [opts]
   (swap/check-opts! opts)
+  (udt/check-opts! opts)
   (let [db      (cond-> (db/db) (:cch opts) cch/db)
         faults  (set (:faults opts))
         pkg     (nemesis-package db opts)
@@ -226,6 +228,13 @@
     :default  :line
     :parse-fn keyword
     :validate [topology/topologies (str "Must be one of " (keys topology/topologies))]]
+   [nil "--asset ASSET" (str "What the channels hold and the payments move: ckb, or udt, the"
+                             " devnet's simple UDT, which only n1-n3 hold (jepsen.fiber.udt). With"
+                             " udt every channel opened at setup is funded with the token and every"
+                             " payment, invoice and probe is in it.")
+    :default  :ckb
+    :parse-fn keyword
+    :validate [#{:ckb :udt} "Must be ckb or udt"]]
    [nil "--rate HZ" "Approximate number of payments per second."
     :default  5
     :parse-fn parse-double]
@@ -259,6 +268,16 @@
    [nil "--nemesis-interval SECONDS" "Seconds between fault operations."
     :default  15
     :parse-fn parse-long]
+   [nil "--nemesis-min-gap SECONDS"
+    (str "With --process-duration or --partition-duration, at least this many seconds between"
+         " the end of a kill, pause or partition and the start of the fault's next one. The gaps"
+         " average --nemesis-interval and can be a fraction of a second, so two short faults in"
+         " a row can keep a node or a link away for as long as one long fault. 0 leaves the gaps"
+         " as drawn. Each fault paces itself: two faults in one test can still follow each other"
+         " closely.")
+    :default  0
+    :parse-fn parse-long
+    :validate [#(and % (<= 0 %)) "Must be 0 or more"]]
    [nil "--quiesce SECONDS" "Seconds to wait after healing before the final read."
     :default  30
     :parse-fn parse-long]

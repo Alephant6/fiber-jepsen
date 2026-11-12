@@ -7,7 +7,8 @@
                     [random :as rand]
                     [util :refer [await-fn]]]
             [jepsen.fiber [rpc :as rpc]
-                          [topology :as topology]])
+                          [topology :as topology]
+                          [udt :as udt]])
   (:import (java.io IOException)
            (java.net ConnectException)
            (org.apache.http.conn ConnectTimeoutException)))
@@ -61,15 +62,16 @@
 (defn call-send-payment!
   "Calls send_payment on `node` with `params`; with --ledger the payment carries
   attempt `id`, with --final-tlc-expiry-delta the last hop's TLC expires that
-  many ms after it is sent, and with --tlc-expiry-limit no TLC of the payment
-  expires more than that many ms after it is sent. Returns send_payment's
+  many ms after it is sent, with --tlc-expiry-limit no TLC of the payment
+  expires more than that many ms after it is sent, and with --asset udt it pays
+  in the token. Returns send_payment's
   result, or
     {::definite error}    the node certainly created no payment;
     {::indefinite error}  it may have: the call timed out or the connection dropped."
   [test node params id]
   (try
     (rpc/call node "send_payment"
-              (cond-> params
+              (cond-> (merge params (udt/payment-params))
                 (and (:ledger test) id)        (assoc :custom_records (attempt-records id))
                 (:final-tlc-expiry-delta test) (assoc :final_tlc_expiry_delta
                                                       (rpc/int->hex (:final-tlc-expiry-delta test)))
