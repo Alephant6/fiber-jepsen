@@ -88,13 +88,14 @@
   "The gaps in ns between this fault's ops. Without :process-duration, every
   fault's gaps. With it ([min max] seconds), the ops pair up (see `ops`), each
   kill or pause lasts a whole number of seconds drawn from a stream of its own,
-  and the gaps after each recovery come from the usual gap stream."
+  and the gaps after each recovery come from the usual gap stream, none shorter
+  than :nemesis-min-gap seconds."
   [streams opts]
   (let [usual (schedule/gaps (schedule/gaps-stream streams :db) (:nemesis-interval opts))]
     (if-let [[lo hi] (:process-duration opts)]
       (let [^java.util.SplittableRandom r (schedule/stream streams :process-duration)]
         (interleave (repeatedly #(* 1000000000 (+ lo (.nextInt r (int (inc (- hi lo)))))))
-                    usual))
+                    (schedule/at-least (:nemesis-min-gap opts) usual)))
       usual)))
 
 (defn term-exits

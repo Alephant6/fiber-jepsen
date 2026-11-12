@@ -330,7 +330,44 @@
                             " writes in a cache of its own until fsync; a power loss SIGKILLs fnn on"
                             " one node or all of them and drops that cache. Needs Fiber from"
                             " 4777d5d6 (#1703): an earlier build ignores the setting, and the power"
-                            " check is then unknown.")}))
+                            " check is then unknown.")}
+    "trampoline-kill"
+            {:priority :extra
+             :plan     (str "Not in the plan. Trampoline payments: the sender routes to a"
+                            " trampoline node, which finds the rest of the way, while nodes are"
+                            " killed and restarted")
+             :args     ["--nodes" "n1,n2,n3,n4,n5,n6" "--topology" "mesh" "--acceptor-funding" "1000"
+                        "--faults" "kill" "--kill-targets" "one" "--process-duration" "5-20"
+                        "--pay-kinds" "trampoline,invoice" "--trampoline-hops" "1-2"
+                        "--nemesis-interval" "20" "--nemesis-min-gap" "30"
+                        "--time-limit" "300" "--quiesce" "60"
+                        "--probe-routes" "--ledger"]
+             :differs  (str "Six nodes, each with channels to three others (the ring and its"
+                            " diameters), both ends of every channel funded, so a trampoline node"
+                            " has routes to choose from. Each payment is a trampoline or an invoice"
+                            " payment, drawn uniformly; a trampoline payment names one or two of"
+                            " the other four nodes, so it has two or three legs, each routed by the"
+                            " node that starts it. A kill (SIGKILL) takes one node for 5-20 s,"
+                            " under fnn's 30 s peer deadline: a trampoline node can die holding the"
+                            " TLC of one leg while its payment for the next is in flight. A closed"
+                            " channel fails the run. A kill starts at least 30 s after the last"
+                            " one's node is back (--nemesis-min-gap 30), since two in a row can"
+                            " add up to an outage longer than the deadline.")}
+    "trampoline-partition"
+            {:priority :extra
+             :plan     (str "Not in the plan. Trampoline payments: the sender routes to a"
+                            " trampoline node, which finds the rest of the way, while partitions"
+                            " isolate a node")
+             :args     ["--nodes" "n1,n2,n3,n4,n5,n6" "--topology" "mesh" "--acceptor-funding" "1000"
+                        "--faults" "partition" "--partition-targets" "one" "--partition-duration" "5-15"
+                        "--pay-kinds" "trampoline,invoice" "--trampoline-hops" "1-2"
+                        "--nemesis-interval" "20" "--nemesis-min-gap" "30"
+                        "--time-limit" "300" "--quiesce" "60"
+                        "--probe-routes" "--ledger"]
+             :differs  (str "As trampoline-kill, with a partition that isolates one node for"
+                            " 5-15 s in place of the kill, and as far apart: a trampoline node that"
+                            " can't reach the"
+                            " next leg has to retry another route or fail the first leg back.")}))
 
 (defn scenario-args
   "The arguments of scenario `name`. Throws for an unknown name."

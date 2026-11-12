@@ -273,3 +273,34 @@
       (is (= :unbalanced (:outcome r)))))
   (testing "the line keeps its exact check"
     (is (nil? (:fees (check (line-channels 1000 500 1000 500) {"n1" [], "n2" [], "n3" []} []))))))
+
+(deftest trampoline-payments
+  ; n1 pays its neighbour n2 50 by way of trampoline node n3, for a fee of 3:
+  ; n1 -> n2 -> n3 (n2 forwards and keeps 1), then n3 -> n2 (n3 keeps 2).
+  (let [moves   {"0x12" 53, "0x23" 2}
+        listing (assoc no-listing "n1" [(listed "0xa1" 1 "Success" 3)])
+        ops     (fn [extra] [(pay :ok 1 "n1" "n2" 50 (merge {:hash "0xa1", :fee 3} extra))])]
+    (testing "the receiver forwarded its own payment: within its bound for a trampoline payment"
+      (let [r (ring-check moves listing (ops {:kind :trampoline, :via ["n3"]}))]
+        (is (= :balanced (:outcome r)))
+        (is (= {"n1" 0, "n2" 1, "n3" 2, "n4" 0} (update-vals (:nodes r) :diff)))
+        (is (= {"n1" 3, "n2" 3, "n3" 3, "n4" 3} (update-vals (:nodes r) :forwarded-max)))
+        (is (= {:paid 3, :forwarded 3} (:fees r)))))
+    (testing "but not for any other kind"
+      (let [r (ring-check moves listing (ops {:kind :invoice}))]
+        (is (= :unbalanced (:outcome r)))
+        (is (= ["n2"] (:unbalanced-nodes r)))))
+    (testing "a test that sends them bounds the income on the line too"
+      (let [test   {:nodes nodes, :initial-channels (atom initial), :pay-kinds [:trampoline :invoice]}
+            ; n1 pays n2 100 by way of n3, fee 3: n2 keeps 1 forwarding, n3 keeps 2.
+            read   {:type  :ok
+                    :f     :read
+                    :value {:channels (line-channels 897 603 998 502)
+                            :listed   {"n1" [(listed "0xa1" 1 "Success" 3)], "n2" [], "n3" []}}}
+            op     (pay :ok 1 "n1" "n2" 100 {:hash "0xa1", :fee 3, :kind :trampoline, :via ["n3"]})
+            r      (checker/check (ledger/checker) test [op read] {})]
+        (is (= :balanced (:outcome r)))
+        (is (= {:paid 3, :forwarded 3} (:fees r)))
+        (testing "without the kind, the line's exact check fails it"
+          (is (= :unbalanced
+                 (:outcome (checker/check (ledger/checker) (dissoc test :pay-kinds) [op read] {})))))))))

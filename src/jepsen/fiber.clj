@@ -28,7 +28,8 @@
                           [scenarios :as scenarios]
                           [schedule :as schedule]
                           [swap :as swap]
-                          [topology :as topology]]
+                          [topology :as topology]
+                          [trampoline :as trampoline]]
             [jepsen.fiber.faults [chain-partition :as chain-partition]
                                  [clock :as clock]
                                  [lnd-disconnect :as lnd-disconnect]
@@ -51,7 +52,8 @@
   "Payments for the whole fault window, drawn from the run's seed (see
   jepsen.fiber.schedule): 0.01-0.2 CKB each, about :rate a second, of the kinds
   in --pay-kinds (keysend, invoice: jepsen.fiber.invoice, mpp:
-  jepsen.fiber.mpp, whose amounts are --mpp-amount's). With --close,
+  jepsen.fiber.mpp, whose amounts are --mpp-amount's, trampoline:
+  jepsen.fiber.trampoline). With --close,
   every channel is asked to close cooperatively halfway through, and payments go on
   against the closing channels, from a stream of their own."
   [opts streams]
@@ -175,6 +177,7 @@
                                       (:nonce-check opts) (assoc :nonce (nonce/checker))
                                       (:ledger opts)      (assoc :ledger (ledger/checker))
                                       (mpp/enabled? opts) (assoc :mpp (mpp/checker))
+                                      (trampoline/enabled? opts) (assoc :trampoline (trampoline/checker))
                                       (:onchain opts)     (assoc :onchain (onchain/checker))
                                       (seq (:channel-ops opts)) (assoc :channels (channels/checker))
                                       (:expiry-check opts) (assoc :expiry (expiry/checker))
@@ -232,7 +235,9 @@
    [nil "--pay-kinds KINDS" (str "Comma-separated payment kinds, each payment's drawn uniformly from"
                                  " them (list one twice to draw it twice as often): keysend, invoice,"
                                  " mpp (an invoice that allows multi-part payment, of --mpp-amount;"
-                                 " checks that each ends all or nothing).")
+                                 " checks that each ends all or nothing), trampoline (the sender"
+                                 " routes to a trampoline node, which finds the rest of the way;"
+                                 " --trampoline-hops of them).")
     :default  [:keysend]
     :parse-fn keywords
     :validate [#(every? (methods client/send-payment!) %)
@@ -248,6 +253,14 @@
                                  " (send_payment's max_parts, 2-24). Default: Fiber's (12).")
     :parse-fn parse-long
     :validate [#(and % (<= 2 % 24)) "Must be 2 to 24"]]
+   [nil "--trampoline-hops N" (str "With --pay-kinds trampoline, how many trampoline nodes each"
+                                   " payment names (send_payment's trampoline_hops, at most 5), or"
+                                   " a range MIN-MAX the counts are drawn from. The nodes are drawn"
+                                   " from those other than the sender and receiver; all of them"
+                                   " when they are fewer.")
+    :default  trampoline/default-hops
+    :parse-fn partition/parse-duration
+    :validate [(fn [[lo hi]] (and lo hi (<= 1 lo hi 5))) "Must be N or MIN-MAX, 1 <= MIN <= MAX <= 5"]]
    [nil "--acceptor-funding CKB" (str "CKB the acceptor of each channel opened at setup puts in, as"
                                       " the opener puts in 1000 (Fiber's"
                                       " auto_accept_channel_ckb_funding_amount, through"
@@ -259,6 +272,16 @@
    [nil "--nemesis-interval SECONDS" "Seconds between fault operations."
     :default  15
     :parse-fn parse-long]
+   [nil "--nemesis-min-gap SECONDS"
+    (str "With --process-duration or --partition-duration, at least this many seconds between"
+         " the end of a kill, pause or partition and the start of the fault's next one. The gaps"
+         " average --nemesis-interval and can be a fraction of a second, so two short faults in"
+         " a row can keep a node or a link away for as long as one long fault. 0 leaves the gaps"
+         " as drawn. Each fault paces itself: two faults in one test can still follow each other"
+         " closely.")
+    :default  0
+    :parse-fn parse-long
+    :validate [#(and % (<= 0 %)) "Must be 0 or more"]]
    [nil "--quiesce SECONDS" "Seconds to wait after healing before the final read."
     :default  30
     :parse-fn parse-long]
