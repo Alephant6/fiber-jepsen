@@ -15,7 +15,8 @@
   so this rarely makes channels reestablish; the disconnect fault does. A node
   waiting more than 30 s for its peer's reply force-closes the channel (fnn's
   PEER_CHANNEL_RESPONSE_TIMEOUT), so a partition longer than that usually closes
-  the channels across it (open question 1 on the chaos-test plan).
+  the channels across it, which the Fiber team expects
+  (--force-close-ok-after, jepsen.fiber.closes).
 
   Healing deletes the partitions' own rules only (`net`), so that it doesn't
   also end a chain partition that is in effect at the time."

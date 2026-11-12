@@ -164,7 +164,9 @@
                                                                                         (closes/checker)
 
                                                                                         (:force-close-ok-after opts)
-                                                                                        (closes/checker (:force-close-ok-after opts))
+                                                                                        (closes/checker
+                                                                                          {:seconds (:force-close-ok-after opts)
+                                                                                           :kinds   (some-> (:force-close-ok-kinds opts) set)})
 
                                                                                         :else
                                                                                         (fiber-checker/checker))
@@ -492,16 +494,21 @@
                         " node's payments in the final read.")]
    [nil "--probe-routes" (str "After healing, also pay from every node to every node it has no"
                               " channel with, so that the probe tests multi-hop routing.")]
-   [nil "--force-close-ok" (str "Don't fail the run for channels that ended closed, nor for what"
-                                " they explain (open question 1 on the chaos-test plan: a pause or"
-                                " partition over 30 s force-closes channels). They are reported.")]
+   [nil "--force-close-ok" (str "Don't fail the run for channels that ended closed, whatever"
+                                " closed them, nor for what they explain. They are reported.")]
    [nil "--force-close-ok-after SECONDS"
-    (str "Like --force-close-ok, but only for a channel one of whose ends was killed or paused,"
-         " or whose ends a partition cut apart, for longer than SECONDS during the run (fnn's"
-         " peer deadline is 30 s): open question 1 answered \"expected\". A channel closed"
-         " without such a fault still fails the run. --force-close-ok overrides it.")
+    (str "Don't fail the run for a channel that ended closed after an outage longer than"
+         " SECONDS (fnn's peer deadline is 30 s): one of its ends was killed, paused or powered"
+         " off, or a partition cut its ends apart, and fnn's logs show the close came once the"
+         " outage had lasted that long, for no other reason than the peer's silence. A channel"
+         " closed otherwise still fails the run. --force-close-ok overrides it.")
     :parse-fn parse-long
     :validate [#(and % (pos? %)) "Must be positive"]]
+   [nil "--force-close-ok-kinds KINDS"
+    (str "With --force-close-ok-after, the comma-separated kinds of outage that count: kill,"
+         " pause, partition, power, outage. Default: all of them.")
+    :parse-fn keywords
+    :validate [#(every? closes/kinds %) (str "Must be a subset of " closes/kinds)]]
    [nil "--onchain" (str "After the final read, close every channel and check on chain that each"
                          " party received its last balance plus its reserve, less fees, and that"
                          " every node's wallet changed by what its channels' transactions explain.")]

@@ -25,9 +25,18 @@ With `--close`, every channel is asked to close cooperatively halfway through th
 
 With `--ledger`, it also checks that money adds up at every node, not only on every channel (see [below](#per-node-ledger---ledger)).
 
-With `--force-close-ok`, a channel that ended closed (every end `Closed`) doesn't fail the run, nor do its ends' balances, a payment whose TLC it still holds, a probe over it, or a route probe between nodes it cut apart; the result lists them under `:force-closed`. A node force-closes a channel when its peer hasn't answered an update for 30 s, so a pause or partition longer than that closes channels. Whether that is expected is open question 1 on the [chaos-test plan](https://gist.github.com/quake/c73bba93b5b1928391063038fc9fe34a); until it is answered, the default stays: a closed channel fails the run.
+A node force-closes a channel when its peer hasn't answered an update for 30 s (`PEER_CHANNEL_RESPONSE_TIMEOUT`), so a fault that keeps a node silent for longer than that closes its channels with an update in flight. The Fiber team expects that after a pause or a partition longer than the deadline. By default a closed channel still fails the run; the scenarios whose faults can last that long (kills, pauses, partitions, power losses) add `--force-close-ok-after 30`.
 
-`--force-close-ok-after SECONDS` is the narrower rule, for when the answer is "expected": it excuses a closed channel only when, during the run, one of its ends was killed or paused, or a partition cut its two ends apart, for longer than SECONDS (30 for fnn's deadline). A channel closed with no such fault behind it (a clock step, a panicked actor, a slow node) still fails the run; `:force-closed` lists under `:because` the fault that excused each channel and under `:not-excused` the ones it couldn't. It matters most when many faults run at once (C-16), where `--force-close-ok` would also hide closes that open question 1 doesn't cover.
+`--force-close-ok-after SECONDS` excuses a channel that ended closed (every end `Closed`) when both of these hold:
+
+1. An outage touched it for longer than SECONDS: one of its ends was killed, paused or powered off, or a partition cut its two ends apart. `--force-close-ok-kinds kill,pause,partition,power,outage` narrows which faults count (default: all of them).
+2. fnn's logs agree. The first end to force-close the channel did so once such an outage had lasted SECONDS (less 5 s, since a peer may already have been waiting when the fault began), and at most SECONDS plus a minute after it ended (fnn checks its channels' deadlines once a minute, so a node that comes back past its deadline can take that long). And it logged no other reason than its peer's silence: `is inactive for a time`, or nothing (the V2 deadline's check in channel maintenance is silent). A close fnn logged another reason for (the revocation nonce ledger unbalanced, a reestablish that timed out, a `commitment_signed` that failed to verify) is not the peer deadline at work.
+
+The logs can't tell when no end logged a forced close, or when a fault moved fnn's clock (`clock`, `--outage-jump`), which moves its log's timestamps; the outage alone then decides, and the result says so (`:logs-not-used`). The control node's wall clock on every fault operation (`:wall-ms`) is what places fnn's timestamps in the run.
+
+An excused channel also excuses its ends' balances, a payment whose TLC it still holds (and that payment's pending TLCs on channels still open), a probe over it, and a route probe between nodes it cut apart. Everything else fails as before: a channel closed with no outage behind it (a clock step, a panicked actor, a slow node), before the outage had lasted the deadline, long after it ended, or for another reason. The result lists the excused channels under `:force-closed`, each with the outage that excused it and what the logs said (`:because`: `:closed-by`, `:closed-at-s`, `:logged`), the others under `:not-excused` and `:not-excused-why`, and one-line counts under `:closes-excused` and `:closes-not-excused`, which the Actions summary shows in its Channels column.
+
+`--force-close-ok` excuses every closed channel, whatever closed it. It is for the scenarios whose point is a close: C-03's expired TLCs and C-11's old state.
 
 With `--onchain`, after the final read it closes every channel and checks on chain that each party got its last balance (see [below](#on-chain-settlement---onchain)).
 
@@ -75,7 +84,7 @@ Why a clock fault: Fiber expires TLCs by wall-clock timestamp (off-chain checks 
   - `checker.clj` (invariants)
   - `health.clj` (process health: panics, and a sample of every node after healing)
   - `ledger.clj` (per-node money check, with `--ledger`)
-  - `closes.clj` (what `--force-close-ok` excuses)
+  - `closes.clj` (which closed channels `--force-close-ok-after` and `--force-close-ok` excuse)
   - `nonce.clj` (MuSig2 nonce reuse, with `--nonce-check`)
   - `onchain.clj` and `chain.clj` (on-chain settlement, with `--onchain`; reading the CKB node)
   - `expiry.clj` (C-03: TLCs taken back on chain after they expire, with `--expiry-check`)

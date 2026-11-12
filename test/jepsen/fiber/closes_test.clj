@@ -151,6 +151,34 @@
   [{:type :info, :process :nemesis, :f f, :time (long (* 1e9 (- s 0.5)))}
    {:type :info, :process :nemesis, :f f, :value value, :time (long (* 1e9 s))}])
 
+(def epoch-ms
+  "The wall-clock time of the history's time 0 in the tests with logs:
+  2026-01-01T00:00:00Z."
+  1767225600000)
+
+(defn wall
+  "`ops` with the wall clock on each completion, as jepsen.fiber.health/stamped
+  leaves them."
+  [ops]
+  (for [op ops]
+    (cond-> op
+      (contains? op :value) (assoc :wall-ms (+ epoch-ms (quot (:time op) 1000000))))))
+
+(defn at
+  "fnn's log timestamp `s` seconds into the history."
+  [s]
+  (str (java.time.Instant/ofEpochMilli (+ epoch-ms (long (* 1000 s))))))
+
+(defn inactive
+  [s id]
+  (str (at s) " ERROR fnn::fiber::channel: Channel Hash256(" id ") from peer Pubkey(02ab) is inactive"
+       " for a time, shutting down it forcefully"))
+
+(defn broadcast
+  [s id]
+  (str (at s) "  INFO fnn::fiber::network: Channel (Hash256(" id ")) to peer Pubkey(02ab) is closed"
+       " Byte32(0x77). Broadcasting closing transaction (\"forcefully\") now."))
+
 (def faults-history
   (vec (concat (nem 10 :kill {"n2" :killed})
                (nem 12 :pause {"n4" "T"})
@@ -169,12 +197,44 @@
           {:kind :kill, :node "n2", :seconds 40.0}
           {:kind :kill, :node "n1", :seconds 60.0}
           {:kind :partition, :nodes #{"n3" "n4"}, :seconds 70.0}]
-         (sort-by :seconds (map #(dissoc % :from :to) (closes/outages faults-history)))))
+         (sort-by :seconds (map #(dissoc % :began :from :to) (closes/outages faults-history)))))
+  (testing "a spell begins when its op was invoked, and counts from when it completed"
+    (is (= [[(long 9.5e9) (long 10e9) (long 50e9)]]
+           (for [s (closes/outages faults-history) :when (= "n2" (:node s))]
+             ((juxt :began :from :to) s)))))
   (testing "a spell nothing ends lasts until the history does"
     (is (= [{:kind :kill, :node "n2", :seconds 30.0}]
-           (map #(dissoc % :from :to)
+           (map #(dissoc % :began :from :to)
                 (closes/outages (concat (nem 10 :kill {"n2" :killed})
-                                        [{:type :ok, :process 0, :f :read, :time (long 40e9)}])))))))
+                                        [{:type :ok, :process 0, :f :read, :time (long 40e9)}]))))))
+  (testing "a power loss lasts until the power-on that started fnn"
+    (is (= [{:kind :power, :node "n1", :seconds 20.0}
+            {:kind :power, :node "n2", :seconds 50.0}]
+           (map #(dissoc % :began :from :to)
+                (closes/outages
+                  (concat (nem 10 :power-off {"n1" {:store-bytes-before 9, :store-bytes-after 8}
+                                              "n2" {:store-bytes-before 9, :store-bytes-after 9}})
+                          (nem 30 :power-on {"n1" :started, "n2" "RPC didn't come back: timeout"})
+                          (nem 60 :power-on {"n2" :started})))))))
+  (testing "an outage op is one spell, as long as its node was down"
+    (is (= [{:kind :outage, :node "n2", :seconds 150.0, :began (long 50e9), :from (long 50e9)
+             :to (long 200e9)}]
+           (closes/outages (nem 200 :outage {:node "n2", :duration-s 150, :down-ms 150000
+                                             :caught []})))))
+  (testing "a one-way partition cuts the pair too"
+    (is (= [#{"n1" "n2"} #{"n1" "n3"}]
+           (sort-by (comp vec sort)
+                    (map :nodes (closes/outages
+                                  (concat (nem 10 :start-partition [:isolated {"n1" #{"n2" "n3"}}])
+                                          (nem 50 :stop-partition :network-healed)))))))))
+
+(deftest candidates
+  (testing "every spell over the deadline that touched the channel, the longest first"
+    (is (= [60.0 40.0] (map :seconds ((closes/candidates faults-history 30) ["n1" "n2"])))))
+  (testing "only the kinds that count"
+    (is (= [] ((closes/candidates faults-history 30 #{:pause :partition}) ["n1" "n2"])))
+    (is (= [:partition] (map :kind ((closes/candidates faults-history 30 #{:pause :partition})
+                                    ["n3" "n4"]))))))
 
 (deftest explainer
   (let [why (closes/explainer faults-history 30)]
@@ -220,3 +280,134 @@
         (is (= true (:valid? r)))
         (is (= {:kind :partition, :nodes ["n2" "n3"], :seconds 40.0}
                (get-in r [:force-closed :because "0x23"])))))))
+
+(deftest log-closes
+  (let [lines [(str (at 1) "  INFO fnn: Starting node with git version abc")
+               (inactive 40.25 "0x23")
+               (broadcast 40.3 "0x23")
+               ; A second line about the same channel changes nothing.
+               (inactive 100 "0x23")
+               ; The V2 deadline in channel maintenance logs no reason.
+               (broadcast 70 "0x41")
+               (str (at 80) " ERROR fnn::fiber::channel: Channel Hash256(0x12) from peer Pubkey(02ab) has been"
+                    " reestablishing too long, shutting down it forcefully")
+               (str "\u001b[2m" (at 81) "\u001b[0m \u001b[31mERROR\u001b[0m fnn::fiber::channel:"
+                    " Channel Hash256(0x34) from peer Pubkey(02ab) cannot add or remove TLCs: its revocation"
+                    " nonce ledger has been unbalanced for over 30000 ms (send_present=true,"
+                    " verify_present=false) with no CommitmentSigned or RevokeAndAck from the peer,"
+                    " shutting down it forcefully")
+               (str (at 82) " ERROR fnn::fiber::channel: Channel 0x56 from peer Pubkey(02ab) has spent"
+                    " over 300000 ms waiting for channel recovery, shutting down it forcefully")
+               (str (at 83) " ERROR fnn::fiber::channel: Failed to verify commitment_signed message:"
+                    " InvalidParameter(\"bad\"), shutdown channel Hash256(0x78) forcefully")
+               ; A cooperative close is not a forced one.
+               (str (at 90) "  INFO fnn::fiber::network: Channel (Hash256(0x99)) to peer Pubkey(02ab) is"
+                    " closed Byte32(0x77). Broadcasting closing transaction (\"cooperatively\") now.")]]
+    (is (= {"0x23" {:at-ms (+ epoch-ms 40250), :reason :peer-deadline}
+            "0x41" {:at-ms (+ epoch-ms 70000), :reason :silent}
+            "0x12" {:at-ms (+ epoch-ms 80000), :reason :reestablish-timeout}
+            "0x34" {:at-ms (+ epoch-ms 81000), :reason :nonce-ledger}
+            "0x56" {:at-ms (+ epoch-ms 82000), :reason :reestablish-timeout}
+            "0x78" {:at-ms (+ epoch-ms 83000), :reason :commitment-signed}}
+           (closes/log-closes lines)))))
+
+(deftest wall-clock
+  (is (nil? (closes/wall-origin-ms faults-history)))
+  (is (= epoch-ms (closes/wall-origin-ms (wall faults-history))))
+  (is (false? (closes/clocks-moved? {:faults [:kill :partition]})))
+  (is (true? (closes/clocks-moved? {:faults [:kill :clock]})))
+  (is (true? (closes/clocks-moved? {:faults [:outage], :outage-jump 34200}))))
+
+(defn run-logs
+  "As `run-after`, with the wall clock in the history and `logs`, {node lines},
+  as the nodes' fnn logs. `test-opts` adds to the test map; `opts` to the
+  rule's options."
+  [final faults logs & [test-opts opts]]
+  (let [test (merge {:nodes nodes, :topology :ring, :initial-channels (atom (ring))} test-opts)]
+    (checker/check (closes/checker (merge {:seconds     30
+                                           :read-closes (fn [_ node]
+                                                          (some-> (get logs node) closes/log-closes))}
+                                          opts))
+                   test
+                   (concat (wall faults)
+                           [{:type :ok, :f :probe, :value all-probes, :time (long 400e9)}
+                            {:type :ok, :f :read, :value {:channels final, :payments []}
+                             :time (long 401e9)}])
+                   {})))
+
+(deftest what-the-logs-say
+  (let [closed (ring {["0x23" "n2"] "Closed", ["0x23" "n3"] "Closed"} {})
+        ; n3 is down from 100 s to 160 s.
+        kill   (concat (nem 100 :kill {"n3" :killed}) (nem 160 :start {"n3" :started}))]
+    (testing "the peer closed once the outage had lasted the deadline"
+      (let [r (run-logs closed kill {"n2" [(inactive 129 "0x23") (broadcast 129.1 "0x23")], "n3" []})]
+        (is (= true (:valid? r)))
+        (is (= {"0x23" {:kind :kill, :node "n3", :seconds 60.0
+                        :closed-by "n2", :closed-at-s 129.0, :logged :peer-deadline}}
+               (get-in r [:force-closed :because])))
+        (is (= "1: kill 1" (:closes-excused r)))
+        (is (nil? (get-in r [:force-closed :logs-not-used])))))
+    (testing "the node that was down closed when it came back, without a reason logged"
+      (let [r (run-logs closed kill {"n2" [], "n3" [(broadcast 215 "0x23")]})]
+        (is (= true (:valid? r)))
+        (is (= {:closed-by "n3", :closed-at-s 215.0, :logged :silent}
+               (select-keys (get-in r [:force-closed :because "0x23"])
+                            [:closed-by :closed-at-s :logged])))))
+    (testing "a close before the outage, or before it had lasted the deadline, isn't its doing"
+      (doseq [t [50 110 120]]
+        (let [r (run-logs closed kill {"n2" [(inactive t "0x23")]})]
+          (is (= false (:valid? r)))
+          (is (= ["0x23"] (get-in r [:force-closed :not-excused])))
+          (is (= :outside-the-outages (get-in r [:force-closed :not-excused-why "0x23" :why])))
+          (is (= [{:kind :kill, :node "n3", :seconds 60.0, :from-s 99.5, :to-s 160.0}]
+                 (get-in r [:force-closed :not-excused-why "0x23" :outages])))
+          (is (= "1: outside-the-outages 1" (:closes-not-excused r))))))
+    (testing "nor is one long after the node came back"
+      (let [r (run-logs closed kill {"n3" [(inactive 260 "0x23")]})]
+        (is (= false (:valid? r)))
+        (is (= :outside-the-outages (get-in r [:force-closed :not-excused-why "0x23" :why])))))
+    (testing "a close fnn gave another reason for isn't the peer deadline"
+      (let [line (str (at 135) " ERROR fnn::fiber::channel: Channel Hash256(0x23) from peer Pubkey(02ab) cannot"
+                      " add or remove TLCs: its revocation nonce ledger has been unbalanced for over"
+                      " 30000 ms (send_present=true, verify_present=false) with no CommitmentSigned"
+                      " or RevokeAndAck from the peer, shutting down it forcefully")
+            r    (run-logs closed kill {"n2" [line (broadcast 135.1 "0x23")]})]
+        (is (= false (:valid? r)))
+        (is (= {:why :another-reason, :closed-by "n2", :closed-at-s 135.0, :logged :nonce-ledger}
+               (get-in r [:force-closed :not-excused-why "0x23"])))))
+    (testing "the first end to close decides: what the other end logged later doesn't count"
+      (let [late (str (at 300) " ERROR fnn::fiber::channel: Channel Hash256(0x23) from peer Pubkey(02ab) has"
+                      " been reestablishing too long, shutting down it forcefully")
+            r    (run-logs closed kill {"n2" [(inactive 130 "0x23")], "n3" [late]})]
+        (is (= true (:valid? r)))
+        (is (= "n2" (get-in r [:force-closed :because "0x23" :closed-by])))))
+    (testing "without a close in any log, the outage alone decides"
+      (let [r (run-logs closed kill {"n2" [], "n3" nil})]
+        (is (= true (:valid? r)))
+        (is (= {"0x23" {:kind :kill, :node "n3", :seconds 60.0}} (get-in r [:force-closed :because])))))
+    (testing "and so it does when a fault moved fnn's clock"
+      (let [r (run-logs closed kill {"n2" [(inactive 50 "0x23")]} {:faults [:kill :clock]})]
+        (is (= true (:valid? r)))
+        (is (= :clocks-moved (get-in r [:force-closed :logs-not-used])))))
+    (testing "a channel no outage touched isn't excused, and the logs say who closed it"
+      (let [r (run-logs closed (concat (nem 100 :kill {"n1" :killed}) (nem 160 :start {"n1" :started}))
+                        {"n2" [(inactive 129 "0x23")]})]
+        (is (= false (:valid? r)))
+        (is (= {:why :no-outage, :closed-by "n2", :closed-at-s 129.0, :logged :peer-deadline}
+               (get-in r [:force-closed :not-excused-why "0x23"])))))
+    (testing "only the kinds asked for count"
+      (let [logs {"n2" [(inactive 129 "0x23")]}
+            r    (run-logs closed kill logs {} {:kinds #{:pause :partition}})]
+        (is (= false (:valid? r)))
+        (is (= :no-outage (get-in r [:force-closed :not-excused-why "0x23" :why])))
+        (is (= [:partition :pause] (:force-close-ok-kinds r)))
+        (is (= true (:valid? (run-logs closed kill logs {} {:kinds #{:kill}}))))))))
+
+(deftest force-close-ok-counts
+  (let [closed {["0x23" "n2"] "Closed", ["0x23" "n3"] "Closed"}]
+    (is (= "1" (:closes-excused (run (ring closed {}) []
+                                     (mapv #(if (#{#{"n2" "n3"}} (set [(:from %) (:to %)]))
+                                              (assoc % :status "Failed")
+                                              %)
+                                           all-probes)))))
+    (is (nil? (:closes-excused (run (ring) [] all-probes))))))
