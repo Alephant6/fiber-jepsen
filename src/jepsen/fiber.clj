@@ -27,6 +27,7 @@
                           [onchain :as onchain]
                           [scenarios :as scenarios]
                           [schedule :as schedule]
+                          [slowfs :as slowfs]
                           [swap :as swap]
                           [topology :as topology]]
             [jepsen.fiber.faults [chain-partition :as chain-partition]
@@ -38,7 +39,8 @@
                                  [partition :as partition]
                                  [power :as power]
                                  [process :as process]
-                                 [resources :as resources]])
+                                 [resources :as resources]
+                                 [slow-io :as slow-io]])
   (:gen-class))
 
 (def supported-faults
@@ -450,6 +452,25 @@
                                         " default (false).")
     :parse-fn #(case % "true" true "false" false nil)
     :validate [boolean? "Must be true or false"]]
+   [nil "--slow-io-targets TARGETS" (str "With --faults slow-io, comma-separated target specs to choose"
+                                         " from: one (a node), middle (a node that forwards payments,"
+                                         " n2 in line), all (every node at once).")
+    :default  [:one]
+    :parse-fn keywords
+    :validate [#(every? slow-io/target-specs %) (str "Must be a subset of " slow-io/target-specs)]]
+   [nil "--slow-io-delay MS" (str "With --faults slow-io, how long each delayed operation on a slowed"
+                                  " node's store waits, in ms, or a range MIN-MAX drawn per slowdown."
+                                  " Delayed operations are served one at a time.")
+    :default  slow-io/default-delay-ms
+    :parse-fn partition/parse-duration
+    :validate [(fn [[lo hi]] (and lo hi (< 0 lo) (<= lo hi 10000))) "Must be MS or MIN-MAX, 0 < MIN <= MAX <= 10000"]]
+   [nil "--slow-io-ops OPS" (str "With --faults slow-io, the operations a slowdown delays,"
+                                 " comma-separated: write (every write of up to 128 KiB) and fsync"
+                                 " (fsync and fdatasync). fnn reaches fsync on every store write only"
+                                 " with --store-sync-writes true.")
+    :default  slow-io/default-ops
+    :parse-fn keywords
+    :validate [#(and (seq %) (every? slowfs/slow-ops %)) (str "Must be a subset of " slowfs/slow-ops)]]
    [nil "--old-state-targets TARGETS" (str "With --faults old-state, comma-separated target specs to"
                                            " choose from: one (any node), middle (a node that forwards"
                                            " payments, n2 in line).")

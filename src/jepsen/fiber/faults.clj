@@ -42,7 +42,8 @@
                                  [partition :as partition]
                                  [power :as power]
                                  [process :as process]
-                                 [resources :as resources]]))
+                                 [resources :as resources]
+                                 [slow-io :as slow-io]]))
 
 (def registry
   "Every fault, in the order their generators and final generators combine."
@@ -56,6 +57,7 @@
    resources/fault
    disk/fault
    power/fault
+   slow-io/fault
    cch-kill/fault
    lnd-disconnect/fault
    old-state/fault])

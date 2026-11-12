@@ -380,8 +380,8 @@
       (throw (ex-info (str "--old-state-targets middle: no node in topology "
                            (name (:topology opts :line)) " is on more than one channel")
                       {:type :no-middle-node, :nodes nodes})))
-    (when (some faults [:disk :power])
-      (throw (ex-info "--faults old-state can't run with disk or power: they move fnn's store"
+    (when (some faults [:disk :power :slow-io])
+      (throw (ex-info "--faults old-state can't run with disk, power or slow-io: they move fnn's store"
                       {:type :conflicting-faults})))
     (cons {:type :sleep, :value (:old-state-after opts 20)}
           (mapcat (fn [node]

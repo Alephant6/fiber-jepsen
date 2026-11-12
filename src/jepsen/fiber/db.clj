@@ -11,6 +11,7 @@
             [jepsen.control.util :as cu]
             [jepsen.lazyfs :as lazyfs]
             [jepsen.fiber [rpc :as rpc]
+                          [slowfs :as slowfs]
                           [topology :as topology]]
             [slingshot.slingshot :refer [try+]]))
 
@@ -48,6 +49,18 @@
   "Whether the test puts fnn's store on LazyFS (--faults power)."
   [test]
   (boolean (some #{:power} (:faults test))))
+
+(defn slow-store?
+  "Whether the test puts fnn's store on unreliablefs (--faults slow-io)."
+  [test]
+  (boolean (some #{:slow-io} (:faults test))))
+
+(defn store-filesystems
+  "The faults of the test that each put fnn's store on a filesystem of their
+  own. A test can use one of them."
+  [test]
+  (vec (keep (fn [[fault own?]] (when (own? test) fault))
+             [["disk" small-store?] ["power" lazyfs-store?] ["slow-io" slow-store?]])))
 
 (defn store-lazyfs
   "The jepsen.lazyfs map of `node`'s store: the store directory is a FUSE mount
@@ -189,15 +202,26 @@
 (defrecord FiberDB []
   db/DB
   (setup! [_ test node]
-    (when (and (small-store? test) (lazyfs-store? test))
-      (throw (ex-info "--faults disk and power each put fnn's store on a filesystem of their own; use one"
-                      {:type :disk-and-power})))
+    (let [own (store-filesystems test)]
+      (when (< 1 (count own))
+        (throw (ex-info (str "--faults " (str/join ", " own) " each put fnn's store on a filesystem"
+                             " of their own; use one")
+                        {:type :store-filesystems, :faults own}))))
     (c/su (c/exec :rm :-rf (store-dir node) logfile pidfile nonce-file)
           (when (small-store? test)
             ; The store directory becomes a link into small-fs.
             (c/exec :rm :-rf (str small-fs "/store") (str small-fs "/fill"))
             (c/exec :mkdir :-p (str small-fs "/store") (str (node-dir node) "/fiber"))
             (c/exec :ln :-s (str small-fs "/store") (store-dir node))))
+    (when (slow-store? test)
+      (when-not (slowfs/installed?)
+        (throw (ex-info (str "unreliablefs isn't in " node "'s image: run with --compose slowio"
+                             " (scripts/run.sh adds it for --faults slow-io, not for a scenario)")
+                        {:type :no-unreliablefs, :node node})))
+      (slowfs/mount!)
+      ; The store directory becomes a link into the mount.
+      (c/su (c/exec :mkdir :-p (str (node-dir node) "/fiber"))
+            (c/exec :ln :-s slowfs/store (store-dir node))))
     (when (lazyfs-store? test)
       ; Without it, jepsen.lazyfs would try to build LazyFS on the node.
       (when-not (c/su (cu/exists? lazyfs/bin))
@@ -212,6 +236,9 @@
     (c/su (cu/stop-daemon! binary pidfile))
     (when (lazyfs-store? test)
       (lazyfs/umount! (store-lazyfs node)))
+    (when (slow-store? test)
+      (slowfs/umount!)
+      (c/su (c/exec :rm :-rf slowfs/root)))
     (c/su (c/exec :rm :-rf (store-dir node))))
 
   db/Primary

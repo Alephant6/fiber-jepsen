@@ -77,6 +77,28 @@
       (is (= [:power] (:faults options)))
       (is (= sync (:store-sync-writes options))))))
 
+(deftest slow-io-scenarios
+  (testing "one node's store at a time, with a baseline and a recovery window"
+    (let [{:keys [options errors]} (parse ["--scenario" "slow-io"])]
+      (is (empty? errors))
+      (is (= [:slow-io] (:faults options)))
+      (is (= [:one] (:slow-io-targets options)))
+      (is (= [20 200] (:slow-io-delay options)))
+      (is (= 30 (:availability-window options)))))
+  (testing "every store at once, and kills whose restarts stay under fnn's deadline"
+    (let [{:keys [options errors]} (parse ["--scenario" "slow-io-kill"])]
+      (is (empty? errors))
+      (is (= #{:slow-io :kill} (set (:faults options))))
+      (is (= [:all] (:slow-io-targets options)))
+      (is (< (second (:process-duration options)) 30))))
+  (testing "a slow disk is no outage: forced closes fail the run"
+    (doseq [name ["slow-io" "slow-io-kill"]]
+      (let [options (:options (parse ["--scenario" name]))]
+        (is (not (:force-close-ok options)))
+        (is (nil? (:force-close-ok-after options))))))
+  (testing "the matrix builds the node image with unreliablefs"
+    (is (= "--compose slowio --scenario slow-io" (:args (first (scenarios/matrix "slow-io")))))))
+
 (deftest ledger-coverage
   (testing "every scenario checks the ledger, except where on-chain closes or swaps move the balances"
     (is (= #{"c-03" "c-09" "c-10" "c-11" "c-15"}
@@ -92,7 +114,7 @@
     (is (= (scenarios/select "p1") (scenarios/select "p1,c-08")))
     (is (thrown? clojure.lang.ExceptionInfo (scenarios/select "c-99"))))
   (testing "extra: the scenarios the plan doesn't have"
-    (is (= ["power-sync-off" "power-sync-on"] (scenarios/select "extra"))))
+    (is (= ["power-sync-off" "power-sync-on" "slow-io" "slow-io-kill"] (scenarios/select "extra"))))
   (testing "run.sh's arguments: a scenario's compose file, then the scenario"
     (is (= {:name "c-15", :priority "p1", :args "--compose cch --scenario c-15"}
            (first (scenarios/matrix "c-15"))))

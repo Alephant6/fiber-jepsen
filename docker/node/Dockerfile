@@ -11,6 +11,9 @@ ARG NODE_BASE=ubuntu:24.04
 # where jepsen.lazyfs runs it from; docker-compose.lazyfs.yml sets it. The default
 # skips building it.
 ARG LAZYFS=none
+# SLOWIO=build puts unreliablefs (for --faults slow-io, jepsen.fiber.slowfs) at
+# /opt/unreliablefs; docker-compose.slowio.yml sets it. The default skips building it.
+ARG SLOWIO=none
 
 FROM ${NODE_BASE} AS lazyfs-none
 RUN mkdir -p /opt/jepsen
@@ -27,6 +30,30 @@ RUN git clone --depth 1 --branch 0.3.0 https://github.com/dsrhaslab/lazyfs.git /
  && cd /opt/jepsen/lazyfs/lazyfs && ./build.sh
 
 FROM lazyfs-${LAZYFS} AS lazyfs
+
+FROM ${NODE_BASE} AS slowio-none
+RUN mkdir -p /opt/unreliablefs
+
+# unreliablefs at a fixed commit of its master branch (2024-04-02, newer than its
+# release 0.2.0). It is built against FUSE 2, and the final image has only FUSE 3,
+# so the library it loads is copied beside it; jepsen.fiber.slowfs starts it with
+# LD_LIBRARY_PATH=/opt/unreliablefs.
+FROM ${NODE_BASE} AS slowio-build
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      gcc g++ make cmake pkg-config libfuse-dev git ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+RUN git clone https://github.com/ligurio/unreliablefs.git /tmp/unreliablefs \
+ && cd /tmp/unreliablefs \
+ && git checkout --detach fa432252c117e82a0a36343895936f4fae246b56 \
+ && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+ && cmake --build build --target unreliablefs \
+ && mkdir -p /opt/unreliablefs \
+ && cp build/unreliablefs/unreliablefs /opt/unreliablefs/ \
+ && cp -L "$(ldd build/unreliablefs/unreliablefs | awk '/libfuse/ {print $3}')" /opt/unreliablefs/ \
+ && ls -l /opt/unreliablefs/unreliablefs /opt/unreliablefs/libfuse.so.2
+
+FROM slowio-${SLOWIO} AS slowio
 
 FROM ${NODE_BASE}
 
@@ -46,6 +73,7 @@ RUN ln -s "$(ls /usr/lib/*/faketime/libfaketimeMT.so.1)" /usr/local/lib/libfaket
  && mkdir -p /fiber && echo +0 >/fiber/faketime
 
 COPY --from=lazyfs /opt/jepsen /opt/jepsen
+COPY --from=slowio /opt/unreliablefs /opt/unreliablefs
 COPY build/bin/fnn /usr/local/bin/fnn
 COPY build/chain/tests/deploy/contracts /fiber/tests/deploy/contracts
 COPY build/nodes /fiber/tests/nodes
