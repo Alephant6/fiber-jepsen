@@ -167,6 +167,87 @@
       (is (= #{#{1 5} #{3}}
              (set (map #(set (map count %)) (cuts (ops 6 {:partition-targets [:one :half]})))))))))
 
+(deftest one-way-and-pair-partitions
+  (let [r       #(schedule/stream (schedule/streams %) :partition)
+        mesh    {:nodes six, :topology :mesh}
+        grudges (fn [seed opts]
+                  (->> ((:ops partition/fault) (r seed) (merge mesh opts))
+                       (take 400)
+                       (filter (comp #{:start-partition} :f))
+                       (map :value)))
+        edges   (set (map set (topology/edges mesh)))]
+    (testing "deaf: one node drops what every other node sends, and nobody drops what it sends"
+      (let [gs (grudges 3 {:partition-targets [:deaf]})]
+        (is (every? #(= 1 (count %)) gs))
+        (is (every? (fn [g] (let [[node sources] (first g)]
+                              (= (set six) (conj sources node))))
+                    gs))
+        (is (= (set six) (set (mapcat keys gs))))))
+    (testing "mute: every other node drops what one node sends, and it drops nothing"
+      (let [gs (grudges 3 {:partition-targets [:mute]})]
+        (is (every? #(= 5 (count %)) gs))
+        (is (every? #(= 1 (count (set (vals %)))) gs))
+        (is (every? (fn [g] (let [node (first (first (vals g)))]
+                              (= (set six) (conj (set (keys g)) node))))
+                    gs))))
+    (testing "pair: the two ends of one channel drop each other, and nothing else"
+      (let [gs (grudges 3 {:partition-targets [:pair]})]
+        (is (every? (fn [g] (let [[a b] (keys g)]
+                              (and (= 2 (count g)) (= {a #{b}, b #{a}} g) (edges #{a b}))))
+                    gs))
+        (is (= edges (set (map (comp set keys) gs))))))
+    (testing "pair-one-way: one end of a channel drops the other, either way round"
+      (let [gs (grudges 3 {:partition-targets [:pair-one-way]})]
+        (is (every? (fn [g] (let [[a sources] (first g)]
+                              (and (= 1 (count g)) (= 1 (count sources)) (edges #{a (first sources)}))))
+                    gs))
+        ; Both directions of some channel turn up.
+        (is (some (fn [g] (let [[a sources] (first g)]
+                            (some #{{(first sources) #{a}}} gs)))
+                  gs))))
+    (testing "the seed fixes them, and the specs mix"
+      (let [specs {:partition-targets [:deaf :mute :pair :pair-one-way]}]
+        (is (= (grudges 5 specs) (grudges 5 specs)))
+        (is (not= (grudges 5 specs) (grudges 6 specs)))
+        (is (= #{1 2 5} (set (map count (grudges 5 specs)))))))
+    (testing "a line of three has two channels to cut"
+      (is (= #{#{"n1" "n2"} #{"n2" "n3"}}
+             (set (map (comp set keys)
+                       (take 50 (filter map? (map :value (partition/ops (r 1) nodes [:pair]
+                                                                         (topology/edges {:nodes nodes}))))))))))
+    (testing "no channel, nothing to cut"
+      (is (thrown? clojure.lang.ExceptionInfo (partition/ops (r 1) nodes [:pair] []))))))
+
+(deftest partition-effect
+  (let [op (fn [grudge rules] {:type :info, :f :start-partition, :value [:isolated grudge], :rules rules})
+        ip #(str (topology/node-ip %) "/32")]
+    (is (= {"n1" #{"10.77.0.12/32" "10.77.0.13/32"}}
+           (partition/expected-rules {"n1" #{"n2" "n3"}, "n2" #{}})))
+    (testing "the rules found are the grudge's"
+      (is (nil? (partition/effect (op {"n1" #{"n2" "n3"}}
+                                      {"n1" #{(ip "n2") (ip "n3")}, "n2" #{}, "n3" #{}}))))
+      (is (nil? (partition/effect (op {"n1" #{"n2"}, "n2" #{"n1"}}
+                                      {"n1" #{(ip "n2")}, "n2" #{(ip "n1")}, "n3" #{}})))))
+    (testing "a one-way cut that came out two-way didn't take effect as meant"
+      (is (string? (partition/effect (op {"n1" #{"n2"}}
+                                         {"n1" #{(ip "n2")}, "n2" #{(ip "n1")}, "n3" #{}})))))
+    (testing "nor did one with a rule missing"
+      (is (string? (partition/effect (op {"n1" #{"n2" "n3"}} {"n1" #{(ip "n2")}, "n2" #{}, "n3" #{}}))))
+      (is (string? (partition/effect (op {"n1" #{"n2"}} {"n1" #{}, "n2" #{}, "n3" #{}})))))
+    (testing "another fault's rule for an address that isn't a node's doesn't count"
+      (is (nil? (partition/effect (op {"n1" #{"n2"}}
+                                      {"n1" #{(ip "n2") "10.77.0.2/32"}, "n2" #{}, "n3" #{}})))))
+    (testing "a history without the rules is taken at its word, and a healing isn't checked"
+      (is (nil? (partition/effect (op {"n1" #{"n2"}} nil))))
+      (is (nil? (partition/effect {:type :info, :f :stop-partition, :value :network-healed}))))
+    (testing "the :faults check reports it"
+      (let [bad (op {"n1" #{"n2"}} {"n1" #{}, "n2" #{}, "n3" #{}})
+            r   (faults/fired {:faults [:partition]}
+                              [{:type :info, :process :nemesis, :f :start-partition}
+                               (assoc bad :process :nemesis)])]
+        (is (= false (:valid? r)))
+        (is (= 1 (get-in r [:faults :partition :no-effect-count])))))))
+
 (deftest partition-durations
   (let [usual #(take 20 (schedule/gaps (schedule/gaps-stream (schedule/streams 9) :partition) 15))]
     (testing "without --partition-duration, the usual gaps"

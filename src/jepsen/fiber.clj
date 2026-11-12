@@ -333,7 +333,11 @@
     :validate [#(and % (<= 0 % 100)) "Must be 0 to 100"]]
    [nil "--partition-targets TARGETS" (str "With --faults partition, comma-separated target specs to"
                                            " choose from: one (one node), half (a random half of the"
-                                           " nodes).")
+                                           " nodes), deaf (one node hears nothing, the others still"
+                                           " hear it), mute (nobody hears one node, it still hears"
+                                           " them), pair (a channel's two ends, cut off from each"
+                                           " other only), pair-one-way (one end of a channel doesn't"
+                                           " hear the other).")
     :default  [:one]
     :parse-fn keywords
     :validate [#(every? partition/target-specs %) (str "Must be a subset of " partition/target-specs)]]

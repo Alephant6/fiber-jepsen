@@ -301,6 +301,46 @@
                             " --clock-jump 60-1800 and --force-close-ok-after 30, which excuses only"
                             " the closes that a kill, pause or partition over 30 s explains (open"
                             " question 1 answered \"expected\"); closes after clock steps still fail.")}
+    "partition-one-way"
+            {:priority :extra
+             :plan     (str "Not in the plan. A partition that lets traffic through one way: a"
+                            " node hears nothing while the others still hear it, the reverse, or"
+                            " one end of a channel doesn't hear the other")
+             :args     ["--faults" "partition" "--partition-targets" "deaf,mute,pair-one-way"
+                        "--partition-duration" "10-45" "--pay-kinds" "keysend,invoice"
+                        "--nemesis-interval" "30" "--time-limit" "300" "--ledger"
+                        "--force-close-ok-after" "30"]
+             :differs  (str "Three nodes in a line; keysend and invoice payments, drawn uniformly."
+                            " Each partition is one of three, drawn uniformly: one node drops what"
+                            " the others send it (deaf), the others drop what one node sends"
+                            " (mute), or one end of a channel drops what the other end sends. It"
+                            " lasts 10-45 s, then heals for an exponential 30 s on average, capped"
+                            " at 100 s. TCP delivers the open direction's data and loses every"
+                            " acknowledgement of it, so one end sees its peer's messages and the"
+                            " other sees nothing. Each partition records the iptables rules found"
+                            " on every node, and counts only when they are the one-way ones meant."
+                            " A channel force-closed once a cut had lasted 30 s is excused and"
+                            " reported (--force-close-ok-after 30); one closed otherwise fails the"
+                            " run.")}
+    "partition-pair"
+            {:priority :extra
+             :plan     (str "Not in the plan. A partition that isn't transitive: the two ends of"
+                            " one channel can't reach each other, and both still reach every other"
+                            " node")
+             :args     ["--nodes" "n1,n2,n3,n4,n5,n6" "--topology" "mesh" "--faults" "partition"
+                        "--partition-targets" "pair" "--partition-duration" "20-90"
+                        "--pay-kinds" "keysend,invoice" "--nemesis-interval" "30" "--time-limit" "300"
+                        "--availability-window" "60" "--quiesce" "60" "--probe-routes" "--ledger"
+                        "--force-close-ok-after" "30"]
+             :differs  (str "Six nodes, each with channels to three others (the ring and its"
+                            " diameters), as in c-04 and c-06. Each partition cuts the two ends of"
+                            " one channel, drawn uniformly, off each other for 20-90 s; every other"
+                            " link stays up, so the rest of the network still announces the"
+                            " channel and may route over it, and the two ends can still pay each"
+                            " other over three hops. Baseline and recovery are 60 s of payments"
+                            " each, as in c-04. A channel force-closed once its cut had lasted"
+                            " 30 s is excused and reported (--force-close-ok-after 30); one closed"
+                            " otherwise fails the run.")}
     "power-sync-off"
             {:priority :extra
              :plan     (str "Not in the plan; proposed in a comment on it (open question 3). A node"
