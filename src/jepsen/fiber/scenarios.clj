@@ -337,12 +337,16 @@
                             " token instead of CKB, while nodes are killed and restarted")
              :args     ["--asset" "udt" "--faults" "kill" "--kill-targets" "one"
                         "--process-duration" "5-20" "--pay-kinds" "keysend,invoice"
-                        "--nemesis-interval" "20" "--time-limit" "300" "--ledger"]
+                        "--nemesis-interval" "20" "--nemesis-min-gap" "30" "--time-limit" "300"
+                        "--ledger"]
              :differs  (str "Three nodes in a line, the channels funded with the devnet's simple"
                             " UDT (--asset udt), which only n1-n3 hold; each payment is a keysend"
                             " or an invoice payment in the token, drawn uniformly. A kill"
                             " (SIGKILL) takes one node for 5-20 s, under fnn's 30 s peer deadline,"
-                            " and a closed channel fails the run. Balances, the ledger and the"
+                            " and a closed channel fails the run. A kill starts at least 30 s"
+                            " after the last one's node is back (--nemesis-min-gap 30), since two"
+                            " in a row can add up to an outage longer than the deadline. Balances,"
+                            " the ledger and the"
                             " probes are all in units of the token.")}
     "udt-partition"
             {:priority :extra
@@ -350,9 +354,10 @@
                             " token instead of CKB, while partitions isolate a node")
              :args     ["--asset" "udt" "--faults" "partition" "--partition-targets" "one"
                         "--partition-duration" "5-15" "--pay-kinds" "keysend,invoice"
-                        "--nemesis-interval" "20" "--time-limit" "300" "--ledger"]
+                        "--nemesis-interval" "20" "--nemesis-min-gap" "30" "--time-limit" "300"
+                        "--ledger"]
              :differs  (str "As udt-kill, with a partition that isolates one node for 5-15 s in"
-                            " place of the kill.")}
+                            " place of the kill, and as far apart.")}
     "udt-pause"
             {:priority :extra
              :plan     (str "Not in the plan. UDT channels and payments: every channel holds a"

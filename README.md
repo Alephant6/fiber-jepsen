@@ -140,7 +140,7 @@ A scenario is added to the list once the suite covers it; `test/jepsen/fiber/sce
 scripts/run.sh --compose lazyfs --scenario power-sync-on
 ```
 
-Three more extras run on UDT channels (`--asset udt`, below): `udt-kill` and `udt-partition`, with one node killed for 5-20 s or cut off for 5-15 s at a time, and `udt-pause`, c-08's pauses, which cross fnn's 30 s peer deadline so that UDT channels are force-closed.
+Three more extras run on UDT channels (`--asset udt`, below): `udt-kill` and `udt-partition`, with one node killed for 5-20 s or cut off for 5-15 s at a time and at least 30 s from one fault's end to the next one (`--nemesis-min-gap 30`), and `udt-pause`, c-08's pauses, which cross fnn's 30 s peer deadline so that UDT channels are force-closed.
 
 ### Running a run again (`--seed`)
 

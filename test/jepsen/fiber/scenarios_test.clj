@@ -64,7 +64,11 @@
         (is (nil? (udt/check-opts! (assoc options :nodes ["n1" "n2" "n3"])))))))
   (testing "only the pause scenario crosses fnn's deadline, and excuses the closes that follow"
     (is (= 30 (:force-close-ok-after (:options (parse ["--scenario" "udt-pause"])))))
-    (is (nil? (:force-close-ok-after (:options (parse ["--scenario" "udt-kill"])))))))
+    (is (nil? (:force-close-ok-after (:options (parse ["--scenario" "udt-kill"]))))))
+  (testing "short faults are at least 30 s apart, so that two in a row don't add up to an outage over it"
+    (is (= 30 (:nemesis-min-gap (:options (parse ["--scenario" "udt-kill"])))))
+    (is (= 30 (:nemesis-min-gap (:options (parse ["--scenario" "udt-partition"])))))
+    (is (= 0 (:nemesis-min-gap (:options (parse ["--scenario" "udt-pause"])))))))
 
 (deftest expand
   (testing "a scenario's arguments follow the option, so later ones override them"
