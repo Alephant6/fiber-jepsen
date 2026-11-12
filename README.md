@@ -135,7 +135,7 @@ scripts/run.sh --scenario c-01b                  # as listed: SIGKILL one node, 
 scripts/run.sh --scenario c-08 --time-limit 60   # a shorter run of the same faults
 ```
 
-A scenario is added to the list once the suite covers it; `test/jepsen/fiber/scenarios_test.clj` checks that every listed scenario's arguments parse. Some entries aren't in the plan (priority `extra`): `power-sync-on` and `power-sync-off`, power loss with Fiber's `store_sync_writes` on and off, which need LazyFS in the node image; and `slow-io` (one node's store slow at a time) and `slow-io-kill` (every store slow at once, with kills and restarts meanwhile), which need unreliablefs in it:
+A scenario is added to the list once the suite covers it; `test/jepsen/fiber/scenarios_test.clj` checks that every listed scenario's arguments parse. Some entries aren't in the plan (priority `extra`): `power-sync-on` and `power-sync-off`, power loss with Fiber's `store_sync_writes` on and off, which need LazyFS in the node image; and `slow-io` (one node's store slow at a time) and `slow-io-kill` (every store slow at once, with kills and restarts meanwhile, the kills at least 30 s apart), which need unreliablefs in it:
 
 ```bash
 scripts/run.sh --compose lazyfs --scenario power-sync-on

@@ -90,7 +90,8 @@
       (is (empty? errors))
       (is (= #{:slow-io :kill} (set (:faults options))))
       (is (= [:all] (:slow-io-targets options)))
-      (is (< (second (:process-duration options)) 30))))
+      (is (< (second (:process-duration options)) 30))
+      (is (= 30 (:nemesis-min-gap options)))))
   (testing "a slow disk is no outage: forced closes fail the run"
     (doseq [name ["slow-io" "slow-io-kill"]]
       (let [options (:options (parse ["--scenario" name]))]

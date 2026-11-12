@@ -352,10 +352,12 @@
              :compose  "slowio"
              :args     ["--faults" "slow-io,kill" "--slow-io-targets" "all" "--slow-io-delay" "20-200"
                         "--kill-targets" "one" "--process-duration" "5-20"
-                        "--nemesis-interval" "20" "--time-limit" "300" "--ledger"]
+                        "--nemesis-interval" "20" "--nemesis-min-gap" "30" "--time-limit" "300"
+                        "--ledger"]
              :differs  (str "As slow-io, but every node's store is slowed at once, about half the"
                             " time, and one node at a time is killed and restarted 5 to 20 s later,"
-                            " under fnn's 30 s peer deadline. The kills come at their own times, so"
+                            " under fnn's 30 s peer deadline, the next kill at least 30 s after"
+                            " that (--nemesis-min-gap 30). The kills come at their own times, so"
                             " some restarts land on a slow disk and some on a fast one.")}))
 
 (defn scenario-args
