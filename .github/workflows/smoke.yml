@@ -3,8 +3,7 @@ name: Smoke
 # One short run without faults against a pinned Fiber build: the cluster comes
 # up, payments flow, and every checker passes, --ledger included. It tests this
 # harness, not Fiber; fault runs against Fiber's develop don't gate merges. The
-# steps are those of jepsen.yml, which other repositories can call, so this also
-# keeps that workflow tested.
+# steps are those of jepsen.yml, so this also keeps that workflow tested.
 #
 # Runs on main too, so that main holds the build cache pull requests restore
 # (a cache saved by a pull request's run serves only that pull request).
