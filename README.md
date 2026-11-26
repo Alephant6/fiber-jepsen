@@ -6,6 +6,11 @@ Fiber's unit tests drive nodes in-process, and its integration tests replay scri
 
 **Status: work in progress.** It runs end to end against a CKB devnet; what it has found so far is in [FINDINGS.md](FINDINGS.md).
 
+## Copyright & License Notice
+Copyright (c) 2026 Alephant6. All rights reserved.
+
+This repository is published strictly for personal portfolio, academic research, and demonstration purposes. **No open-source license is granted.** Without prior written permission from the author, you may not use, execute, copy, modify, integrate into internal tooling/CI, or distribute any portion of this codebase or its test artifacts.
+
 ## What it checks
 
 After all faults are healed and the network has had time to converge:
