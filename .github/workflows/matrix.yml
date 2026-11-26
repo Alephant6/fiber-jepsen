@@ -17,9 +17,7 @@ name: Matrix
 #   run's runs of the same scenario: known failures come from a baseline run,
 #   not from a list kept by hand.
 #
-# Manual only for now. When and how it should run (on a schedule against
-# develop, on demand from a Fiber pull request, or inside an existing flow) and
-# where results go are open question 4 to the team.
+# Manual only.
 on:
   workflow_dispatch:
     inputs:

@@ -4,7 +4,7 @@
 
 Fiber's unit tests drive nodes in-process, and its integration tests replay scripted scenarios. This suite does something different. It runs real `fnn` binaries on separate hosts and sends concurrent payments through them while injecting faults: crashes, pauses and network partitions. It then checks invariants over the final state of every node.
 
-**Status: work in progress.** It runs end to end against a CKB devnet; what it has found so far is in [FINDINGS.md](FINDINGS.md).
+**Status: no longer maintained.** Development stopped in November 2026, and the repository is kept as a record of the work. It runs end to end against a CKB devnet; what it found is in [FINDINGS.md](FINDINGS.md).
 
 ## Copyright & License Notice
 Copyright (c) 2026 Alephant6. All rights reserved.
@@ -90,9 +90,11 @@ Why a clock fault: Fiber expires TLCs by wall-clock timestamp (off-chain checks 
   - `verdict.clj` (which checks failed in a stored run, for CI summaries)
   - `schedule.clj` (payments, and the random streams faults draw from, fixed in advance by the run's seed)
 - `instrument/`: the logging-only fnn instrumentation the nonce check needs.
-- `.github/workflows/`: `ci.yml` (lint and unit tests), `smoke.yml` (a run without faults whenever the harness changes), `jepsen.yml` (any arguments against any Fiber commit; other repositories can call it, see [below](#in-another-repositorys-ci)), `matrix.yml` (every scenario against one Fiber commit, one job each, see [below](#the-fault-matrix-matrixyml)) and `failure-summary.yml` (a Copilot note on failed manual runs, see [below](#a-note-on-failed-runs-copilot)); `.github/failure-summary/` has its digest script, prompt and known issues.
+- `.github/workflows/`: `ci.yml` (lint and unit tests), `smoke.yml` (a run without faults whenever the harness changes), `jepsen.yml` (any arguments against any Fiber commit), `matrix.yml` (every scenario against one Fiber commit, one job each, see [below](#the-fault-matrix-matrixyml)) and `failure-summary.yml` (a Copilot note on failed manual runs, see [below](#a-note-on-failed-runs-copilot)); `.github/failure-summary/` has its digest script, prompt and known issues.
 
 ## Running
+
+This section describes how the suite is run. It is not permission to run it: see the [Copyright & License Notice](#copyright--license-notice).
 
 On Linux or WSL2, with Docker, a Fiber checkout, ckb 0.202.0 and ckb-cli in `PATH`:
 
@@ -262,33 +264,15 @@ Each swap is drawn from the seed (`--swap-rate`, `--swap-amount MIN-MAX` in sats
 
 The swap checker is invalid when an order is unfinished or money is still held; when the two records of one side disagree; when one side was paid and the other wasn't (it names who lost: the hub when it paid out and wasn't paid, the user otherwise); when the order's status doesn't match what was paid; when the client saw a success that didn't happen, or a failure for a swap that was paid; when n1's wrapped-BTC balance or bob's Lightning balance moved by other than the paid swaps imply (the order amount includes the hub's fee, and the payer pays its own routing fee); and when a wrapped-BTC or Lightning channel isn't ready, holds TLCs or HTLCs, or its two ends disagree. It is unknown when a record couldn't be read, and when no swap completed. `--ledger` doesn't know about swaps; running both together is untested.
 
-### In another repository's CI
-
-`jepsen.yml` is a reusable workflow, so another repository's workflow can call it, pinned to a commit of this repository. A called workflow sees the caller's `github` context, so a call from Fiber's CI tests that run's Fiber commit, while the harness is checked out at the pinned commit. It needs no secrets and only read access:
-
-```yaml
-jobs:
-  jepsen:
-    if: contains(github.event.pull_request.body || '', '#jepsen-test')
-    permissions:
-      contents: read
-    uses: Alephant6/fiber-jepsen/.github/workflows/jepsen.yml@<commit>
-    with:
-      args: --time-limit 60 --faults kill --kill-targets all --ledger
-      runs: 1
-```
-
-Inputs: `fiber-repository` and `fiber-ref` (default: the caller's repository and commit), `args` for `run.sh`, `runs`, `ckb-version` and `label`. The job summary has one row per run; the job fails if any run's verdict isn't valid, after all runs have finished, and then uploads the store.
-
 ### The fault matrix (`matrix.yml`)
 
-`matrix.yml` runs the scenarios of `scenarios.clj` against one Fiber commit, each in its own job: started by hand from the Actions tab (inputs `fiber-repository`, `fiber-ref`, `scenarios`, `runs`, `upload-store`, `baseline-run`), or called like `jepsen.yml`. `scenarios` is `all`, a priority (`p0`, `p1`, `p2`, `extra`), or scenario names and priorities, comma-separated; `lein run -m jepsen.fiber.scenarios SCENARIOS` prints what it selects. A plan job turns the Fiber ref into a commit, so every job tests the same one, and lists the scenarios; a run without faults builds fnn and the devnet snapshot once into the caches; then every scenario runs `runs` times in a job of its own, all at once, and a report job puts every run's verdict and failed checks into one table, in the run's summary and in the `matrix-report` artifact. A scenario that needs extra hosts names its compose file (`:compose`), which goes to `run.sh --compose`. `runs` defaults to 3: two runs can't tell a scenario that fails half the time from one that always does. With `baseline-run`, the id of an earlier Matrix run (its runs artifacts are kept 14 days), the report adds a column saying which failed checks never failed in that run's runs of the same scenario, so a run on a new Fiber commit shows what is new against a known baseline rather than against a hand-kept list. It doesn't run on a schedule yet: when and how the team wants it run is still open.
+`matrix.yml` runs the scenarios of `scenarios.clj` against one Fiber commit, each in its own job: started by hand from the Actions tab (inputs `fiber-repository`, `fiber-ref`, `scenarios`, `runs`, `upload-store`, `baseline-run`). `scenarios` is `all`, a priority (`p0`, `p1`, `p2`, `extra`), or scenario names and priorities, comma-separated; `lein run -m jepsen.fiber.scenarios SCENARIOS` prints what it selects. A plan job turns the Fiber ref into a commit, so every job tests the same one, and lists the scenarios; a run without faults builds fnn and the devnet snapshot once into the caches; then every scenario runs `runs` times in a job of its own, all at once, and a report job puts every run's verdict and failed checks into one table, in the run's summary and in the `matrix-report` artifact. A scenario that needs extra hosts names its compose file (`:compose`), which goes to `run.sh --compose`. `runs` defaults to 3: two runs can't tell a scenario that fails half the time from one that always does. With `baseline-run`, the id of an earlier Matrix run (its runs artifacts are kept 14 days), the report adds a column saying which failed checks never failed in that run's runs of the same scenario, so a run on a new Fiber commit shows what is new against a known baseline rather than against a hand-kept list. It doesn't run on a schedule.
 
 Each `jepsen.yml` job lists, per run, the checks whose `:valid?` isn't true (`jepsen.fiber.verdict` reads the run's `results.edn`) in its summary, and uploads the runs as tab-separated lines (artifact `<label>-runs`), which the report reads.
 
 ### A note on failed runs (Copilot)
 
-When a Jepsen run started by hand from the Actions tab (later, a scheduled one) fails, the Failure summary workflow (`failure-summary.yml`) digests the store of each failed job, keeping the checkers' output, every close, force-close and panic line and the most frequent warnings, and asks Copilot CLI which checker failed, what the likely cause is, which known issue it looks like and what would confirm it. The note goes to that workflow's job summary, linked to the failed run, and is marked as auto-generated and not verified: the verdicts are the checkers'. It runs with the workflow's own token and is billed to the repository owner's Copilot plan (a report has cost about 0.5 AI credits), never for pull requests, and not for calls from other repositories, which keep only read access. To summarize an earlier failed run, start the workflow by hand with that run's ID. The known issues the model is given are in `.github/failure-summary/known-issues.md`; update them with `FINDINGS.md`.
+When a Jepsen run started by hand from the Actions tab fails, the Failure summary workflow (`failure-summary.yml`) digests the store of each failed job, keeping the checkers' output, every close, force-close and panic line and the most frequent warnings, and asks Copilot CLI which checker failed, what the likely cause is, which known issue it looks like and what would confirm it. The note goes to that workflow's job summary, linked to the failed run, and is marked as auto-generated and not verified: the verdicts are the checkers'. It runs with the workflow's own token and is billed to the repository owner's Copilot plan (a report has cost about 0.5 AI credits), and never for pull requests. To summarize an earlier failed run, start the workflow by hand with that run's ID. The known issues the model is given are in `.github/failure-summary/known-issues.md`; update them with `FINDINGS.md`.
 
 ### Mixed versions, and a tally over several batches
 

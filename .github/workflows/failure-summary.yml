@@ -9,7 +9,7 @@ name: Failure summary
 # It is a workflow of its own, triggered by workflow_run, rather than a step of
 # jepsen.yml, for two reasons. A called workflow can't get more permissions
 # than its caller grants, so a step needing copilot-requests: write would make
-# every caller (smoke.yml, Fiber's CI) grant it and pay for it. And
+# every caller (smoke.yml) grant it and pay for it. And
 # workflow_run fires once per watched run, so a run with many jobs gets one
 # report. The job below admits only manual and scheduled runs, never pull
 # requests, so a fork's pull request can't put text in front of the model.

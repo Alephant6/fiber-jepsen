@@ -5,18 +5,9 @@ name: Jepsen
 # snapshot (once per version of Fiber's test files, then cached), runs the test
 # `runs` times, each with its own seed, and writes a table of the runs to the job summary. A run whose verdict isn't valid fails the job once all runs are done.
 #
-# smoke.yml calls it, it can be run by hand, and another repository's workflow
-# (Fiber's CI, say) can call it pinned to a commit of this repository:
-#
-#   jobs:
-#     jepsen:
-#       uses: Alephant6/fiber-jepsen/.github/workflows/jepsen.yml@<commit>
-#       with:
-#         args: --time-limit 60 --faults kill --ledger
-#
-# A called workflow sees the caller's github context, so such a call tests the
-# caller's commit by default. The harness is checked out at the commit this file
-# was called at (job.workflow_sha), whoever the caller is.
+# smoke.yml calls it, and it can be run by hand from the Actions tab. The
+# harness is checked out at the commit this file was called at
+# (job.workflow_sha).
 on:
   workflow_call:
     inputs:
